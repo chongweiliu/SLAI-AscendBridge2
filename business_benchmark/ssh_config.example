@@ -1,0 +1,59 @@
+# Copy the relevant parts into your local ~/.ssh/config.
+# Do not commit real HostName / User / IdentityFile values back into the repo.
+
+Host cuda-remote
+  HostName <cuda-server-ip>
+  Port <ssh-port>
+  User <ssh-user>
+  IdentityFile ~/.ssh/<your-private-key>
+  ServerAliveInterval 30
+  ServerAliveCountMax 120
+  StrictHostKeyChecking accept-new
+
+# Recommended convention
+# - Use the host alias `cuda-remote` in docs, scripts, and manual commands.
+# - Keep the real connection details only in ~/.ssh/config.
+# - If future automation needs SSH parameters, prefer accepting a host alias
+#   instead of hardcoding HostName / Port / User inside the repository.
+
+# Recommended remote project root (documented convention only; not an SSH config key)
+# export SLAI_REMOTE_PROJECT_ROOT=/path/to/remote/SLAI-AscendBridgeNext
+
+# Recommended matching fields in business_benchmark_config.json
+# {
+#   "remote_ssh_host": "cuda-remote",
+#   "remote_project_root": "$SLAI_REMOTE_PROJECT_ROOT"
+# }
+
+# Example commands
+# uv run python business_benchmark/scripts/business_benchmark_manager.py sync-remote-workspace --model "org/name" --ssh-host cuda-remote --remote-project-root "$SLAI_REMOTE_PROJECT_ROOT"
+# ssh cuda-remote 'cd "$SLAI_REMOTE_PROJECT_ROOT/adaptations/<name>" && uv sync --extra cuda && CUDA_VISIBLE_DEVICES=0 uv run --extra cuda python business_run.py --scenario cuda_baseline'
+# uv run python business_benchmark/scripts/business_benchmark_manager.py fetch-remote-artifacts --model "org/name" --ssh-host cuda-remote --remote-project-root "$SLAI_REMOTE_PROJECT_ROOT"
+
+# How to tell the agent next time
+# - Minimal:
+#   remote_ssh_host=cuda-remote
+#   remote_project_root=$SLAI_REMOTE_PROJECT_ROOT
+#
+# - Or one-line natural language:
+#   用 cuda-remote，仓库在 $SLAI_REMOTE_PROJECT_ROOT
+#
+# Best practice:
+# - Keep the real host/port/user only in ~/.ssh/config
+# - Tell the agent only the alias + remote project root
+# - Do not put real SSH endpoints into repo .env / README / committed JSON
+
+# Put the following environment variables into the remote ~/.zshenv
+# so that non-interactive `ssh '...'` commands inherit them.
+#
+# export UV_LINK_MODE=symlink
+# export UV_CACHE_DIR=$HOME/.cache/uv
+# export HF_ENDPOINT=https://hf-mirror.com
+#
+# Notes:
+# - Non-interactive SSH commands do not reliably read ~/.zshrc.
+# - Business CUDA runs must use the adaptation-local uv environment with
+#   `uv run --extra cuda ...`; do not bypass extra selection with
+#   `.venv/bin/python`.
+# - Any path written into business_benchmark_config.json must be a real
+#   remote absolute path, never a local /mnt/... path.

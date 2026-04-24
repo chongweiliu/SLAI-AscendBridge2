@@ -1,0 +1,6 @@
+{
+  "name": "slai-ascendbridgenext",
+  "dependencies": {
+    "sql.js": "^1.13.0"
+  }
+}

@@ -1,0 +1,22 @@
+{
+  "reason_code": "artifact_missing",
+  "retryable": true,
+  "recommended_action": "Acquire a real local pretrained snapshot with config/tokenizer/weights under the adaptation-private models directory, then rebuild stage-2/stage-3 from scratch.",
+  "evidence": {
+    "repo_snapshot_path": "adaptations/aloqas_gpt2_aloqas_scientific_papers/models/models--ALOQAS--gpt2-aloqas-scientific-papers/snapshots/646546424a368fe02dde02503486f8f5aeca3fed",
+    "snapshot_top_entries": [
+      "Livrables"
+    ],
+    "missing_required_files": [
+      "config.json",
+      "model.safetensors",
+      "pytorch_model.bin",
+      "tokenizer.json",
+      "vocab.json",
+      "merges.txt"
+    ],
+    "probe_log": "/tmp/aloqas_probe.log",
+    "probe_failure": "accuracy_run.py --use-pretrained falls through to network download because local pretrained files are absent"
+  },
+  "next_step": "Leave optimization pending, do not fabricate a config-only stage-3 result, and continue to the next pending model."
+}

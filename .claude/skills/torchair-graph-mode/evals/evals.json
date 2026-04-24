@@ -1,0 +1,44 @@
+{
+    "skill_name": "torchair-graph-mode",
+    "evals": [
+        {
+            "id": 1,
+            "prompt": "我有一个已经在昇腾 NPU 上用 Eager 模式跑通的 PyTorch 模型，帮我改成 TorchAir 图模式。请给我最小可运行代码，并说明 import 顺序、`torch.compile` 应该怎么接 `torchair.get_npu_backend`，另外顺手告诉我什么时候该用 `max-autotune`，什么时候该用 `reduce-overhead`。",
+            "expected_output": "回答应给出最小 TorchAir 图模式代码模板，明确 `import torch_npu` 早于 `import torchair`，展示 `CompilerConfig`、`get_npu_backend` 和 `torch.compile` 的组合方式，并对 `max-autotune` 与 `reduce-overhead` 的适用场景做出简明区分。",
+            "files": [],
+            "assertions": [
+                "输出明确说明必须先导入 `torch_npu`，再导入 `torchair`。",
+                "输出包含使用 `torchair.CompilerConfig()`、`torchair.get_npu_backend(...)` 和 `torch.compile(..., backend=npu_backend)` 的最小代码或等价代码。",
+                "输出指出默认应优先考虑 `max-autotune`，并说明它适合更完整的图优化、动态 shape 或 GE 图能力相关场景。",
+                "输出说明 `reduce-overhead` 更适合图结构稳定、希望降低 Host 调度开销的场景。",
+                "输出提醒 TorchAir 图模式前应先确认模型在 NPU Eager 模式下可运行。"
+            ]
+        },
+        {
+            "id": 2,
+            "prompt": "模型里有 Flash Attention 类算子，我想让 TorchAir 编译后的 GE 图走静态下沉，但现在编译出来还是动态图。请基于 TorchAir 7.3.0 图模式文档告诉我应该怎么配，以及排查时先看哪些信号。",
+            "expected_output": "回答应指出含 FA 类值依赖算子时，如果目标是 GE 静态下沉，关键组合是 `dynamic=True`、对相关输入执行 `torch._dynamo.mark_static(...)`，以及开启 `config.experimental_config.tiling_schedule_optimize = True`。还应说明 dump 图中若出现 `-1` 维度，通常意味着对应输入未静态化成功。",
+            "files": [],
+            "assertions": [
+                "输出明确建议在 `torch.compile` 中使用 `dynamic=True`。",
+                "输出明确建议对关键输入使用 `torch._dynamo.mark_static(...)`。",
+                "输出明确建议开启 `config.experimental_config.tiling_schedule_optimize = True`。",
+                "输出说明可以通过查看 dump 图或 GE 图中的输入 shape 是否含 `-1` 来判断输入是否仍为动态。",
+                "输出把排查重点放在静态化条件是否满足，而不是泛泛建议重装环境。"
+            ]
+        },
+        {
+            "id": 3,
+            "prompt": "TorchAir 图模式里我同时遇到两个报错：`torch.xxx ge_converter is not implemented!` 和 `tensor's device must be 'meta'`。请分别告诉我最可能的原因、修复方向，并给我一个最小的 Meta / Converter 示例代码骨架。",
+            "expected_output": "回答应将第一个报错归因为缺失对应 Converter，将第二个报错归因为 Meta 推导函数返回了非 `meta` 设备的 Tensor。输出应给出一个最小 Meta 注册示例（返回 `device=\"meta\"` 的 tensor）和一个最小 Converter 注册骨架示例。",
+            "files": [],
+            "assertions": [
+                "输出明确说明 `ge_converter is not implemented` 的直接修复方向是补对应的 `register_fx_node_ge_converter(...)`。",
+                "输出明确说明 `tensor's device must be 'meta'` 通常是 Meta 注册函数返回了 CPU 或其他非 `meta` 设备的 tensor。",
+                "输出包含一个 Meta 示例，并显式出现 `device=\"meta\"` 或等价写法。",
+                "输出包含一个 Converter 示例骨架，并显式出现 `register_fx_node_ge_converter`。",
+                "输出把两个报错区分开来解释，而不是混为一个问题。"
+            ]
+        }
+    ]
+}

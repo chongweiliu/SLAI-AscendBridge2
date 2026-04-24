@@ -1,0 +1,17 @@
+**本次执行任务**：仅处理 board 中 `adaptation_status='completed' AND benchmark_status='pending'` 的模型，对这些模型严格执行 benchmark 评测规则生成 `accuracy_run.py`（如果已经存在也要严格检查是否合规，必须通过 `benchmark/scripts/check_accuracy_run.py`；只需要跑通，样本跑 10 个即可，不需要使用 pretrained 模型，同时严禁使用 CPU 推理；只对 100B 以下模型推理，以上直接 skip）；协调 7 个 benchmark-runner 并行执行；不抓新模型、不执行新适配。严格遵守看板更新、Git 自动提交及心跳清理机制。所有符合条件的 benchmark pending 处理完毕前不得结束。
+
+**任务筛选条件**（重要）：
+```sql
+SELECT model_id FROM models
+WHERE adaptation_status = 'completed'
+  AND benchmark_status = 'pending'
+```
+
+**常见错误**：不要只用 `benchmark_status='pending'` 筛任务；未完成适配（`adaptation_status!='completed'`）的模型不得进入 benchmark。
+**禁止提前退出**：只要 `adaptation_status='completed' AND benchmark_status='pending'` 的任务仍大于 0，就严禁退出、严禁输出“任务执行成功完成”、严禁仅汇报“若干 benchmark-runner 已启动”；必须持续循环执行“读取收件箱 -> 验收完成消息 -> 回收超时任务 -> 给空闲 benchmark-runner 重新分配 pending 任务”，直到 benchmark pending 清零。
+
+**完成判定强调**：不得因为磁盘上已经存在 `accuracy_run.py`、`outputs_*.pt`、`benchmark_metrics_*.json`、`trace_*.json`，或仅因 `check_accuracy_run.py` 通过，就直接把 benchmark 记为 `completed`；必须由对应 benchmark-runner 发出 `result=completed`，并在核验产物后通过 `scripts/board_ops.py` 更新看板。
+
+**目录边界强调**：所有有副作用的操作必须只发生在分配消息里的 `adaptation_path`；不得由 `model_id` 自行推导路径，不得把模型缓存写到项目根 `models/`。
+**再次强调**：必须每轮读取收件箱 ~/.claude/teams/团队名/inboxes/team-lead.json，否则无法接收消息。
+**执行要求**：请使用 teams 模式并严格按照上述定义执行本次任务。所有 benchmark pending 处理完毕前不得结束。

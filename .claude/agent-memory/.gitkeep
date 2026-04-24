@@ -1,0 +1,2 @@
+# 子智能体持久记忆目录 (memory: project)
+# adapter、team-lead、model-crawler 的记忆由 Claude 写入 MEMORY.md 等文件

@@ -1,0 +1,2680 @@
+<!DOCTYPE html>
+<html :lang="currentLang">
+
+<head>
+    <!-- Security Headers -->
+    <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self' https://unpkg.com https://cdn.tailwindcss.com 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; connect-src 'self'; img-src 'self' data:; frame-ancestors 'none';">
+    <meta http-equiv="X-Content-Type-Options" content="nosniff">
+    <meta http-equiv="X-Frame-Options" content="DENY">
+
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SLAI-AscendBridgeNext Board</title>
+    <link rel="icon" href="assets/logo_s.svg" type="image/svg+xml">
+
+    <!-- Dependencies -->
+    <script src="https://unpkg.com/vue@3.5.13/dist/vue.global.js"></script>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="assets/sql-wasm.js"></script>
+    <link
+        href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&family=Crimson+Pro:wght@400;500;600;700&display=swap"
+        rel="stylesheet">
+    <script src="https://unpkg.com/lucide@0.474.0/dist/umd/lucide.js"></script>
+
+    <script>
+        tailwind.config = {
+            theme: {
+                extend: {
+                    fontFamily: {
+                        heading: ['Crimson Pro', 'serif'],
+                        body: ['Atkinson Hyperlegible', 'sans-serif'],
+                    },
+                    colors: {
+                        slai: {
+                            blue: '#881E55',   // Primary brand color
+                            navy: '#262626',   // Decoration 04 - Headings
+                            text: '#595959',   // Paragraph Text
+                            pink: '#e27dbe',   // Decoration 01
+                            magenta: '#d14aa4',// Decoration 02
+                            slate: '#F8FAFC',
+                            accent: '#22C55E'
+                        },
+                        // 与主色 #881E55 协调的状态色
+                        status: {
+                            success: { 50: '#f0fdf4', 100: '#dcfce7', 500: '#15803d', 600: '#15803d', 700: '#166534' },
+                            progress: { 50: '#fdf2f8', 100: '#fce7f3', 500: '#881E55', 600: '#881E55', 700: '#6b1843' },
+                            warning: { 50: '#fffbeb', 100: '#fef3c7', 500: '#b45309', 600: '#b45309', 700: '#92400e' },
+                            error: { 50: '#fef2f2', 100: '#fee2e2', 500: '#b91c1c', 600: '#b91c1c', 700: '#991b1b' }
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        [v-cloak] {
+            display: none;
+        }
+
+        body {
+            font-family: 'Atkinson Hyperlegible', sans-serif;
+        }
+
+        h1,
+        h2,
+        h3 {
+            font-family: 'Crimson Pro', serif;
+        }
+
+        .bento-card {
+            transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            border: 1px solid rgba(226, 232, 240, 0.8);
+        }
+
+        .bento-card:hover {
+            transform: translateY(-4px);
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.05);
+            border-color: #881E55;
+        }
+
+        .stage-metric-soft {
+            background: #fffdfd;
+            border: 1px solid #f7ebf1;
+            min-width: 0;
+        }
+
+        .stage-metric-label {
+            font-size: 10px;
+            line-height: 1.1;
+            white-space: nowrap;
+            letter-spacing: -0.01em;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .stage-metric-soft .stage-metric-label {
+            color: #ad728c;
+        }
+
+        .stage-metric-soft .stage-metric-value {
+            color: #86556d;
+        }
+
+        .stage-metric-soft-active {
+            background: #fffbfd;
+            border: 1px solid #f6e8f0;
+            min-width: 0;
+        }
+
+        .stage-metric-soft-active .stage-metric-label {
+            color: #aa6f89;
+        }
+
+        .stage-metric-soft-active .stage-metric-value {
+            color: #84546c;
+        }
+
+        .stage-metric-soft-terminal {
+            background: #fffdfd;
+            border: 1px solid #f6ebf0;
+            min-width: 0;
+        }
+
+        .stage-metric-soft-terminal .stage-metric-label {
+            font-size: 9px;
+            letter-spacing: -0.02em;
+            color: #a9768d;
+        }
+
+        .stage-metric-soft-terminal .stage-metric-value {
+            color: #81556a;
+        }
+
+        .status-badge {
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.025em;
+        }
+
+        @keyframes human-review-shimmer {
+
+            0%,
+            100% {
+                background-position: 140% 50%;
+                box-shadow: 0 0 0 rgba(245, 158, 11, 0);
+            }
+
+            45% {
+                background-position: -40% 50%;
+                box-shadow: 0 0 0 rgba(245, 158, 11, 0);
+            }
+
+            55% {
+                background-position: -40% 50%;
+                box-shadow: 0 0 0.85rem rgba(245, 158, 11, 0.14);
+            }
+        }
+
+        @keyframes human-review-star-drift {
+
+            0%,
+            100% {
+                transform: translateY(0) scale(1);
+            }
+
+            50% {
+                transform: translateY(-0.5px) scale(1.04);
+            }
+        }
+
+        .human-review-badge {
+            position: relative;
+            overflow: hidden;
+            background-image: linear-gradient(120deg,
+                    rgba(255, 251, 235, 1) 0%,
+                    rgba(255, 251, 235, 1) 42%,
+                    rgba(255, 244, 214, 0.96) 48%,
+                    rgba(255, 255, 255, 0.98) 50%,
+                    rgba(255, 244, 214, 0.96) 52%,
+                    rgba(255, 251, 235, 1) 58%,
+                    rgba(255, 251, 235, 1) 100%);
+            background-size: 240% 100%;
+            background-position: 140% 50%;
+        }
+
+        .human-review-badge i {
+            transform-origin: 50% 55%;
+        }
+
+        .human-review-badge:hover {
+            animation: human-review-shimmer 1.8s ease-out 1;
+        }
+
+        .human-review-badge:hover i {
+            animation: human-review-star-drift 0.9s ease-in-out 2;
+        }
+
+        ::-webkit-scrollbar {
+            width: 8px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: #f1f5f9;
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 4px;
+        }
+
+        /* 翻页最佳实践：整页短暂淡入淡出，无方向、无单卡动画，快速不花哨 */
+        .page-fade-enter-active,
+        .page-fade-leave-active {
+            transition: opacity 0.15s ease;
+        }
+
+        .page-fade-enter-from,
+        .page-fade-leave-to {
+            opacity: 0;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+
+            .page-fade-enter-active,
+            .page-fade-leave-active {
+                transition: none;
+            }
+        }
+
+        @keyframes flash-update {
+            0% {
+                background-color: #fff;
+            }
+
+            50% {
+                background-color: #fdf2f8;
+                border-color: #881E55;
+            }
+
+            100% {
+                background-color: #fff;
+                border-color: rgba(226, 232, 240, 0.8);
+            }
+        }
+
+        .updated-flash {
+            animation: flash-update 1.5s ease-out;
+        }
+
+        @keyframes breathing {
+
+            0%,
+            100% {
+                transform: scale(1);
+                opacity: 1;
+            }
+
+            50% {
+                transform: scale(1.5);
+                opacity: 0.5;
+            }
+        }
+
+        .animate-breathing {
+            animation: breathing 2s ease-in-out infinite;
+        }
+
+        @keyframes agent-float {
+
+            0%,
+            100% {
+                transform: translateY(0);
+            }
+
+            50% {
+                transform: translateY(-3px);
+            }
+        }
+
+        @keyframes agent-halo {
+
+            0%,
+            100% {
+                opacity: 0.18;
+                transform: scale(0.92);
+            }
+
+            50% {
+                opacity: 0.32;
+                transform: scale(1.04);
+            }
+        }
+
+        @keyframes agent-snooze {
+            0% {
+                opacity: 0;
+                transform: translate(0, 4px) scale(0.8);
+            }
+
+            20% {
+                opacity: 0.75;
+            }
+
+            100% {
+                opacity: 0;
+                transform: translate(8px, -14px) scale(1.05);
+            }
+        }
+
+        .agent-avatar-active {
+            animation: agent-float 2.4s ease-in-out infinite;
+        }
+
+        .agent-avatar-halo {
+            animation: agent-halo 2.4s ease-in-out infinite;
+        }
+
+        .agent-snooze {
+            position: absolute;
+            right: -2px;
+            top: -6px;
+            font-size: 10px;
+            font-weight: 700;
+            line-height: 1;
+            color: #881E55;
+            pointer-events: none;
+            user-select: none;
+            animation: agent-snooze 2.6s ease-out infinite;
+        }
+
+        .agent-snooze-2 {
+            right: -10px;
+            top: -14px;
+            font-size: 8px;
+            opacity: 0;
+            animation-delay: 1.1s;
+        }
+
+        @keyframes agent-task-dot {
+
+            0%,
+            80%,
+            100% {
+                opacity: 0.2;
+                transform: translateY(0);
+            }
+
+            40% {
+                opacity: 1;
+                transform: translateY(-1px);
+            }
+        }
+
+        @keyframes lead-twinkle {
+
+            0%,
+            100% {
+                opacity: 0.35;
+                transform: scale(0.9) rotate(-8deg);
+            }
+
+            50% {
+                opacity: 1;
+                transform: scale(1.08) rotate(8deg);
+            }
+        }
+
+        .agent-task-dots {
+            display: inline-flex;
+            align-items: center;
+            gap: 2px;
+            margin-left: 4px;
+        }
+
+        .agent-task-dots span {
+            width: 3px;
+            height: 3px;
+            border-radius: 9999px;
+            background: currentColor;
+            opacity: 0.25;
+            animation: agent-task-dot 1.2s infinite ease-in-out;
+        }
+
+        .agent-task-dots span:nth-child(2) {
+            animation-delay: 0.16s;
+        }
+
+        .agent-task-dots span:nth-child(3) {
+            animation-delay: 0.32s;
+        }
+
+        .lead-twinkle {
+            position: absolute;
+            left: -6px;
+            top: -8px;
+            font-size: 11px;
+            line-height: 1;
+            color: #f59e0b;
+            text-shadow: 0 0 12px rgba(245, 158, 11, 0.35);
+            pointer-events: none;
+            user-select: none;
+            animation: lead-twinkle 2.2s ease-in-out infinite;
+        }
+
+        .line-clamp-3-custom {
+            display: -webkit-box;
+            line-clamp: 3;
+            -webkit-line-clamp: 3;
+            -webkit-box-orient: vertical;
+            overflow: hidden;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+
+            .agent-avatar-active,
+            .agent-avatar-halo,
+            .agent-snooze,
+            .animate-breathing,
+            .agent-task-dots span,
+            .lead-twinkle,
+            .human-review-badge,
+            .human-review-badge i {
+                animation: none !important;
+            }
+        }
+    </style>
+</head>
+
+<body id="app" class="bg-[#FBFCFD] min-h-screen text-slai-navy" v-cloak>
+
+    <!-- Navbar -->
+    <nav class="bg-white/80 backdrop-blur-md sticky top-0 z-50 border-b border-slate-200">
+        <div class="max-w-7xl mx-auto px-6">
+            <div class="flex justify-between h-20 items-center">
+                <div class="flex items-center space-x-4">
+                    <div class="flex items-center gap-3">
+                        <img src="assets/logo_s.svg" alt="SLAI" class="h-10 w-10 shrink-0" width="40" height="40">
+                        <div>
+                            <h1 class="text-xl font-bold tracking-tight text-slai-navy leading-none">SLAI</h1>
+                            <p class="text-[10px] uppercase tracking-[0.2em] text-slai-blue font-bold mt-1">Ascend
+                                Adaptation</p>
+                        </div>
+                    </div>
+                    <div class="h-8 w-px bg-slate-200 mx-4"></div>
+                    <span class="text-lg font-medium text-slate-600 hidden md:block">{{ t.navTitle }}</span>
+                </div>
+
+                <div class="flex items-center space-x-6">
+                    <!-- Language Switcher -->
+                    <div class="flex items-center bg-slate-100 p-1 rounded-xl border border-slate-200">
+                        <button @click="setLanguage('en')"
+                            :class="currentLang === 'en' ? 'bg-white shadow-sm text-slai-blue' : 'text-slate-400'"
+                            class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all">EN</button>
+                        <button @click="setLanguage('zh')"
+                            :class="currentLang === 'zh' ? 'bg-white shadow-sm text-slai-blue' : 'text-slate-400'"
+                            class="px-3 py-1.5 rounded-lg text-xs font-bold transition-all">中</button>
+                    </div>
+
+                    <a :href="'https://www.slai.edu.cn/'" target="_blank" rel="noopener noreferrer"
+                        class="text-slate-500 hover:text-slai-blue transition-all flex items-center font-medium">
+                        <i data-lucide="external-link" class="w-4 h-4 mr-2"></i> {{ t.officialWebsite }}
+                    </a>
+                </div>
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Content -->
+    <main class="max-w-7xl mx-auto px-6 py-10">
+
+        <!-- Header Section -->
+        <div class="flex flex-col md:flex-row md:items-end justify-between mb-12 gap-6">
+            <div>
+                <h2 class="text-4xl font-bold text-slai-navy mb-2">{{ t.headerTitle }}</h2>
+                <p class="text-slate-500 max-w-2xl font-medium">{{ t.headerDesc }}</p>
+                <p class="mt-2 text-slate-500 text-sm">
+                    <span class="inline-flex items-center px-2 py-1 bg-slate-100 rounded text-xs">
+                        <i data-lucide="clock" class="w-3 h-3 inline mr-1"></i> {{ t.lastUpdated }}: {{ lastUpdated }}
+                    </span>
+                </p>
+            </div>
+
+            <div class="flex flex-wrap items-center gap-3">
+                <div class="relative group">
+                    <div class="absolute inset-y-0 left-0 pl-4 flex items-center pointer-events-none">
+                        <i data-lucide="search"
+                            class="w-4 h-4 text-slate-400 group-focus-within:text-slai-blue transition-colors"></i>
+                    </div>
+                    <input type="text" v-model.trim="searchQuery" maxlength="100"
+                        class="block w-full md:w-80 pl-11 pr-4 py-3 bg-white border border-slate-200 rounded-2xl leading-5 placeholder-slate-400 focus:outline-none focus:ring-4 focus:ring-slai-blue/10 focus:border-slai-blue transition-all shadow-sm"
+                        :placeholder="t.searchPlaceholder">
+                </div>
+                <div class="flex items-center gap-2">
+                    <label for="sort-select" class="text-sm font-bold text-slate-500 whitespace-nowrap">{{ t.sortLabel
+                        }}:</label>
+                    <div class="relative">
+                        <select id="sort-select" v-model="sortKey"
+                            class="pl-4 pr-10 py-3 bg-white border border-slate-200 rounded-2xl text-sm font-medium text-slai-navy focus:outline-none focus:ring-4 focus:ring-slai-blue/10 focus:border-slai-blue transition-all shadow-sm appearance-none cursor-pointer min-w-[10rem]"
+                            :aria-label="t.sortLabel">
+                            <option value="updated_desc">{{ t.sortNewestFirst }}</option>
+                            <option value="updated_asc">{{ t.sortOldestFirst }}</option>
+                            <option value="name_asc">{{ t.sortNameAz }}</option>
+                            <option value="name_desc">{{ t.sortNameZa }}</option>
+                            <option value="status_asc">{{ t.sortByStatus }}</option>
+                            <option value="duration_desc">{{ t.sortDurationLongest }}</option>
+                            <option value="duration_asc">{{ t.sortDurationShortest }}</option>
+                        </select>
+                        <div class="pointer-events-none absolute inset-y-0 right-3 flex items-center text-slate-400">
+                            <i data-lucide="chevron-down" class="w-4 h-4"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Team Gallery Section -->
+        <div class="mb-12">
+            <div class="flex flex-col mb-6">
+                <h3 class="text-2xl font-bold text-slai-navy">{{ t.teamTitle }}</h3>
+                <p class="text-slate-500 text-sm font-medium">{{ t.teamDesc }}</p>
+                <div class="mt-3 flex flex-wrap items-center gap-2 text-[11px] font-semibold text-slate-500">
+                    <span class="uppercase tracking-[0.22em] text-[10px] text-slate-400">{{ t.teamLegendLabel }}</span>
+                    <span
+                        class="inline-flex items-center gap-2 rounded-full border border-status-success-100 bg-status-success-50 px-3 py-1 text-status-success-700">
+                        <span class="w-2 h-2 rounded-full bg-status-success-500"></span>{{ t.teamLegendAdaptation }}
+                    </span>
+                    <span
+                        class="inline-flex items-center gap-2 rounded-full border border-teal-100 bg-teal-50 px-3 py-1 text-teal-700">
+                        <span class="w-2 h-2 rounded-full bg-teal-600"></span>{{ t.teamLegendBenchmark }}
+                    </span>
+                    <span
+                        class="inline-flex items-center gap-2 rounded-full border border-indigo-100 bg-indigo-50 px-3 py-1 text-indigo-700">
+                        <span class="w-2 h-2 rounded-full bg-indigo-600"></span>{{ t.teamLegendOptimization }}
+                    </span>
+                    <span
+                        class="inline-flex items-center gap-2 rounded-full border border-violet-100 bg-violet-50 px-3 py-1 text-violet-700">
+                        <span class="w-2 h-2 rounded-full bg-violet-600"></span>{{ t.teamLegendBusinessBenchmark }}
+                    </span>
+                </div>
+            </div>
+            <div v-if="agentsList.length > 0" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <div v-for="agent in agentsList" :key="agent.id"
+                    class="bg-white p-6 rounded-[2rem] border border-slate-100 shadow-sm flex items-center space-x-5 bento-card">
+                    <div class="relative shrink-0 group cursor-help">
+                        <span v-if="getAgentAvatarInfo(agent).mode === 'active'"
+                            class="agent-avatar-halo absolute inset-0 rounded-2xl bg-white/40"></span>
+                        <span v-if="isLeadAgent(agent)" class="lead-twinkle">✦</span>
+                        <div
+                            :class="['relative p-4 rounded-2xl text-white shadow-lg shadow-slai-blue/10 transition-transform duration-300', agent.color, getAgentAvatarInfo(agent).mode === 'active' ? 'agent-avatar-active' : '']">
+                            <i :data-lucide="agent.icon"
+                                :class="['w-6 h-6', getAgentAvatarInfo(agent).mode === 'offline' ? 'opacity-70' : '']"></i>
+                        </div>
+                        <span v-if="getAgentAvatarInfo(agent).mode === 'idle'" class="agent-snooze">z</span>
+                        <span v-if="getAgentAvatarInfo(agent).mode === 'idle'"
+                            class="agent-snooze agent-snooze-2">z</span>
+                        <div
+                            class="absolute left-0 bottom-full mb-2 hidden group-hover:block z-20 w-52 p-3 rounded-2xl shadow-xl border border-slate-200 bg-white">
+                            <p class="text-[11px] leading-relaxed text-slate-600">{{ getAgentHoverHint(agent) }}</p>
+                        </div>
+                    </div>
+                    <div class="min-w-0 flex-1">
+                        <div class="flex flex-wrap items-start gap-2 mb-1">
+                            <h4 class="text-lg font-bold text-slai-navy leading-tight break-words flex-1 min-w-0"
+                                :title="agent.name">
+                                {{ agent.name }}
+                            </h4>
+                            <span v-if="agent.badge"
+                                :class="['px-2 py-0.5 rounded-lg text-[9px] border font-black tracking-widest uppercase shrink-0', agent.badge.class]">
+                                {{ agent.badge.text }}
+                            </span>
+                        </div>
+                        <p class="text-xs font-bold text-slate-400 uppercase tracking-widest break-words">
+                            {{ t[agent.roleKey] }}
+                        </p>
+                        <div class="flex items-center mt-2 space-x-1">
+                            <span
+                                :class="['w-2 h-2 rounded-full', getAgentStatusInfo(agent).color, getAgentStatusInfo(agent).pulse ? 'animate-breathing' : '']"></span>
+                            <span class="text-[10px] font-bold text-slate-400 uppercase tracking-tight">{{
+                                getAgentStatusInfo(agent).label }}</span>
+                        </div>
+                        <p v-if="agent.current_task" class="text-[9px] text-slate-400 mt-1 line-clamp-1 italic">
+                            {{ agent.current_task }}<span v-if="getAgentStatusInfo(agent).key === 'active'"
+                                class="agent-task-dots"
+                                aria-hidden="true"><span></span><span></span><span></span></span>
+                        </p>
+                    </div>
+                </div>
+            </div>
+            <div v-else class="bg-white/50 border border-dashed border-slate-200 rounded-[2rem] p-8 text-center">
+                <p class="text-slate-400 text-sm font-medium italic">{{ t.noActiveAgents }}</p>
+            </div>
+        </div>
+
+        <!-- Stats Section -->
+        <div class="mb-12">
+            <div class="flex flex-col mb-6">
+                <h3 class="text-2xl font-bold text-slai-navy">{{ t.statsTitle }}</h3>
+                <p class="text-slate-500 text-sm font-medium">{{ t.statsDesc }}</p>
+            </div>
+            <div class="space-y-6">
+                <div class="bg-white rounded-[2rem] shadow-sm border border-slate-100 p-7 relative overflow-hidden">
+                    <p class="text-[10px] font-bold text-slate-400 uppercase tracking-[0.22em]">{{ t.statTotal }}</p>
+                    <div class="mt-4 flex items-end justify-between gap-4">
+                        <div>
+                            <p class="text-4xl font-black text-slai-navy leading-none">{{ stats.total }}</p>
+                            <p class="text-sm text-slate-500 mt-2">{{ t.statsPrimaryFootnote }}</p>
+                        </div>
+                        <div class="px-4 py-3 rounded-2xl bg-slate-50 border border-slate-100 min-w-[132px] text-right">
+                            <p class="text-[10px] font-bold uppercase tracking-wider text-slate-400">{{ t.statCoverage
+                                }}</p>
+                            <p class="text-xl font-black text-slai-navy">{{ formatRatio(stats.pipelineCompleted,
+                                stats.total) }}
+                            </p>
+                            <p class="text-[11px] text-slate-500 mt-1">{{ t.pipelineCompletedLabel }}</p>
+                        </div>
+                    </div>
+                    <div class="mt-5 pt-4 border-t border-slate-100">
+                        <p class="text-[10px] font-bold text-slate-400 uppercase tracking-[0.2em] mb-3">{{
+                            t.pipelineLegendTitle }}</p>
+                        <div class="flex flex-wrap items-center gap-2">
+                            <div class="relative group">
+                                <span
+                                    class="inline-flex items-center px-2.5 py-1 rounded-lg text-[10px] font-bold border bg-status-success-50 text-status-success-600 border-status-success-100 cursor-help">
+                                    <i data-lucide="test-tube-2" class="w-3 h-3 mr-1.5"></i>{{ t.dryRunBadge }}<span
+                                        v-if="stats.adaptation.completed > 0" class="ml-1 text-status-success-700">({{
+                                        stats.adaptation.completed }})</span>
+                                </span>
+                                <div
+                                    class="absolute left-0 bottom-full mb-2 hidden group-hover:block z-20 w-56 p-3 rounded-2xl shadow-xl border border-status-success-100 bg-white">
+                                    <p class="text-[11px] leading-relaxed text-slate-600">{{
+                                        t.pipelineLegendAdaptationHint
+                                        }}</p>
+                                </div>
+                            </div>
+                            <i data-lucide="chevron-right" class="w-3.5 h-3.5 text-slate-300"></i>
+                            <div class="relative group">
+                                <span
+                                    class="inline-flex items-center px-2.5 py-1 rounded-lg text-[10px] font-bold border bg-teal-50 text-teal-600 border-teal-200 cursor-help">
+                                    <i data-lucide="bar-chart-2" class="w-3 h-3 mr-1.5"></i>{{ t.benchmarkCompleted
+                                    }}<span v-if="stats.benchmark.completed > 0" class="ml-1 text-teal-700">({{
+                                        stats.benchmark.completed }})</span>
+                                </span>
+                                <div
+                                    class="absolute left-0 bottom-full mb-2 hidden group-hover:block z-20 w-56 p-3 rounded-2xl shadow-xl border border-teal-100 bg-white">
+                                    <p class="text-[11px] leading-relaxed text-slate-600">{{
+                                        t.pipelineLegendBenchmarkHint
+                                        }}</p>
+                                </div>
+                            </div>
+                            <i data-lucide="chevron-right" class="w-3.5 h-3.5 text-slate-300"></i>
+                            <div class="relative group">
+                                <span
+                                    class="inline-flex items-center px-2.5 py-1 rounded-lg text-[10px] font-bold border bg-indigo-50 text-indigo-600 border-indigo-200 cursor-help">
+                                    <i data-lucide="zap" class="w-3 h-3 mr-1.5"></i>{{ t.optimizationCompleted }}<span
+                                        v-if="stats.optimization.completed > 0" class="ml-1 text-indigo-700">({{
+                                        stats.optimization.completed }})</span>
+                                </span>
+                                <div
+                                    class="absolute right-0 bottom-full mb-2 hidden group-hover:block z-20 w-56 p-3 rounded-2xl shadow-xl border border-indigo-100 bg-white">
+                                    <p class="text-[11px] leading-relaxed text-slate-600">{{
+                                        t.pipelineLegendOptimizationHint }}</p>
+                                </div>
+                            </div>
+                            <i data-lucide="chevron-right" class="w-3.5 h-3.5 text-slate-300"></i>
+                            <div class="relative group">
+                                <span
+                                    class="inline-flex items-center px-2.5 py-1 rounded-lg text-[10px] font-bold border bg-violet-50 text-violet-700 border-violet-200 cursor-help">
+                                    <i data-lucide="briefcase" class="w-3 h-3 mr-1.5"></i>{{
+                                    t.businessBenchmarkCompleted }}<span v-if="stats.businessBenchmark.completed > 0"
+                                        class="ml-1 text-violet-700">({{
+                                        stats.businessBenchmark.completed }})</span>
+                                </span>
+                                <div
+                                    class="absolute right-0 bottom-full mb-2 hidden group-hover:block z-20 w-56 p-3 rounded-2xl shadow-xl border border-violet-100 bg-white">
+                                    <p class="text-[11px] leading-relaxed text-slate-600">{{
+                                        t.pipelineLegendBusinessBenchmarkHint }}</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                    <div class="bg-white rounded-[2rem] shadow-sm border border-slate-100 p-6">
+                        <div class="flex items-start justify-between gap-3">
+                            <div>
+                                <p
+                                    class="text-[9px] font-bold text-slate-400 uppercase tracking-[0.16em] whitespace-nowrap leading-none">
+                                    {{
+                                    t.statStageAdaptation }}</p>
+                                <h4
+                                    class="text-base xl:text-[17px] font-bold text-slai-navy mt-1 leading-tight whitespace-nowrap tracking-[-0.01em]">
+                                    {{ t.dryRunBadge }}</h4>
+                            </div>
+                            <span
+                                class="px-2.5 py-1 rounded-xl bg-status-success-50 text-status-success-700 border border-status-success-100 text-[10px] font-black uppercase tracking-wider">{{
+                                formatRatio(stats.adaptation.completed, stats.total) }}</span>
+                        </div>
+                        <div class="mt-6 flex items-end justify-between gap-4">
+                            <div>
+                                <p class="text-3xl font-black text-slai-navy leading-none">{{ stats.adaptation.completed
+                                    }}<span class="ml-1 text-lg text-slate-400 font-bold">/ {{ stats.total }}</span></p>
+                            </div>
+                        </div>
+                        <div class="mt-5 grid grid-cols-3 gap-2 text-[11px]">
+                            <div class="stage-metric-soft rounded-xl px-3 py-2">
+                                <p class="stage-metric-label font-bold">{{ t.statPendingQueue }}</p>
+                                <p class="stage-metric-value font-black mt-1">{{ stats.adaptation.pending }}</p>
+                            </div>
+                            <div class="stage-metric-soft-active rounded-xl px-3 py-2">
+                                <p class="stage-metric-label font-bold">{{ t.statActiveQueue }}</p>
+                                <p class="stage-metric-value font-black mt-1">{{ stats.adaptation.in_progress }}
+                                </p>
+                            </div>
+                            <div class="stage-metric-soft-terminal rounded-xl px-3 py-2">
+                                <p class="stage-metric-label font-bold">{{ t.statTerminal }}</p>
+                                <p class="stage-metric-value font-black mt-1">{{ stats.adaptation.needs_auth +
+                                    stats.adaptation.skipped + stats.adaptation.not_applicable }}</p>
+                            </div>
+                        </div>
+                        <div class="mt-4 flex flex-wrap gap-2 text-[11px]">
+                            <span
+                                class="inline-flex items-center px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-100 text-slate-600">
+                                <i data-lucide="clock-3" class="w-3.5 h-3.5 mr-1.5"></i>{{ t.adaptationAvgDurationLabel
+                                }}:
+                                {{ formatDurationMs(stats.avgDurationMs) }}
+                            </span>
+                        </div>
+                    </div>
+                    <div class="bg-white rounded-[2rem] shadow-sm border border-slate-100 p-6">
+                        <div class="flex items-start justify-between gap-3">
+                            <div>
+                                <p
+                                    class="text-[9px] font-bold text-slate-400 uppercase tracking-[0.16em] whitespace-nowrap leading-none">
+                                    {{
+                                    t.statStageBenchmark }}</p>
+                                <h4
+                                    class="text-base xl:text-[17px] font-bold text-slai-navy mt-1 leading-tight whitespace-nowrap tracking-[-0.01em]">
+                                    {{ t.benchmarkCompleted }}</h4>
+                            </div>
+                            <span
+                                class="px-2.5 py-1 rounded-xl bg-teal-50 text-teal-700 border border-teal-100 text-[10px] font-black uppercase tracking-wider">{{
+                                formatRatio(stats.benchmark.completed, stats.benchmark.eligible) }}</span>
+                        </div>
+                        <div class="mt-6 flex items-end justify-between gap-4">
+                            <div>
+                                <p class="text-3xl font-black text-slai-navy leading-none">{{ stats.benchmark.completed
+                                    }}<span class="ml-1 text-lg text-slate-400 font-bold">/ {{ stats.benchmark.eligible
+                                        }}</span></p>
+                            </div>
+                        </div>
+                        <div class="mt-5 grid grid-cols-3 gap-2 text-[11px]">
+                            <div class="stage-metric-soft rounded-xl px-3 py-2">
+                                <p class="stage-metric-label font-bold">{{ t.statPendingQueue }}</p>
+                                <p class="stage-metric-value font-black mt-1">{{ stats.benchmark.pending }}</p>
+                            </div>
+                            <div class="stage-metric-soft-active rounded-xl px-3 py-2">
+                                <p class="stage-metric-label font-bold">{{ t.statActiveQueue }}</p>
+                                <p class="stage-metric-value font-black mt-1">{{ stats.benchmark.in_progress }}
+                                </p>
+                            </div>
+                            <div class="stage-metric-soft-terminal rounded-xl px-3 py-2">
+                                <p class="stage-metric-label font-bold">{{ t.statTerminal }}</p>
+                                <p class="stage-metric-value font-black mt-1">{{ stats.benchmark.skipped +
+                                    stats.benchmark.not_applicable }}</p>
+                            </div>
+                        </div>
+                        <div class="mt-4 flex flex-wrap gap-2 text-[11px]">
+                            <span
+                                class="inline-flex items-center px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-100 text-slate-600">
+                                <i data-lucide="clock-3" class="w-3.5 h-3.5 mr-1.5"></i>{{ t.benchmarkAvgDurationLabel
+                                }}:
+                                {{ formatDurationMs(stats.benchmarkAvgDurationMs) }}
+                            </span>
+                        </div>
+                    </div>
+                    <div class="bg-white rounded-[2rem] shadow-sm border border-slate-100 p-6">
+                        <div class="flex items-start justify-between gap-3">
+                            <div>
+                                <p
+                                    class="text-[9px] font-bold text-slate-400 uppercase tracking-[0.16em] whitespace-nowrap leading-none">
+                                    {{
+                                    t.statStageOptimization }}</p>
+                                <h4
+                                    class="text-base xl:text-[17px] font-bold text-slai-navy mt-1 leading-tight whitespace-nowrap tracking-[-0.01em]">
+                                    {{ t.optimizationCompleted }}</h4>
+                            </div>
+                            <span
+                                class="px-2.5 py-1 rounded-xl bg-indigo-50 text-indigo-700 border border-indigo-100 text-[10px] font-black uppercase tracking-wider">{{
+                                formatRatio(stats.optimization.completed, stats.optimization.eligible) }}</span>
+                        </div>
+                        <div class="mt-6 flex items-end justify-between gap-4">
+                            <div>
+                                <p class="text-3xl font-black text-slai-navy leading-none">{{
+                                    stats.optimization.completed }}<span class="ml-1 text-lg text-slate-400 font-bold">/
+                                        {{
+                                        stats.optimization.eligible }}</span></p>
+                            </div>
+                        </div>
+                        <div class="mt-5 grid grid-cols-3 gap-2 text-[11px]">
+                            <div class="stage-metric-soft rounded-xl px-3 py-2">
+                                <p class="stage-metric-label font-bold">{{ t.statPendingQueue }}</p>
+                                <p class="stage-metric-value font-black mt-1">{{ stats.optimization.pending }}</p>
+                            </div>
+                            <div class="stage-metric-soft-active rounded-xl px-3 py-2">
+                                <p class="stage-metric-label font-bold">{{ t.statActiveQueue }}</p>
+                                <p class="stage-metric-value font-black mt-1">{{ stats.optimization.in_progress }}
+                                </p>
+                            </div>
+                            <div class="stage-metric-soft-terminal rounded-xl px-3 py-2">
+                                <p class="stage-metric-label font-bold">{{ t.statTerminal }}</p>
+                                <p class="stage-metric-value font-black mt-1">{{ stats.optimization.skipped +
+                                    stats.optimization.not_applicable }}</p>
+                            </div>
+                        </div>
+                        <div class="mt-4 flex flex-wrap gap-2 text-[11px]">
+                            <span
+                                class="inline-flex items-center px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-100 text-slate-600">
+                                <i data-lucide="clock-3" class="w-3.5 h-3.5 mr-1.5"></i>{{
+                                t.optimizationAvgDurationLabel }}:
+                                {{ formatDurationMs(stats.optimizationAvgDurationMs) }}
+                            </span>
+                        </div>
+                    </div>
+                    <div class="bg-white rounded-[2rem] shadow-sm border border-slate-100 p-6">
+                        <div class="flex items-start justify-between gap-3">
+                            <div>
+                                <p
+                                    class="text-[9px] font-bold text-slate-400 uppercase tracking-[0.16em] whitespace-nowrap leading-none">
+                                    {{
+                                    t.statStageBusinessBenchmark }}</p>
+                                <h4
+                                    class="text-base xl:text-[17px] font-bold text-slai-navy mt-1 leading-tight whitespace-nowrap tracking-[-0.01em]">
+                                    {{ t.businessBenchmarkCompleted }}
+                                </h4>
+                            </div>
+                            <span
+                                class="px-2.5 py-1 rounded-xl bg-violet-50 text-violet-700 border border-violet-100 text-[10px] font-black uppercase tracking-wider">{{
+                                formatRatio(stats.businessBenchmark.completed, stats.businessBenchmark.eligible)
+                                }}</span>
+                        </div>
+                        <div class="mt-6 flex items-end justify-between gap-4">
+                            <div>
+                                <p class="text-3xl font-black text-slai-navy leading-none">{{
+                                    stats.businessBenchmark.completed }}<span
+                                        class="ml-1 text-lg text-slate-400 font-bold">/
+                                        {{
+                                        stats.businessBenchmark.eligible }}</span></p>
+                            </div>
+                        </div>
+                        <div class="mt-5 grid grid-cols-3 gap-2 text-[11px]">
+                            <div class="stage-metric-soft rounded-xl px-3 py-2">
+                                <p class="stage-metric-label font-bold">{{ t.statPendingQueue }}</p>
+                                <p class="stage-metric-value font-black mt-1">{{ stats.businessBenchmark.pending }}</p>
+                            </div>
+                            <div class="stage-metric-soft-active rounded-xl px-3 py-2">
+                                <p class="stage-metric-label font-bold">{{ t.statActiveQueue }}</p>
+                                <p class="stage-metric-value font-black mt-1">{{ stats.businessBenchmark.in_progress }}
+                                </p>
+                            </div>
+                            <div class="stage-metric-soft-terminal rounded-xl px-3 py-2">
+                                <p class="stage-metric-label font-bold">{{ t.statTerminal }}</p>
+                                <p class="stage-metric-value font-black mt-1">{{ stats.businessBenchmark.skipped +
+                                    stats.businessBenchmark.not_applicable }}</p>
+                            </div>
+                        </div>
+                        <div class="mt-4 flex flex-wrap gap-2 text-[11px]">
+                            <span
+                                class="inline-flex items-center px-3 py-1.5 rounded-xl bg-slate-50 border border-slate-100 text-slate-600">
+                                <i data-lucide="clock-3" class="w-3.5 h-3.5 mr-1.5"></i>{{
+                                t.businessBenchmarkAvgDurationLabel }}:
+                                {{ formatDurationMs(stats.businessBenchmarkAvgDurationMs) }}
+                            </span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div ref="listTopRef" class="mt-5 space-y-3">
+                <div class="flex flex-wrap items-center gap-2">
+                    <span class="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400 mr-1">{{
+                        t.filterStageLabel }}</span>
+                    <button type="button" @click="setStageFilter('all')"
+                        :class="['inline-flex items-center px-3 py-2 rounded-xl border text-xs font-bold transition-all', stageFilter === 'all' ? 'bg-slai-blue text-white border-slai-blue shadow-sm' : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300']">
+                        {{ t.stageAll }}
+                    </button>
+                    <button type="button" @click="setStageFilter('adaptation')"
+                        :class="['inline-flex items-center px-3 py-2 rounded-xl border text-xs font-bold transition-all', stageFilter === 'adaptation' ? 'bg-status-success-600 text-white border-status-success-600 shadow-sm' : 'bg-white text-status-success-700 border-status-success-200 hover:border-status-success-300']">
+                        {{ t.stageNameAdaptation }}
+                    </button>
+                    <button type="button" @click="setStageFilter('benchmark')"
+                        :class="['inline-flex items-center px-3 py-2 rounded-xl border text-xs font-bold transition-all', stageFilter === 'benchmark' ? 'bg-teal-600 text-white border-teal-600 shadow-sm' : 'bg-white text-teal-700 border-teal-200 hover:border-teal-300']">
+                        {{ t.stageNameBenchmark }}
+                    </button>
+                    <button type="button" @click="setStageFilter('optimization')"
+                        :class="['inline-flex items-center px-3 py-2 rounded-xl border text-xs font-bold transition-all', stageFilter === 'optimization' ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm' : 'bg-white text-indigo-700 border-indigo-200 hover:border-indigo-300']">
+                        {{ t.stageNameOptimization }}
+                    </button>
+                    <button type="button" @click="setStageFilter('business_benchmark')"
+                        :class="['inline-flex items-center px-3 py-2 rounded-xl border text-xs font-bold transition-all', stageFilter === 'business_benchmark' ? 'bg-violet-600 text-white border-violet-600 shadow-sm' : 'bg-white text-violet-700 border-violet-200 hover:border-violet-300']">
+                        {{ t.stageNameBusinessBenchmark }}
+                    </button>
+                </div>
+                <p v-if="stageFilter === 'all'" class="text-[11px] text-slate-500 leading-relaxed">
+                    {{ t.filterCurrentStageHint }}
+                </p>
+                <div class="flex flex-wrap items-center gap-2">
+                    <span class="text-[10px] font-bold uppercase tracking-[0.18em] text-slate-400 mr-1">{{
+                        t.filterStatusLabel }}</span>
+                    <button v-for="statusKey in getFilterStatusOptions" :key="statusKey || 'all-status'" type="button"
+                        @click="setStageStatusFilter(statusKey)"
+                        :class="['inline-flex items-center px-3 py-2 rounded-xl border text-xs font-bold transition-all', stageStatusFilter === statusKey ? 'bg-slate-900 text-white border-slate-900 shadow-sm' : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300']">
+                        {{ getFilterStatusLabel(statusKey) }} <span class="ml-1.5 opacity-80">{{
+                            getFilterStatusCount(statusKey) }}</span>
+                    </button>
+                    <span v-if="stageReadinessCount > 0"
+                        class="inline-flex items-center px-3 py-2 rounded-xl border text-xs font-bold bg-slate-50 text-slate-500 border-slate-200">
+                        <i data-lucide="lock" class="w-3 h-3 mr-1.5"></i>{{ t.filterStageNotReady }} <span
+                            class="ml-1.5 opacity-80">{{ stageReadinessCount }}</span>
+                    </span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Model Grid -->
+        <div class="relative min-h-[400px]">
+            <transition name="page-fade" mode="out-in" @after-enter="onPageAfterEnter">
+                <div :key="stageFilter + '-' + (stageStatusFilter || 'all') + '-' + currentPage"
+                    class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
+                    <div v-for="(model, idx) in paginatedModels" :key="model.model_id || model?.url || idx"
+                        :class="['bg-white rounded-[2rem] p-8 bento-card flex flex-col shadow-sm', model.justUpdated ? 'updated-flash' : '']">
+
+                        <div class="flex flex-col gap-4 mb-6">
+                            <div class="min-w-0">
+                                <h3 class="text-xl font-bold text-slai-navy leading-tight break-words"
+                                    :title="model.model_id || ''">
+                                    {{ (model.model_id && model.model_id.split('/').pop()) || '—' }}
+                                </h3>
+                                <p class="text-xs text-slate-400 font-bold uppercase tracking-wider mt-1 break-words">
+                                    {{ (model.model_id && model.model_id.split('/')[0]) || '' }}
+                                </p>
+                                <p v-if="(model.adaptation_path || '').trim()"
+                                    class="text-[11px] text-slate-500 mt-1 break-all"
+                                    :title="(model.adaptation_path || '').trim().replace(/^adaptations\//, '')">
+                                    {{ (model.adaptation_path || '').trim().replace(/^adaptations\//, '') }}
+                                </p>
+                            </div>
+                            <div class="flex flex-wrap items-start justify-between gap-3">
+                                <span
+                                    :class="['status-badge px-3 py-1 rounded-full text-[10px] border flex items-center', getStatusInfo(model).classes, hasHumanReviewStar(model) ? 'human-review-badge' : '']">
+                                    <i :data-lucide="getStatusInfo(model).icon"
+                                        :class="['w-3 h-3 mr-1', getStatusInfo(model).spin ? 'animate-spin' : '']"></i>
+                                    {{ getStatusInfo(model).label }}
+                                </span>
+                                <div v-if="getPipelineStages(model)" class="flex items-center gap-1.5 ml-auto">
+                                    <div v-for="(stage, i) in getPipelineStages(model)" :key="i"
+                                        :class="['relative', stage.hasTooltip ? 'group cursor-help' : '']">
+                                        <span
+                                            :class="['p-1.5 rounded-lg border flex items-center justify-center', stage.classes]"
+                                            :title="stage.label">
+                                            <i :data-lucide="stage.icon"
+                                                :class="['w-3 h-3', stage.spin ? 'animate-spin' : '']"></i>
+                                        </span>
+                                        <div v-if="stage.stageId === 'optimization' && stage.hasTooltip && getOptimizationCardData(model) && getOptimizationTooltipData(model)"
+                                            :class="['absolute bottom-full mb-2 hidden group-hover:block z-50 w-[21rem] p-4 rounded-2xl shadow-xl border border-indigo-100 bg-white', getOptimizationTooltipPositionClass(idx)]">
+                                            <div class="space-y-3 relative">
+                                                <div class="flex items-center justify-between gap-3">
+                                                    <p
+                                                        class="text-[10px] font-bold text-indigo-600 uppercase tracking-[0.18em]">
+                                                        {{ t.optCardTitle }}</p>
+                                                    <span
+                                                        :class="['px-2.5 py-1 rounded-xl text-[10px] font-black uppercase tracking-wider border shrink-0', getOptimizationCardData(model).stateChip.classes]">
+                                                        {{ getOptimizationCardData(model).stateChip.label }}
+                                                    </span>
+                                                </div>
+                                                <p v-if="getOptimizationCardData(model).headline"
+                                                    class="text-xs text-slate-600 leading-relaxed">{{
+                                                    getOptimizationCardData(model).headline }}</p>
+                                                <div class="grid gap-2 text-[10px]"
+                                                    style="grid-template-columns: 1.2fr 1fr 1fr;">
+                                                    <div
+                                                        class="flex flex-col gap-1 px-3 py-2 rounded-xl bg-indigo-50 border border-indigo-100">
+                                                        <span
+                                                            class="text-indigo-600 font-bold uppercase tracking-wider">{{
+                                                            t.optTooltipSpeedup }}</span>
+                                                        <span
+                                                            class="text-2xl font-extrabold leading-none text-indigo-700 tabular-nums">{{
+                                                            formatOptimizationValue(getOptimizationCardData(model).speedup,
+                                                            '×', 3) }}</span>
+                                                    </div>
+                                                    <div class="flex flex-col gap-1 px-3 py-2 rounded-xl bg-slate-50">
+                                                        <span
+                                                            class="text-slate-500 font-bold uppercase tracking-wider">{{
+                                                            t.optCardSamples }}</span>
+                                                        <span
+                                                            class="text-base font-black text-slate-700 tabular-nums">{{
+                                                            formatOptimizationValue(getOptimizationCardData(model).samples,
+                                                            '', 0) }}</span>
+                                                    </div>
+                                                    <div class="flex flex-col gap-1 px-3 py-2 rounded-xl bg-slate-50">
+                                                        <span
+                                                            class="text-slate-500 font-bold uppercase tracking-wider">{{
+                                                            getOptimizationCardData(model).quality.label }}</span>
+                                                        <span
+                                                            class="text-base font-black text-slate-700 tabular-nums">{{
+                                                            getOptimizationCardData(model).quality.value }}</span>
+                                                    </div>
+                                                </div>
+                                                <div v-if="getOptimizationCardData(model).optimizationsText"
+                                                    class="text-[11px] text-slate-600 leading-relaxed">
+                                                    <span class="font-bold text-slate-500 uppercase tracking-wider">{{
+                                                        t.optTooltipOptimizations }}:</span>
+                                                    <span class="ml-1">{{
+                                                        getOptimizationCardData(model).optimizationsText }}</span>
+                                                </div>
+                                                <div class="grid grid-cols-2 gap-2 text-[10px]">
+                                                    <div
+                                                        class="flex justify-between px-2 py-1.5 rounded-lg bg-slate-50">
+                                                        <span class="text-slate-500">{{ t.optTooltipBaseline }}</span>
+                                                        <span class="font-bold tabular-nums">{{
+                                                            formatOptimizationValue(getOptimizationTooltipData(model).best.baseline_wall_clock_s,
+                                                            's', 4) }}</span>
+                                                    </div>
+                                                    <div
+                                                        class="flex justify-between px-2 py-1.5 rounded-lg bg-indigo-50/50">
+                                                        <span class="text-indigo-600">{{ t.optTooltipPerf }}</span>
+                                                        <span class="font-bold tabular-nums text-indigo-600">{{
+                                                            formatOptimizationValue(getOptimizationTooltipData(model).best.perf_wall_clock_s,
+                                                            's', 4) }}</span>
+                                                    </div>
+                                                    <div
+                                                        class="col-span-2 flex justify-between px-2 py-1.5 rounded-lg bg-status-success-50">
+                                                        <span class="text-status-success-600">{{
+                                                            t.optTooltipLatencyReduction }}</span>
+                                                        <span class="font-bold tabular-nums text-status-success-600">{{
+                                                            formatOptimizationValue(getOptimizationTooltipData(model).best.wall_clock_reduction_pct,
+                                                            '%', 1) }}</span>
+                                                    </div>
+                                                    <div v-if="getOptimizationCardData(model).showCosineRow"
+                                                        class="col-span-2 flex justify-between px-2 py-1.5 rounded-lg bg-slate-50">
+                                                        <span class="text-slate-500">{{ t.optTooltipCosine }}</span>
+                                                        <span class="font-bold tabular-nums">{{
+                                                            formatOptimizationValue(getOptimizationTooltipData(model).best.cosine_similarity,
+                                                            '', 4) }}</span>
+                                                    </div>
+                                                </div>
+                                                <div class="flex flex-wrap gap-2">
+                                                    <span v-for="chip in getOptimizationCardData(model).chips"
+                                                        :key="chip.label"
+                                                        :class="['px-2.5 py-1 rounded-xl text-[10px] font-bold border', chip.classes]">
+                                                        {{ chip.label }}
+                                                    </span>
+                                                </div>
+                                                <p v-if="getOptimizationCardData(model).narrative"
+                                                    class="text-[11px] text-slate-600 leading-relaxed line-clamp-3-custom">
+                                                    {{ getOptimizationCardData(model).narrative }}
+                                                </p>
+                                                <p v-if="!getOptimizationTooltipData(model).hasDetails"
+                                                    class="text-[11px] text-slate-500 leading-relaxed">
+                                                    {{ t.optTooltipUnavailable }}
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <div v-if="stage.stageId === 'business_benchmark' && stage.hasTooltip && getBusinessBenchmarkCardData(model)"
+                                            :class="['absolute bottom-full mb-2 hidden group-hover:block z-50 p-4 rounded-2xl shadow-xl border border-violet-100 bg-white overflow-hidden', getOptimizationTooltipPositionClass(idx)]"
+                                            style="width:min(21rem,calc(100vw - 1.5rem));max-width:calc(100vw - 1.5rem);">
+                                            <div class="space-y-3 relative">
+                                                <div class="flex items-start justify-between gap-3">
+                                                    <p
+                                                        class="max-w-[12rem] text-[10px] font-bold text-violet-700 uppercase tracking-[0.14em] leading-snug">
+                                                        {{ t.businessCardTitle }}</p>
+                                                    <span
+                                                        :class="['px-2.5 py-1 rounded-xl text-[10px] font-black uppercase tracking-wider border shrink-0', getBusinessBenchmarkCardData(model).stateChip.classes]">
+                                                        {{ getBusinessBenchmarkCardData(model).stateChip.label }}
+                                                    </span>
+                                                </div>
+                                                <p v-if="getBusinessBenchmarkCardData(model).headline"
+                                                    class="text-xs text-slate-600 leading-relaxed">{{
+                                                    getBusinessBenchmarkCardData(model).headline }}</p>
+                                                <div class="grid gap-2 text-[10px]"
+                                                    style="grid-template-columns: repeat(3, minmax(0, 1fr));">
+                                                    <div
+                                                        :class="['flex flex-col gap-1 pl-2 pr-3 py-2 rounded-xl border', getBusinessBenchmarkCardData(model).npuSpeedupCardClasses]">
+                                                        <span
+                                                            class="text-violet-700 font-bold uppercase tracking-wider whitespace-nowrap">{{
+                                                            t.businessMetricNpuSpeedup }}</span>
+                                                        <span
+                                                            :class="['text-2xl font-extrabold leading-none tabular-nums', getBusinessBenchmarkCardData(model).npuSpeedupValueClasses]">{{
+                                                            formatOptimizationValue(getBusinessBenchmarkCardData(model).npuSpeedup,
+                                                            '×', 3) }}</span>
+                                                    </div>
+                                                    <div
+                                                        :class="['flex flex-col gap-1 pl-2 pr-3 py-2 rounded-xl border', getBusinessBenchmarkCardData(model).vsCudaCardClasses]">
+                                                        <span
+                                                            class="text-violet-700 font-bold uppercase tracking-wider">{{
+                                                            t.businessMetricVsCuda }}</span>
+                                                        <span
+                                                            :class="['text-2xl font-extrabold leading-none tabular-nums', getBusinessBenchmarkCardData(model).vsCudaValueClasses]">{{
+                                                            formatOptimizationValue(getBusinessBenchmarkCardData(model).vsCudaRatio,
+                                                            '×', 3) }}</span>
+                                                    </div>
+                                                    <div
+                                                        :class="['flex flex-col gap-1 pl-2 pr-3 py-2 rounded-xl border', getBusinessBenchmarkCardData(model).quality.cardClasses]">
+                                                        <span class="font-bold uppercase tracking-wider opacity-80">{{
+                                                            getBusinessBenchmarkCardData(model).quality.label }}</span>
+                                                        <span
+                                                            :class="['w-full text-left text-[1.3rem] font-extrabold leading-none tracking-tight tabular-nums whitespace-nowrap', getBusinessBenchmarkCardData(model).quality.primaryClasses]">{{
+                                                            getBusinessBenchmarkCardData(model).quality.primaryValue
+                                                            }}</span>
+                                                    </div>
+                                                </div>
+                                                <div class="grid grid-cols-2 gap-2 text-[10px]">
+                                                    <div
+                                                        class="flex justify-between px-2 py-1.5 rounded-lg bg-slate-50">
+                                                        <span class="text-slate-500">{{ t.businessRoleNpuPerf }} {{
+                                                            t.throughput }}</span>
+                                                        <span class="font-bold tabular-nums text-violet-700">{{
+                                                            getBusinessBenchmarkCardData(model).throughputPerf }}</span>
+                                                    </div>
+                                                    <div
+                                                        class="flex justify-between px-2 py-1.5 rounded-lg bg-slate-50">
+                                                        <span class="text-slate-500">{{ t.businessRoleCudaBaseline }} {{
+                                                            t.throughput }}</span>
+                                                        <span class="font-bold tabular-nums text-violet-700">{{
+                                                            getBusinessBenchmarkCardData(model).throughputCuda }}</span>
+                                                    </div>
+                                                </div>
+                                                <div class="flex flex-wrap gap-2">
+                                                    <span v-for="chip in getBusinessBenchmarkCardData(model).chips"
+                                                        :key="chip.label"
+                                                        :class="['max-w-full px-2.5 py-1 rounded-xl text-[10px] font-bold border break-all', chip.classes]">
+                                                        {{ chip.label }}
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="flex-1 space-y-4">
+                            <div
+                                class="flex items-center text-slate-500 bg-slate-50 px-3 py-2 rounded-xl border border-slate-100/50">
+                                <i data-lucide="tag" class="w-3.5 h-3.5 mr-2 opacity-60"></i>
+                                <span class="text-xs font-bold break-words flex-1 min-w-0">{{ model.description ||
+                                    t.source }}</span>
+                            </div>
+
+                            <div v-if="model.adaptation_owner"
+                                class="flex items-center text-status-progress-600 bg-status-progress-50 px-3 py-2 rounded-xl border border-status-progress-100/50">
+                                <i data-lucide="user" class="w-3.5 h-3.5 mr-2 opacity-60"></i>
+                                <span class="text-xs font-bold break-words flex-1 min-w-0">{{ t.owner }}: {{
+                                    model.adaptation_owner
+                                    }}</span>
+                            </div>
+
+                            <!-- Performance Metrics -->
+                            <div v-if="model.adaptation_status === 'completed' && (model.throughput_npu || model.latency_npu)"
+                                class="grid grid-cols-2 gap-2 bg-slate-50/50 p-3 rounded-2xl border border-slate-100">
+                                <div class="text-center">
+                                    <p class="text-[9px] text-slate-400 font-bold uppercase">{{ t.throughput }}</p>
+                                    <p class="text-xs font-bold text-slai-blue break-all">{{ model.throughput_npu || '—'
+                                        }}</p>
+                                </div>
+                                <div class="text-center">
+                                    <p class="text-[9px] text-slate-400 font-bold uppercase">{{ t.latency }}</p>
+                                    <p class="text-xs font-bold text-slai-blue break-all">{{ model.latency_npu || '—' }}
+                                    </p>
+                                </div>
+                            </div>
+
+                        </div>
+
+                        <div class="mt-8 pt-6 border-t border-slate-100 flex justify-between items-center">
+                            <div
+                                class="flex flex-col gap-1.5 text-slate-400 text-[10px] font-bold uppercase tracking-widest">
+                                <span class="flex items-center">
+                                    <i data-lucide="calendar" class="w-3 h-3 mr-1.5"></i>
+                                    {{ t.updated }}: {{ getDisplayStageUpdatedLabel(model) }}
+                                </span>
+                                <span class="flex items-center text-slai-blue">
+                                    <i data-lucide="timer" class="w-3 h-3 mr-1.5"></i>
+                                    {{ t.duration }}: {{ formatDuration(model) || 'n/a' }}
+                                </span>
+                            </div>
+
+                            <div class="flex items-center space-x-2">
+                                <a v-if="model.adaptation_status === 'completed' && hasDownload(model)"
+                                    :href="getDownloadUrl(model)"
+                                    class="flex items-center space-x-2 px-3 py-2 bg-slai-blue text-white rounded-xl hover:bg-slai-blue/90 transition-all shadow-sm"
+                                    :title="t.downloadSource">
+                                    <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                                    <span class="text-[10px] font-bold uppercase">{{ t.downloadSource }}</span>
+                                </a>
+                                <span v-else-if="model.adaptation_status === 'completed'"
+                                    class="flex items-center space-x-2 px-3 py-2 bg-slate-200 text-slate-500 rounded-xl cursor-not-allowed"
+                                    :title="t.downloadSource">
+                                    <i data-lucide="download" class="w-3.5 h-3.5"></i>
+                                    <span class="text-[10px] font-bold uppercase">{{ t.downloadSource }}</span>
+                                </span>
+                                <a v-if="model.url && isValidUrl(model.url)" :href="model.url" target="_blank"
+                                    rel="noopener noreferrer"
+                                    class="p-2.5 bg-slai-blue/5 text-slai-blue rounded-xl hover:bg-slai-blue hover:text-white transition-all group"
+                                    :title="model.model_id">
+                                    <i data-lucide="arrow-up-right"
+                                        class="w-4 h-4 group-hover:scale-110 transition-transform"></i>
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </transition>
+
+            <!-- Loading & Empty States -->
+            <div v-if="loading && allModels.length === 0"
+                class="col-span-full flex flex-col items-center justify-center py-20 text-slate-400">
+                <div class="animate-spin mb-4"><i data-lucide="loader-2" class="w-8 h-8"></i></div>
+                <p class="font-medium">{{ t.loading }}</p>
+            </div>
+
+            <div v-if="!loading && sortedModels.length === 0"
+                class="col-span-full text-center py-20 bg-white rounded-3xl border border-dashed border-slate-200">
+                <i data-lucide="search-x" class="w-12 h-12 mx-auto mb-4 text-slate-300"></i>
+                <p class="text-slate-500 font-medium">{{ t.noResults }}</p>
+            </div>
+        </div>
+
+        <!-- Pagination -->
+        <div v-if="totalPages > 1" class="mt-12 flex items-center justify-center gap-2 select-none flex-wrap">
+            <button @click="changePage(currentPage - 1)" :disabled="currentPage === 1"
+                class="p-2 rounded-xl bg-white border border-slate-200 text-slate-500 hover:text-slai-blue hover:border-slai-blue disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                <i data-lucide="chevron-left" class="w-5 h-5"></i>
+            </button>
+            <template v-for="page in visiblePageItems" :key="page.key">
+                <span v-if="page.type === 'ellipsis'" class="px-2 text-slate-300 text-sm font-bold">...</span>
+                <button v-else type="button" @click="changePage(page.value)"
+                    :class="['min-w-10 h-10 px-3 rounded-xl border text-sm font-bold transition-all', currentPage === page.value ? 'bg-slai-blue text-white border-slai-blue shadow-sm' : 'bg-white text-slate-600 border-slate-200 hover:text-slai-blue hover:border-slai-blue']">
+                    {{ page.value }}
+                </button>
+            </template>
+
+            <button @click="changePage(currentPage + 1)" :disabled="currentPage === totalPages"
+                class="p-2 rounded-xl bg-white border border-slate-200 text-slate-500 hover:text-slai-blue hover:border-slai-blue disabled:opacity-50 disabled:cursor-not-allowed transition-all">
+                <i data-lucide="chevron-right" class="w-5 h-5"></i>
+            </button>
+        </div>
+
+    </main>
+
+    <footer class="bg-white border-t border-slate-200 mt-20" role="contentinfo">
+        <div class="max-w-7xl mx-auto py-12 px-6 flex flex-col md:flex-row justify-between items-center gap-6">
+            <div class="flex items-center space-x-4">
+                <div class="bg-slate-100 p-2 rounded-lg"><i data-lucide="cpu" class="w-5 h-5 text-slate-500"></i></div>
+                <p class="text-sm font-semibold text-slate-500 italic">Accelerating AI on Ascend NPU</p>
+            </div>
+            <p class="text-xs font-bold text-slate-400 uppercase tracking-[0.2em]">&copy; 2026 SLAI</p>
+        </div>
+        <aside class="max-w-7xl mx-auto px-6 pb-8 border-t border-slate-100 mt-2 pt-6" :aria-label="t.disclaimerTitle">
+            <p class="text-[10px] text-slate-500 leading-relaxed max-w-4xl">
+                <strong class="font-semibold text-slate-600">{{ t.disclaimerTitle }}</strong>
+                {{ t.disclaimer }}
+            </p>
+        </aside>
+    </footer>
+
+    <script>
+        const { createApp, ref, computed, onMounted, watch } = Vue;
+
+        const i18nData = {
+            en: {
+                pageTitle: "SLAI - Ascend Model Adaptation Board", navTitle: "Ascend Model Adaptation Board", officialWebsite: "Official Website",
+                headerTitle: "Model Adaptation Board", headerDesc: "Visualizing the progress of Hugging Face models adapted for Ascend NPU (Ascend).",
+                lastUpdated: "Last Updated", fetching: "Fetching data...", searchPlaceholder: "Search within current scope...",
+                statTotal: "Total Models", statAvgDuration: "Avg. time per model", statBenchmarkCompleted: "Benchmarked", statOptimizationCompleted: "Optimized", statCompleted: "Completed", statInProgress: "In Progress", statNeedsAuth: "Authorization", statFailed: "Failed", statSkipped: "Skipped",
+                loading: "Initializing...", statusCompleted: "Completed", statusFailed: "Failed", statusSkipped: "Skipped", statusInProgress: "In Progress",
+                statusNeedsAuth: "Auth", statusNotApplicable: "Not Applicable", statusPending: "Pending", highPriority: "High Priority", errorLogs: "Error Logs", updated: "Updated", duration: "Duration",
+                noResults: "No models found", source: "General Purpose",
+                sortLabel: "Sort by", sortNewestFirst: "Newest first", sortOldestFirst: "Oldest first",
+                sortNameAz: "Name A→Z", sortNameZa: "Name Z→A", sortByStatus: "By pipeline",
+                sortDurationLongest: "Duration (longest)", sortDurationShortest: "Duration (shortest)",
+                dryRunBadge: "Adapted", performance: "Performance", throughput: "Throughput", latency: "Latency", memory: "Memory", downloadSource: "Download", projectPath: "Project", owner: "Owner",
+                adaptationPending: "Pending Adaptation", adaptationInProgress: "Adapting", adaptationNeedsAuth: "Auth Required", adaptationSkipped: "Adaptation Skipped", adaptationNotApplicable: "Adaptation N/A", stageLocked: "Not in this stage yet",
+                benchmarkPending: "Benchmark Pending", benchmarkInProgress: "Benchmark", benchmarkCompleted: "Benchmarked", benchmarkSkipped: "Benchmark Skipped", benchmarkNotApplicable: "Benchmark N/A",
+                optimizationPending: "Pending", optimizationInProgress: "Optimizing", optimizationCompleted: "Optimized", optimizationSkipped: "Skipped", optimizationNotApplicable: "N/A",
+                humanReviewPending: "Human Review Pending", humanReviewCompleted: "Human Reviewed", stageNameHumanReview: "Human Review",
+                optTooltipSpeedup: "Speedup", optTooltipOptimizations: "Optimizations", optTooltipBaseline: "Baseline", optTooltipPerf: "Optimized", optTooltipLatencyReduction: "Wall-clock ↓", optTooltipCosine: "Cosine", optTooltipNone: "None", optTooltipUnavailable: "Optimization completed, but detailed notes are not available yet.",
+                optCardTitle: "Optimization Insight", optCardSamples: "Samples", optCardLatencyPath: "Latency Path",
+                optMetricTextMatch: "Text Match", optMetricMatchRate: "Match Rate", optMetricPplDiff: "PPL Diff", optMetricCosine: "Cosine",
+                optStateNoSpeedup: "No Speedup", optStateHighGain: "High Gain", optStateVerified: "Verified", optStateLegacy: "Standard", optStateRisk: "Measurement Risk",
+                optChipValidated: "Validated", optChipNeedsReview: "Metrics-backed", optChipRisk: "Red Flag Note", optChipMethodPrefix: "Method", optChipScopePrefix: "Scope", optChipPrecisionPrefix: "Precision", optChipWallClockPrefix: "Wall-clock", optChipWarmupPrefix: "Warmup", optChipContractPrefix: "Contract",
+                businessCardTitle: "Consistency Evidence", businessMetricNpuSpeedup: "NPU Speedup", businessMetricVsCuda: "vs CUDA", businessMetricQuality: "Quality", businessMetricConsistency: "Consistency", businessRoleNpuPerf: "NPU Perf", businessRoleCudaBaseline: "CUDA Base",
+                businessMetricMatchRate: "Match Rate", businessMetricTextMatch: "Text Match", businessMetricCosine: "Cosine", businessMetricRouge: "ROUGE-L", businessMetricAccuracy: "Accuracy", businessMetricWer: "WER", businessMetricMap: "mAP", businessMetricNdcg: "NDCG@10", businessMetricMrr: "MRR", businessMetricExactMatch: "Exact Match", businessMetricPerplexity: "Perplexity",
+                businessStateFaster: "Faster Than CUDA", businessStateCompetitive: "Competitive", businessStateAligned: "Aligned", businessStateClose: "Minor Drift", businessStateNeedsReview: "Needs Review", businessConsistencyAligned: "Aligned", businessConsistencyClose: "Minor Drift", businessConsistencyDrift: "Visible Drift", businessConsistencyMetricMismatch: "Metric mismatch", businessChipScopePrefix: "Scope", businessChipRemotePrefix: "Remote", businessChipDevicePrefix: "Device", businessChipSamplesPrefix: "Samples", businessChipGatePrefix: "Gate", businessChipGatePassed: ">50 samples", businessChipGateRisk: "Sample rule risk", businessRemoteModeManualGithubSync: "Manual GitHub Sync", businessRemoteModeUnknown: "Remote mode unknown",
+                pipelineLegendTitle: "Pipeline stages", pipelineLegendHint: "The main pill shows the current stage; the four icons show adaptation, benchmark, optimization, and business benchmark separately. A star marks models that have passed the final human review.",
+                teamTitle: "Agent Team", teamDesc: "Dedicated AI agents specializing in different stages of the adaptation pipeline.", teamLegendLabel: "Stage colors", teamLegendAdaptation: "Green = Adaptation", teamLegendBenchmark: "Teal = Benchmark", teamLegendOptimization: "Indigo = Optimization", teamLegendBusinessBenchmark: "Violet = Business Consistency",
+                statsTitle: "Pipeline Overview", statsDesc: "Track how models progress from adaptation to benchmark, optimization, cross-device business consistency validation, and final human review.",
+                statsPrimaryFootnote: "Current model inventory across the full pipeline", statsQuickFilter: "Quick filters", statCoverage: "Coverage", statEligible: "Eligible", statActiveQueue: "In Flight", statPendingQueue: "Pending", statTerminal: "Closed", statWaitCuda: "Wait CUDA", statStageAdaptation: "Adaptation stage", stageNameBenchmark: "Benchmark", statStageOptimization: "Optimization stage", statStageBusinessBenchmark: "Business consistency stage", stageNameAdaptation: "Adaptation", statStageBenchmark: "Benchmark stage", stageNameOptimization: "Optimization", stageNameBusinessBenchmark: "Business Consistency", primaryStageNameBusinessBenchmark: "Consistency", stageAll: "Current stage", filterStageLabel: "View", filterStatusLabel: "Status", filterStatusAll: "Any status", filterCurrentStageHint: "Each model is grouped by the first pipeline stage that is not finished yet.", filterStageNotReady: "Not in this stage yet", pipelineCompletedLabel: "Full pipeline completed share", pipelineLegendAdaptationHint: "Adaptation makes the model run stably on Ascend and verifies the basic inference path.", pipelineLegendBenchmarkHint: "Benchmark measures accuracy and runtime with standard scripts and comparable samples.", pipelineLegendOptimizationHint: "Optimization applies NPU-friendly acceleration and verifies that speedup still keeps accuracy acceptable.", pipelineLegendBusinessBenchmarkHint: "Business consistency validation checks whether real-weight, real-dataset results stay aligned across NPU baseline, NPU perf, and remote CUDA baseline, while retaining speed and hardware evidence and requiring sample count > 50.", adaptationAvgDurationLabel: "Adaptation avg time", adaptationNeedsAuthLabel: "Adaptation auth", adaptationTerminalLabel: "Adaptation auth / skipped / N/A", benchmarkAvgDurationLabel: "Benchmark avg time", benchmarkBacklogLabel: "Benchmark pending", benchmarkTerminalLabel: "Benchmark skipped / N/A", optimizationAvgDurationLabel: "Optimization avg time", optimizationBacklogLabel: "Optimization pending", optimizationTerminalLabel: "Optimization skipped / N/A", businessBenchmarkPending: "Business Consistency Pending", businessBenchmarkInProgress: "Business Consistency", businessBenchmarkWaitCuda: "Wait CUDA", businessBenchmarkCompleted: "Consistency Verified", businessBenchmarkSkipped: "Business Consistency Skipped", businessBenchmarkNotApplicable: "Business Consistency N/A", businessBenchmarkAvgDurationLabel: "Business consistency avg time",
+                noActiveAgents: "Waiting for agents to join...",
+                rolePM: "Project Manager", roleEngineer: "Senior AI Engineer", roleAnalyst: "Data Analyst", roleOptimizer: "NPU Optimizer", roleBusinessBenchmark: "Business Consistency Engineer",
+                agentActive: "Active", agentIdle: "Idle", agentOffline: "Offline", agentHintActive: "Working on a new task", agentHintIdle: "Idle and waiting for the next task", agentHintOffline: "Offline or heartbeat lost",
+                disclaimerTitle: "Disclaimer",
+                disclaimer: "The adaptation progress and status shown on this board are for reference only and do not constitute any commitment or warranty. Results may vary due to environment, dependencies, or upstream changes. When downloading or using models and resources linked from this page, please comply with the respective licenses and terms of use; we are not responsible for the content or availability of external links. This page is for research and educational purposes only."
+            },
+            zh: {
+                pageTitle: "SLAI - 昇腾模型适配看板", navTitle: "昇腾模型适配进度看板", officialWebsite: "学院官网",
+                headerTitle: "模型适配看板", headerDesc: "展示 Hugging Face 模型在昇腾 NPU (Ascend)上 的标准化适配进度。",
+                lastUpdated: "最后更新", fetching: "正在获取数据...", searchPlaceholder: "搜索模型（基于当前范围）...",
+                statTotal: "总模型数", statAvgDuration: "单模型平均耗时", statBenchmarkCompleted: "已评测", statOptimizationCompleted: "已优化", statCompleted: "已完成", statInProgress: "正在处理中", statNeedsAuth: "需授权", statFailed: "适配失败", statSkipped: "已跳过",
+                loading: "初始化中...", statusCompleted: "已完成", statusFailed: "适配失败", statusSkipped: "已跳过", statusInProgress: "适配中",
+                statusNeedsAuth: "需授权", statusNotApplicable: "不适用", statusPending: "待排期", highPriority: "高优先级", errorLogs: "错误日志", updated: "更新于", duration: "耗时",
+                noResults: "未搜索到相关模型", source: "通用任务",
+                sortLabel: "排序", sortNewestFirst: "最新优先", sortOldestFirst: "最早优先",
+                sortNameAz: "名称 A→Z", sortNameZa: "名称 Z→A", sortByStatus: "按流水线",
+                sortDurationLongest: "耗时（最长）", sortDurationShortest: "耗时（最短）",
+                dryRunBadge: "已适配", performance: "实测性能", throughput: "吞吐量", latency: "时延", memory: "显存", downloadSource: "下载", projectPath: "项目", owner: "所有者",
+                adaptationPending: "待适配", adaptationInProgress: "适配中", adaptationNeedsAuth: "需授权", adaptationSkipped: "适配跳过", adaptationNotApplicable: "适配不适用", stageLocked: "未进入本阶段",
+                benchmarkPending: "待评测", benchmarkInProgress: "评测中", benchmarkCompleted: "已评测", benchmarkSkipped: "评测跳过", benchmarkNotApplicable: "评测 N/A",
+                optimizationPending: "待优化", optimizationInProgress: "优化中", optimizationCompleted: "已优化", optimizationSkipped: "已跳过", optimizationNotApplicable: "不适用",
+                humanReviewPending: "待人工核验", humanReviewCompleted: "人工核验已完成", stageNameHumanReview: "人工核验",
+                optTooltipSpeedup: "加速比", optTooltipOptimizations: "优化项", optTooltipBaseline: "基线", optTooltipPerf: "优化后", optTooltipLatencyReduction: "整轮耗时↓", optTooltipCosine: "余弦相似度", optTooltipNone: "无", optTooltipUnavailable: "该模型已完成优化，但暂时没有可展示的优化详情。",
+                optCardTitle: "优化洞察", optCardSamples: "样本数", optCardLatencyPath: "时延路径",
+                optMetricTextMatch: "文本匹配", optMetricMatchRate: "匹配率", optMetricPplDiff: "PPL 差异", optMetricCosine: "余弦相似度",
+                optStateNoSpeedup: "未提速", optStateHighGain: "高增益", optStateVerified: "已验证", optStateLegacy: "标准完成", optStateRisk: "测量风险",
+                optChipValidated: "有核查说明", optChipNeedsReview: "工件对齐", optChipRisk: "红旗说明", optChipMethodPrefix: "对比", optChipScopePrefix: "范围", optChipPrecisionPrefix: "精度", optChipWallClockPrefix: "整轮耗时", optChipWarmupPrefix: "Warmup", optChipContractPrefix: "契约",
+                businessCardTitle: "业务一致性证据", businessMetricNpuSpeedup: "NPU 提速比", businessMetricVsCuda: "对比 CUDA", businessMetricQuality: "质量指标", businessMetricConsistency: "结果一致性", businessRoleNpuPerf: "NPU 优化版", businessRoleCudaBaseline: "CUDA 基线",
+                businessMetricMatchRate: "匹配率", businessMetricTextMatch: "文本匹配", businessMetricCosine: "余弦相似度", businessMetricRouge: "ROUGE-L", businessMetricAccuracy: "准确率", businessMetricWer: "WER", businessMetricMap: "mAP", businessMetricNdcg: "NDCG@10", businessMetricMrr: "MRR", businessMetricExactMatch: "精确匹配", businessMetricPerplexity: "困惑度",
+                businessStateFaster: "快于 CUDA", businessStateCompetitive: "结果可比", businessStateAligned: "结果一致", businessStateClose: "轻微漂移", businessStateNeedsReview: "需复核", businessConsistencyAligned: "结果一致", businessConsistencyClose: "轻微漂移", businessConsistencyDrift: "存在漂移", businessConsistencyMetricMismatch: "指标不一致", businessChipScopePrefix: "范围", businessChipRemotePrefix: "远端", businessChipDevicePrefix: "设备", businessChipSamplesPrefix: "样本", businessChipGatePrefix: "门禁", businessChipGatePassed: ">50 样本", businessChipGateRisk: "样本门禁风险", businessRemoteModeManualGithubSync: "手工 GitHub 同步", businessRemoteModeUnknown: "远端模式未知",
+                pipelineLegendTitle: "流水线阶段", pipelineLegendHint: "主状态显示当前所在阶段；四枚图标分别表示适配、评测、优化、业务测评四个阶段。带星标表示已经通过最终人工核验。",
+                teamTitle: "智能体团队", teamDesc: "专注于模型适配流水线不同阶段的专用 AI 智能体。", teamLegendLabel: "阶段颜色", teamLegendAdaptation: "绿色 = 适配", teamLegendBenchmark: "青色 = 评测", teamLegendOptimization: "靛蓝 = 优化", teamLegendBusinessBenchmark: "紫色 = 业务一致性",
+                statsTitle: "流水线总览", statsDesc: "查看模型从适配、评测、优化、跨设备业务一致性验证到最终人工核验的整体推进情况。",
+                statsPrimaryFootnote: "当前看板覆盖的全部模型库存", statsQuickFilter: "快速筛选", statCoverage: "覆盖率", statEligible: "可进入", statActiveQueue: "进行中", statPendingQueue: "待处理", statTerminal: "已关闭", statWaitCuda: "等待 CUDA", statStageAdaptation: "适配阶段", statStageBenchmark: "评测阶段", statStageOptimization: "优化阶段", statStageBusinessBenchmark: "业务一致性阶段", stageNameAdaptation: "适配", stageNameBenchmark: "评测", stageNameOptimization: "优化", stageNameBusinessBenchmark: "业务一致性", primaryStageNameBusinessBenchmark: "一致性", stageAll: "当前阶段", filterStageLabel: "查看维度", filterStatusLabel: "状态", filterStatusAll: "全部状态", filterCurrentStageHint: "会按每个模型当前所在的流程阶段归类。", filterStageNotReady: "未进入本阶段", pipelineCompletedLabel: "全链路完成占比", pipelineLegendAdaptationHint: "适配阶段负责让模型先能在昇腾上稳定跑通，并完成基础推理验证。", pipelineLegendBenchmarkHint: "评测阶段负责用标准脚本和可比样本验证精度与运行表现。", pipelineLegendOptimizationHint: "优化阶段负责做 NPU 亲和加速，并确认提速后精度仍然可接受。", pipelineLegendBusinessBenchmarkHint: "业务一致性阶段负责检查真实权重、真实数据集下的结果在 NPU baseline、NPU perf 与远端 CUDA baseline 之间是否保持一致，同时保留速度与设备等证据，并要求样本数 > 50。", adaptationAvgDurationLabel: "适配平均耗时", adaptationNeedsAuthLabel: "适配需授权", adaptationTerminalLabel: "适配需授权 / 跳过 / 不适用", benchmarkAvgDurationLabel: "评测平均耗时", benchmarkBacklogLabel: "评测待处理", benchmarkTerminalLabel: "评测跳过 / 不适用", optimizationAvgDurationLabel: "优化平均耗时", optimizationBacklogLabel: "优化待处理", optimizationTerminalLabel: "优化跳过 / 不适用", businessBenchmarkPending: "待业务一致性验证", businessBenchmarkInProgress: "业务一致性验证中", businessBenchmarkWaitCuda: "等待 CUDA", businessBenchmarkCompleted: "一致性已验证", businessBenchmarkSkipped: "业务一致性跳过", businessBenchmarkNotApplicable: "业务一致性不适用", businessBenchmarkAvgDurationLabel: "业务一致性平均耗时",
+                noActiveAgents: "暂无活跃智能体，等待加入...",
+                rolePM: "项目经理", roleEngineer: "高级 AI 工程师", roleAnalyst: "数据分析师", roleOptimizer: "NPU 性能优化", roleBusinessBenchmark: "业务一致性工程师",
+                agentActive: "活跃", agentIdle: "空闲", agentOffline: "离线", agentHintActive: "正在处理新任务", agentHintIdle: "空闲中，等待下一项任务", agentHintOffline: "离线中，或心跳已超时",
+                disclaimerTitle: "免责声明",
+                disclaimer: "本看板所展示的模型适配进度与状态仅供参考，不构成任何承诺或保证。适配结果可能因环境、依赖或上游变更而有所不同。下载或使用本页链接的模型与资源时，请遵守各模型及数据源的许可协议与使用条款；对外部链接的内容与可用性本站不承担责任。本页面仅供研究与教学用途。"
+            }
+        };
+
+        createApp({
+            setup() {
+                const allModels = ref([]);
+                const agentsList = ref([]);
+
+                const getMemberConfig = (id) => {
+                    const normalizedId = id.toLowerCase();
+                    if (normalizedId === 'team-lead' || normalizedId === 'team_lead' || normalizedId === 'teamlead') {
+                        return {
+                            name: 'Team-lead',
+                            roleKey: 'rolePM',
+                            icon: 'bot',
+                            color: 'bg-slai-blue',
+                            badge: { text: 'LEAD', class: 'bg-slai-blue/10 text-slai-blue border-slai-blue/20' }
+                        };
+                    }
+                    if (normalizedId === 'model-crawler' || normalizedId === 'crawler' || normalizedId.includes('crawler')) {
+                        return {
+                            name: id.toUpperCase().replace('MODEL-', ''),
+                            roleKey: 'roleAnalyst',
+                            icon: 'bot',
+                            color: 'bg-status-warning-500',
+                            badge: { text: 'DATA', class: 'bg-status-warning-50 text-status-warning-600 border-status-warning-200' }
+                        };
+                    }
+                    if (normalizedId.startsWith('adapter')) {
+                        return {
+                            name: id.toUpperCase(),
+                            roleKey: 'roleEngineer',
+                            icon: 'bot',
+                            color: 'bg-status-success-500',
+                            badge: { text: 'DEV', class: 'bg-status-success-50 text-status-success-600 border-status-success-200' }
+                        };
+                    }
+                    if (normalizedId.startsWith('benchmark-runner') || normalizedId.includes('benchmark-runner')) {
+                        return {
+                            name: id.toUpperCase().replace('BENCHMARK-', ''),
+                            roleKey: 'roleEngineer',
+                            icon: 'bot',
+                            color: 'bg-teal-600',
+                            badge: { text: 'BENCH', class: 'bg-teal-50 text-teal-600 border-teal-200' }
+                        };
+                    }
+                    if (normalizedId.startsWith('runner') || /runner-?\d*$/.test(normalizedId)) {
+                        const num = (id.match(/runner-?(\d+)/i) || [])[1];
+                        const displayName = num ? `Benchmark Runner ${num}` : 'Benchmark Runner';
+                        return {
+                            name: displayName,
+                            roleKey: 'roleEngineer',
+                            icon: 'bot',
+                            color: 'bg-teal-600',
+                            badge: { text: 'BENCH', class: 'bg-teal-50 text-teal-600 border-teal-200' }
+                        };
+                    }
+                    if (normalizedId.startsWith('npu-optimizer') || normalizedId.includes('npu-optimizer')) {
+                        const num = (id.match(/npu-optimizer-?(\d+)/i) || [])[1];
+                        const displayName = num ? `NPU Optimizer ${num}` : 'NPU Optimizer';
+                        return {
+                            name: displayName,
+                            roleKey: 'roleOptimizer',
+                            icon: 'bot',
+                            color: 'bg-indigo-600',
+                            badge: { text: 'OPT', class: 'bg-indigo-50 text-indigo-600 border-indigo-200' }
+                        };
+                    }
+                    if (normalizedId.startsWith('business-benchmark') || normalizedId.includes('business-benchmark')) {
+                        const num = (id.match(/business-benchmark-?(\d+)/i) || [])[1];
+                        const displayName = num ? `Business Benchmark ${num}` : 'Business Benchmark';
+                        return {
+                            name: displayName,
+                            roleKey: 'roleBusinessBenchmark',
+                            icon: 'bot',
+                            color: 'bg-violet-600',
+                            badge: { text: 'BIZ', class: 'bg-violet-50 text-violet-600 border-violet-200' }
+                        };
+                    }
+                    return {
+                        name: id,
+                        roleKey: 'roleEngineer',
+                        icon: 'bot',
+                        color: 'bg-slate-500',
+                        badge: { text: 'BOT', class: 'bg-slate-100 text-slate-500 border-slate-200' }
+                    };
+                };
+
+                const searchQuery = ref('');
+                const currentLang = ref(localStorage.getItem('language') || 'en');
+                const loading = ref(true);
+                const lastRefreshTime = ref(''); // 页面/数据上次刷新的本地时间 YYYY-MM-DD HH:mm
+                const currentPage = ref(1);
+                const pageSize = ref(24);
+                const stageFilter = ref('all');
+                const stageStatusFilter = ref('');
+                const sortKey = ref(localStorage.getItem('dashboardSort') || 'updated_desc');
+                const listTopRef = ref(null);
+
+                const t = computed(() => i18nData[currentLang.value]);
+
+                const isValidUrl = (url) => {
+                    if (!url) return false;
+                    try {
+                        const parsed = new URL(url);
+                        return ['http:', 'https:'].includes(parsed.protocol);
+                    } catch (e) {
+                        return false;
+                    }
+                };
+
+                const isAuthRelatedFailure = (reason) => {
+                    if (!reason) return false;
+                    const r = (reason + '').toLowerCase();
+                    return /401|unauthorized|login|sign.?in|accept.*license|agreement|authorization|授权|需要.*授权|gated|access.*denied|token|credential/i.test(r);
+                };
+
+                const normalizeStatus = (value) => (value ?? '').toString().toLowerCase().trim();
+
+                const getAdaptationStageState = (model) => {
+                    const s = normalizeStatus(model?.adaptation_status);
+                    if (s === 'completed') return 'completed';
+                    if (s === 'failed' && isAuthRelatedFailure(model?.adaptation_failure_reason)) return 'needs_auth';
+                    if (s === 'failed') return 'skipped';
+                    if (s === 'needs_authorization' || s === 'need_authorization') return 'needs_auth';
+                    if (s === 'not_applicable') return 'not_applicable';
+                    if (s === 'skipped') return 'skipped';
+                    if (s === 'in_progress') return 'in_progress';
+                    return 'pending';
+                };
+
+                const getBenchmarkStageState = (model) => {
+                    if (getAdaptationStageState(model) !== 'completed') return 'locked';
+                    const s = normalizeStatus(model?.benchmark_status);
+                    if (['completed', 'in_progress', 'skipped', 'not_applicable', 'pending'].includes(s)) return s;
+                    return 'pending';
+                };
+
+                const getOptimizationStageState = (model) => {
+                    if (getBenchmarkStageState(model) !== 'completed') return 'locked';
+                    const s = normalizeStatus(model?.optimization_status);
+                    if (['completed', 'in_progress', 'skipped', 'not_applicable', 'pending'].includes(s)) return s;
+                    return 'pending';
+                };
+
+                const getBusinessBenchmarkStageState = (model) => {
+                    if (getOptimizationStageState(model) !== 'completed') return 'locked';
+                    const s = normalizeStatus(model?.business_benchmark_status);
+                    if (['completed', 'in_progress', 'wait_cuda', 'skipped', 'not_applicable', 'pending'].includes(s)) return s;
+                    return 'pending';
+                };
+
+                const getHumanReviewStageState = (model) => {
+                    if (getBusinessBenchmarkStageState(model) !== 'completed') return 'locked';
+                    const s = normalizeStatus(model?.human_review_status);
+                    if (['completed', 'pending'].includes(s)) return s;
+                    return 'pending';
+                };
+
+                const hasHumanReviewStar = (model) => getHumanReviewStageState(model) === 'completed';
+
+                const getCurrentPipelineStage = (model) => {
+                    const adaptationState = getAdaptationStageState(model);
+                    if (adaptationState !== 'completed') return { stage: 'adaptation', state: adaptationState };
+                    const benchmarkState = getBenchmarkStageState(model);
+                    if (benchmarkState !== 'completed') return { stage: 'benchmark', state: benchmarkState };
+                    const optimizationState = getOptimizationStageState(model);
+                    if (optimizationState !== 'completed') return { stage: 'optimization', state: optimizationState };
+                    const businessBenchmarkState = getBusinessBenchmarkStageState(model);
+                    if (businessBenchmarkState !== 'completed') return { stage: 'business_benchmark', state: businessBenchmarkState };
+                    return { stage: 'human_review', state: getHumanReviewStageState(model) };
+                };
+
+                const getStageStateForView = (model, view = stageFilter.value) => {
+                    if (view === 'adaptation') return getAdaptationStageState(model);
+                    if (view === 'benchmark') return getBenchmarkStageState(model);
+                    if (view === 'optimization') return getOptimizationStageState(model);
+                    if (view === 'business_benchmark') return getBusinessBenchmarkStageState(model);
+                    return getCurrentPipelineStage(model).state;
+                };
+
+                const getFilterStatusOptions = computed(() => {
+                    if (stageFilter.value === 'business_benchmark') {
+                        return ['', 'pending', 'in_progress', 'wait_cuda', 'completed', 'skipped', 'not_applicable'];
+                    }
+                    if (stageFilter.value === 'benchmark' || stageFilter.value === 'optimization') {
+                        return ['', 'pending', 'in_progress', 'completed', 'skipped', 'not_applicable'];
+                    }
+                    if (stageFilter.value === 'adaptation') {
+                        return ['', 'pending', 'in_progress', 'completed', 'needs_auth', 'skipped', 'not_applicable'];
+                    }
+                    return ['', 'pending', 'in_progress', 'wait_cuda', 'completed', 'needs_auth', 'skipped', 'not_applicable'];
+                });
+
+                const getStateLabel = (statusKey) => {
+                    const trans = t.value || {};
+                    if (statusKey === 'needs_auth') return trans.statNeedsAuth;
+                    if (statusKey === 'in_progress') return trans.statActiveQueue;
+                    if (statusKey === 'wait_cuda') return trans.statWaitCuda || trans.businessBenchmarkWaitCuda || 'Wait CUDA';
+                    if (statusKey === 'completed') return trans.statusCompleted;
+                    if (statusKey === 'skipped') return trans.statSkipped;
+                    if (statusKey === 'not_applicable') return trans.statusNotApplicable;
+                    if (statusKey === 'locked') return trans.filterStageNotReady;
+                    return trans.statPendingQueue;
+                };
+
+                const getFilterStatusLabel = (statusKey) => {
+                    const trans = t.value || {};
+                    if (!statusKey) return trans.filterStatusAll;
+                    return getStateLabel(statusKey);
+                };
+
+                const getFilterStatusCount = (statusKey) => {
+                    if (!statusKey) return searchScopedModels.value.length;
+                    return filteredCounts.value[statusKey] ?? 0;
+                };
+
+                const stageReadinessCount = computed(() => {
+                    if (stageFilter.value !== 'benchmark' && stageFilter.value !== 'optimization' && stageFilter.value !== 'business_benchmark') return 0;
+                    return filteredCounts.value.locked ?? 0;
+                });
+
+                const searchScopedModels = computed(() => {
+                    const query = searchQuery.value.toLowerCase().replace(/[<>"{}\\]/g, '').trim();
+                    let list = allModels.value;
+                    if (query) {
+                        list = list.filter(model =>
+                            ([model.model_id, model.description, model.adaptation_notes, model.adaptation_failure_reason].filter(Boolean).join(' ') || '').toLowerCase().includes(query)
+                        );
+                    }
+                    return list;
+                });
+
+                const filteredModels = computed(() => {
+                    let list = searchScopedModels.value;
+                    if (!stageStatusFilter.value) return list;
+                    return list.filter(model => getStageStateForView(model) === stageStatusFilter.value);
+                });
+
+                const filteredCounts = computed(() => {
+                    const counts = { pending: 0, in_progress: 0, wait_cuda: 0, completed: 0, needs_auth: 0, skipped: 0, not_applicable: 0, locked: 0 };
+                    for (const model of searchScopedModels.value) {
+                        const key = getStageStateForView(model);
+                        if (key in counts) counts[key]++;
+                    }
+                    return counts;
+                });
+
+                const getPipelineSortRank = (model) => {
+                    const current = getCurrentPipelineStage(model);
+                    const stageRank = { human_review: 0, business_benchmark: 1, optimization: 2, benchmark: 3, adaptation: 4 };
+                    const stateRank = { in_progress: 0, wait_cuda: 1, pending: 2, completed: 3, needs_auth: 4, skipped: 5, not_applicable: 6, locked: 7 };
+                    return (stageRank[current.stage] ?? 9) * 10 + (stateRank[current.state] ?? 9);
+                };
+
+                const getDisplayStage = (model, view = stageFilter.value) => {
+                    if (view === 'adaptation' || view === 'benchmark' || view === 'optimization' || view === 'business_benchmark') return view;
+                    const stage = getCurrentPipelineStage(model).stage;
+                    return stage === 'human_review' ? 'business_benchmark' : stage;
+                };
+
+                const getOptimizationTooltipPositionClass = (idx) => {
+                    const width = typeof window !== 'undefined' ? window.innerWidth : 1440;
+                    if (width >= 1024) {
+                        const column = idx % 3;
+                        if (column === 0) return 'left-0';
+                        if (column === 1) return 'left-1/2 -translate-x-1/2';
+                        return 'right-0';
+                    }
+                    if (width >= 768) {
+                        return idx % 2 === 0 ? 'left-0' : 'right-0';
+                    }
+                    return 'left-0';
+                };
+
+                const getStageUpdatedAt = (model, stage) => {
+                    if (stage === 'business_benchmark') return parseTime(model.business_benchmark_last_updated ?? model.optimization_last_updated ?? model.benchmark_last_updated ?? model.adaptation_last_updated) || 0;
+                    if (stage === 'optimization') return parseTime(model.optimization_last_updated ?? model.benchmark_last_updated ?? model.adaptation_last_updated) || 0;
+                    if (stage === 'benchmark') return parseTime(model.benchmark_last_updated ?? model.adaptation_last_updated) || 0;
+                    return parseTime(model.adaptation_last_updated) || 0;
+                };
+
+                const getDisplayStageUpdatedAt = (model, view = stageFilter.value) => {
+                    return getStageUpdatedAt(model, getDisplayStage(model, view));
+                };
+
+                const getDisplayStageUpdatedLabel = (model, view = stageFilter.value) => {
+                    const stage = getDisplayStage(model, view);
+                    const raw = stage === 'optimization'
+                        ? (model.optimization_last_updated ?? model.benchmark_last_updated ?? model.adaptation_last_updated)
+                        : stage === 'business_benchmark'
+                            ? (model.business_benchmark_last_updated ?? model.optimization_last_updated ?? model.benchmark_last_updated ?? model.adaptation_last_updated)
+                            : stage === 'benchmark'
+                                ? (model.benchmark_last_updated ?? model.adaptation_last_updated)
+                                : model.adaptation_last_updated;
+                    return raw ? String(raw).slice(0, 10) : 'TBD';
+                };
+
+                const getAdaptationDurationMs = (model) => {
+                    return getDurationBetween(model.adaptation_started_at ?? model.start_time, model.completed_at ?? model.end_time ?? model.adaptation_last_updated);
+                };
+
+                const getBenchmarkDurationMs = (model) => {
+                    return getDurationBetween(model.benchmark_started_at, model.benchmark_last_updated);
+                };
+
+                const getOptimizationDurationMs = (model) => {
+                    return getDurationBetween(model.optimization_started_at, model.optimization_last_updated);
+                };
+
+                const getBusinessBenchmarkDurationMs = (model) => {
+                    return getDurationBetween(model.business_benchmark_started_at, model.business_benchmark_last_updated);
+                };
+
+                const getDisplayStageDurationMs = (model, view = stageFilter.value) => {
+                    const stage = getDisplayStage(model, view);
+                    if (stage === 'business_benchmark') return getBusinessBenchmarkDurationMs(model);
+                    if (stage === 'optimization') return getOptimizationDurationMs(model);
+                    if (stage === 'benchmark') return getBenchmarkDurationMs(model);
+                    return getAdaptationDurationMs(model);
+                };
+
+                const stats = computed(() => {
+                    const list = allModels.value;
+                    const adaptation = { total: list.length, completed: 0, in_progress: 0, pending: 0, needs_auth: 0, skipped: 0, not_applicable: 0 };
+                    const benchmark = { eligible: 0, locked: 0, completed: 0, in_progress: 0, pending: 0, skipped: 0, not_applicable: 0 };
+                    const optimization = { eligible: 0, locked: 0, completed: 0, in_progress: 0, pending: 0, skipped: 0, not_applicable: 0 };
+                    const businessBenchmark = { eligible: 0, locked: 0, completed: 0, in_progress: 0, wait_cuda: 0, pending: 0, skipped: 0, not_applicable: 0 };
+                    let adaptationDurationMs = 0, adaptationDurationCount = 0;
+                    let benchmarkDurationMs = 0, benchmarkDurationCount = 0;
+                    let optimizationDurationMs = 0, optimizationDurationCount = 0;
+                    let businessDurationMs = 0, businessDurationCount = 0;
+
+                    for (const m of list) {
+                        const adaptationState = getAdaptationStageState(m);
+                        adaptation[adaptationState] = (adaptation[adaptationState] || 0) + 1;
+                        if (adaptationState === 'completed') {
+                            const duration = getAdaptationDurationMs(m);
+                            if (duration > 0) {
+                                adaptationDurationMs += duration;
+                                adaptationDurationCount++;
+                            }
+                        }
+
+                        const benchmarkState = getBenchmarkStageState(m);
+                        benchmark[benchmarkState] = (benchmark[benchmarkState] || 0) + 1;
+                        if (benchmarkState !== 'locked') benchmark.eligible++;
+                        if (benchmarkState === 'completed') {
+                            const duration = getBenchmarkDurationMs(m);
+                            if (duration > 0) {
+                                benchmarkDurationMs += duration;
+                                benchmarkDurationCount++;
+                            }
+                        }
+
+                        const optimizationState = getOptimizationStageState(m);
+                        optimization[optimizationState] = (optimization[optimizationState] || 0) + 1;
+                        if (optimizationState !== 'locked') optimization.eligible++;
+                        if (optimizationState === 'completed') {
+                            const duration = getOptimizationDurationMs(m);
+                            if (duration > 0) {
+                                optimizationDurationMs += duration;
+                                optimizationDurationCount++;
+                            }
+                        }
+
+                        const businessBenchmarkState = getBusinessBenchmarkStageState(m);
+                        businessBenchmark[businessBenchmarkState] = (businessBenchmark[businessBenchmarkState] || 0) + 1;
+                        if (businessBenchmarkState !== 'locked') businessBenchmark.eligible++;
+                        if (businessBenchmarkState === 'completed') {
+                            const duration = getBusinessBenchmarkDurationMs(m);
+                            if (duration > 0) {
+                                businessDurationMs += duration;
+                                businessDurationCount++;
+                            }
+                        }
+                    }
+
+                    return {
+                        total: list.length,
+                        adaptation,
+                        benchmark,
+                        optimization,
+                        businessBenchmark,
+                        pipelineCompleted: list.filter(hasHumanReviewStar).length,
+                        avgDurationMs: adaptationDurationCount > 0 ? adaptationDurationMs / adaptationDurationCount : null,
+                        benchmarkAvgDurationMs: benchmarkDurationCount > 0 ? benchmarkDurationMs / benchmarkDurationCount : null,
+                        optimizationAvgDurationMs: optimizationDurationCount > 0 ? optimizationDurationMs / optimizationDurationCount : null,
+                        businessBenchmarkAvgDurationMs: businessDurationCount > 0 ? businessDurationMs / businessDurationCount : null,
+                        countWithDuration: adaptationDurationCount,
+                    };
+                });
+
+                const sortedModels = computed(() => {
+                    const list = [...filteredModels.value];
+                    const key = sortKey.value;
+                    const [field, order] = key.split('_');
+                    const asc = order === 'asc';
+
+                    const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+                    const nameOf = (m) => (m.model_id && m.model_id.split('/').pop()) || '';
+                    const updatedOf = (m) => getDisplayStageUpdatedAt(m);
+                    const durationOf = (m) => getDisplayStageDurationMs(m);
+
+                    list.sort((a, b) => {
+                        if (field === 'name') {
+                            return (asc ? 1 : -1) * cmp(nameOf(a).toLowerCase(), nameOf(b).toLowerCase());
+                        }
+                        if (field === 'updated') {
+                            return (asc ? 1 : -1) * (updatedOf(a) - updatedOf(b));
+                        }
+                        if (field === 'status') {
+                            const sa = getPipelineSortRank(a);
+                            const sb = getPipelineSortRank(b);
+                            if (sa !== sb) return cmp(sa, sb);
+                            return cmp(nameOf(a).toLowerCase(), nameOf(b).toLowerCase());
+                        }
+                        if (field === 'duration') {
+                            return (asc ? 1 : -1) * (durationOf(a) - durationOf(b));
+                        }
+                        return 0;
+                    });
+                    return list;
+                });
+
+                const totalPages = computed(() => Math.ceil(sortedModels.value.length / pageSize.value));
+
+                const visiblePageItems = computed(() => {
+                    const total = totalPages.value;
+                    const current = currentPage.value;
+                    if (total <= 1) return [];
+
+                    const items = [];
+                    const addPage = (value) => items.push({ type: 'page', key: `page-${value}`, value });
+                    const addEllipsis = (key) => items.push({ type: 'ellipsis', key });
+
+                    if (total <= 7) {
+                        for (let p = 1; p <= total; p++) addPage(p);
+                        return items;
+                    }
+
+                    if (current <= 5) {
+                        for (let p = 1; p <= 7; p++) addPage(p);
+                        addEllipsis('right');
+                        addPage(total);
+                        return items;
+                    }
+
+                    if (current >= total - 4) {
+                        addPage(1);
+                        addEllipsis('left');
+                        for (let p = total - 6; p <= total; p++) addPage(p);
+                        return items;
+                    }
+
+                    addPage(1);
+                    addEllipsis('left');
+                    for (let p = current - 2; p <= current + 2; p++) addPage(p);
+                    addEllipsis('right');
+                    addPage(total);
+                    return items;
+                });
+
+                const paginatedModels = computed(() => {
+                    const start = (currentPage.value - 1) * pageSize.value;
+                    const end = start + pageSize.value;
+                    return sortedModels.value.slice(start, end);
+                });
+
+                watch(searchQuery, () => {
+                    currentPage.value = 1;
+                    Vue.nextTick(() => lucide.createIcons());
+                });
+
+                watch([stageFilter, stageStatusFilter], () => {
+                    currentPage.value = 1;
+                });
+
+                watch(sortKey, (val) => {
+                    currentPage.value = 1;
+                    try { localStorage.setItem('dashboardSort', val); } catch (e) { }
+                });
+
+                watch(paginatedModels, () => {
+                    Vue.nextTick(() => lucide.createIcons());
+                });
+
+                watch(currentLang, () => {
+                    document.title = t.value.pageTitle;
+                });
+
+                const onPageAfterEnter = () => {
+                    lucide.createIcons();
+                };
+
+                const changePage = (page) => {
+                    if (page >= 1 && page <= totalPages.value) {
+                        currentPage.value = page;
+                        Vue.nextTick(() => {
+                            const target = listTopRef.value;
+                            if (!target) return;
+                            const nav = document.querySelector('nav');
+                            const navHeight = nav ? nav.getBoundingClientRect().height : 0;
+                            const targetTop = target.getBoundingClientRect().top + window.scrollY - navHeight - 12;
+                            window.scrollTo({ top: Math.max(0, targetTop), behavior: 'auto' });
+                        });
+                    }
+                };
+
+                const setStageFilter = (category) => {
+                    stageFilter.value = category || 'all';
+                    stageStatusFilter.value = '';
+                    currentPage.value = 1;
+                };
+
+                const setStageStatusFilter = (status) => {
+                    stageStatusFilter.value = status || '';
+                    currentPage.value = 1;
+                };
+
+                const lastUpdated = computed(() => {
+                    const raw = lastRefreshTime.value;
+                    if (!raw) return 'TBD';
+                    if (currentLang.value === 'zh') {
+                        return raw.replace(/^(\d+)-(\d+)-(\d+)/, '$1年$2月$3日');
+                    }
+                    return raw;
+                });
+
+                const loadData = async () => {
+                    try {
+                        const response = await fetch('../board.db?t=' + Date.now());
+                        if (!response.ok) throw new Error('Failed to fetch board.db');
+                        const arrayBuffer = await response.arrayBuffer();
+
+                        const SQL = await initSqlJs({
+                            locateFile: file => `assets/${file}`
+                        });
+
+                        const db = new SQL.Database(new Uint8Array(arrayBuffer));
+
+                        // Execute query
+                        const result = db.exec("SELECT * FROM models");
+                        const agentsResult = db.exec("SELECT * FROM agents ORDER BY id ASC");
+
+                        const emptyStr = (v) => (v == null || v === undefined) ? '' : v;
+                        let newData = [];
+                        if (result.length > 0) {
+                            const columns = result[0].columns;
+                            const values = result[0].values;
+                            newData = values.map(row => {
+                                const obj = {};
+                                columns.forEach((col, idx) => {
+                                    obj[col] = emptyStr(row[idx]);
+                                });
+                                return obj;
+                            });
+                        }
+
+                        let newAgents = [];
+                        if (agentsResult.length > 0) {
+                            const columns = agentsResult[0].columns;
+                            const values = agentsResult[0].values;
+                            newAgents = values.map(row => {
+                                const obj = {};
+                                columns.forEach((col, idx) => {
+                                    obj[col] = emptyStr(row[idx]);
+                                });
+                                return {
+                                    ...obj,
+                                    ...getMemberConfig(obj.id)
+                                };
+                            });
+                        }
+                        db.close();
+
+                        agentsList.value = newAgents;
+
+                        // 防止读到写入中的不完整文件
+                        if (allModels.value.length > 0 && newData.length < allModels.value.length * 0.8) {
+                            console.warn("Partial read detected, skipping update");
+                            return;
+                        }
+
+                        // 固定间隔：每次拉取都直接替换前端缓存，不依赖 DB 变化触发
+                        if (allModels.value.length === 0) {
+                            // First load
+                            allModels.value = newData;
+                        } else {
+                            // Smart merge to prevent UI flickering - Atomic Update
+                            const currentModels = [...allModels.value];
+                            const newMap = new Map(newData.map(m => [(m.model_id ?? ''), m]));
+                            const existingIds = new Set(newData.map(m => (m.model_id ?? '')));
+
+                            // Create the next state of the array in memory first
+                            let nextModels = currentModels.filter(m => existingIds.has(m.model_id));
+
+                            for (let model of nextModels) {
+                                const newModel = newMap.get(model.model_id);
+                                model.justUpdated = false;
+                                if (newModel) {
+                                    let hasChange = false;
+                                    const fields = [
+                                        'adaptation_status', 'adaptation_last_updated', 'adaptation_failure_reason', 'adaptation_notes', 'priority', 'description', 'url', 'source',
+                                        'adaptation_started_at', 'completed_at', 'start_time', 'end_time',
+                                        'precision_status', 'throughput_npu', 'latency_npu', 'memory_usage_npu',
+                                        'throughput_cuda', 'latency_cuda', 'memory_usage_cuda', 'artifact_url', 'adaptation_owner',
+                                        'benchmark_status', 'benchmark_owner', 'benchmark_notes', 'benchmark_started_at', 'benchmark_last_updated',
+                                        'optimization_status', 'optimization_owner', 'optimization_notes', 'optimization_started_at', 'optimization_last_updated',
+                                        'business_benchmark_status', 'business_benchmark_owner', 'business_benchmark_notes', 'business_benchmark_started_at', 'business_benchmark_last_updated',
+                                        'human_review_status'
+                                    ];
+                                    for (const f of fields) {
+                                        if (model[f] !== newModel[f]) {
+                                            model[f] = newModel[f];
+                                            hasChange = true;
+                                        }
+                                    }
+                                    if (hasChange) model.justUpdated = true;
+                                    newMap.delete(model.model_id);
+                                }
+                            }
+
+                            // Add truly new items
+                            if (newMap.size > 0) {
+                                const newItems = Array.from(newMap.values()).map(m => ({ ...m, justUpdated: true }));
+                                nextModels.push(...newItems);
+                            }
+
+                            // Single atomic assignment to trigger Vue's optimized patch
+                            allModels.value = nextModels;
+                        }
+
+                        loading.value = false;
+                        lastRefreshTime.value = new Date().toLocaleString('sv').slice(0, 16);
+
+                        // Non-blocking icon refresh
+                        requestAnimationFrame(() => {
+                            lucide.createIcons();
+                        });
+                    } catch (err) {
+                        console.error("Fetch failed", err);
+                    }
+                };
+
+                const setLanguage = (lang) => {
+                    currentLang.value = lang;
+                    localStorage.setItem('language', lang);
+                };
+
+                const hasDownload = (model) => (model.adaptation_path || '').trim() !== '';
+
+                // agents.status 仅允许三值: active, idle, offline（与 .claude/agents 规定一致）
+                const getAgentStatusInfo = (agent) => {
+                    if (!agent || !agent.last_heartbeat) return { key: 'offline', label: t.value.agentOffline, color: 'bg-slate-300', pulse: false };
+
+                    const hb = parseTime(agent.last_heartbeat);
+                    const now = Date.now();
+                    const diffMin = (now - hb) / (1000 * 60);
+
+                    if (diffMin > 15) return { key: 'offline', label: t.value.agentOffline, color: 'bg-slate-300', pulse: false };
+                    const s = (agent.status || '').toLowerCase().trim();
+                    if (s === 'active') return { key: 'active', label: t.value.agentActive, color: 'bg-green-500', pulse: true };
+                    if (s === 'idle') return { key: 'idle', label: t.value.agentIdle, color: 'bg-amber-400', pulse: false };
+                    if (s === 'offline') return { key: 'offline', label: t.value.agentOffline, color: 'bg-slate-300', pulse: false };
+                    return { key: 'idle', label: t.value.agentIdle, color: 'bg-amber-400', pulse: false };
+                };
+
+                const getAgentAvatarInfo = (agent) => {
+                    const status = getAgentStatusInfo(agent);
+                    if (status.key === 'active') return { mode: 'active' };
+                    if (status.key === 'idle') return { mode: 'idle' };
+                    return { mode: 'offline' };
+                };
+
+                const isLeadAgent = (agent) => {
+                    const id = (agent?.id || '').toString().toLowerCase();
+                    return id === 'team-lead' || id === 'team_lead' || id === 'teamlead';
+                };
+
+                const getAgentHoverHint = (agent) => {
+                    const status = getAgentStatusInfo(agent);
+                    const currentTask = (agent?.current_task || '').toString().trim();
+                    if (status.key === 'active') return currentTask || t.value.agentHintActive;
+                    if (status.key === 'idle') return t.value.agentHintIdle;
+                    return t.value.agentHintOffline;
+                };
+
+                const getDownloadUrl = (model) => {
+                    const pathRaw = (model.adaptation_path || '').trim();
+                    if (pathRaw) {
+                        const basename = pathRaw.replace(/\/+$/, '').split('/').pop() || '';
+                        if (basename) return `artifacts/${basename}.zip`;
+                    }
+                    return '#';
+                };
+
+                const parseTime = (v) => {
+                    if (!v) return NaN;
+                    // Standardized format YYYY-MM-DD HH:MM:SS works best as ISO with T and Z
+                    return Date.parse(String(v).replace(' ', 'T') + 'Z');
+                };
+
+                const MAX_FUTURE_SKEW_MS = 24 * 60 * 60 * 1000;
+
+                const getDurationBetween = (startRaw, endRaw) => {
+                    const start = parseTime(startRaw);
+                    const end = parseTime(endRaw);
+                    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) return 0;
+                    // Ignore placeholder/future timestamps (for example 2099-12-31) so they do not poison averages.
+                    if (end - Date.now() > MAX_FUTURE_SKEW_MS) return 0;
+                    return end - start;
+                };
+
+                const formatDuration = (model) => {
+                    if (!model || typeof model !== 'object') return null;
+                    const ms = getDisplayStageDurationMs(model);
+                    if (!Number.isFinite(ms) || ms <= 0) return null;
+                    return formatDurationMs(ms);
+                };
+
+                const formatDurationMs = (ms) => {
+                    if (ms == null || !Number.isFinite(ms) || ms < 0) return '—';
+                    const sec = Math.floor(ms / 1000);
+                    const min = Math.floor(sec / 60);
+                    const hour = Math.floor(min / 60);
+                    const day = Math.floor(hour / 24);
+                    if (day > 0) return `${day}d ${hour % 24}h`;
+                    if (hour > 0) return `${hour}h ${min % 60}m`;
+                    if (min > 0) return `${min}m ${sec % 60}s`;
+                    return `${sec}s`;
+                };
+
+                const formatRatio = (part, whole) => {
+                    if (!Number.isFinite(part) || !Number.isFinite(whole) || whole <= 0) return '—';
+                    return `${Math.round((part / whole) * 100)}%`;
+                };
+
+                const getStageBadgeDescriptor = (stage, state) => {
+                    const trans = t.value || {};
+                    if (stage === 'adaptation') {
+                        if (state === 'completed') return { label: trans.dryRunBadge, classes: 'bg-status-success-50 text-status-success-700 border-status-success-100', icon: 'test-tube-2', spin: false };
+                        if (state === 'in_progress') return { label: trans.adaptationInProgress, classes: 'bg-status-progress-50 text-status-progress-700 border-status-progress-100', icon: 'loader-2', spin: true };
+                        if (state === 'needs_auth') return { label: trans.adaptationNeedsAuth, classes: 'bg-status-warning-50 text-status-warning-700 border-status-warning-100', icon: 'lock', spin: false };
+                        if (state === 'skipped') return { label: trans.adaptationSkipped, classes: 'bg-slate-50 text-slate-500 border-slate-200', icon: 'ban', spin: false };
+                        if (state === 'not_applicable') return { label: trans.adaptationNotApplicable, classes: 'bg-slate-100 text-slate-600 border-slate-200', icon: 'minus-circle', spin: false };
+                        return { label: trans.adaptationPending, classes: 'bg-slate-50 text-slate-600 border-slate-200', icon: 'clock', spin: false };
+                    }
+                    if (stage === 'benchmark') {
+                        if (state === 'locked') return { label: trans.stageLocked, classes: 'bg-slate-100 text-slate-400 border-slate-200', icon: 'lock', spin: false };
+                        if (state === 'completed') return { label: trans.benchmarkCompleted, classes: 'bg-teal-50 text-teal-600 border-teal-200', icon: 'bar-chart-2', spin: false };
+                        if (state === 'in_progress') return { label: trans.benchmarkInProgress, classes: 'bg-teal-50 text-teal-700 border-teal-200', icon: 'loader-2', spin: true };
+                        if (state === 'skipped') return { label: trans.benchmarkSkipped, classes: 'bg-slate-50 text-slate-500 border-slate-200', icon: 'ban', spin: false };
+                        if (state === 'not_applicable') return { label: trans.benchmarkNotApplicable, classes: 'bg-slate-100 text-slate-500 border-slate-200', icon: 'minus-circle', spin: false };
+                        return { label: trans.benchmarkPending, classes: 'bg-slate-50 text-slate-600 border-slate-200', icon: 'clock', spin: false };
+                    }
+                    if (stage === 'business_benchmark') {
+                        if (state === 'locked') return { label: trans.stageLocked, classes: 'bg-slate-100 text-slate-400 border-slate-200', icon: 'lock', spin: false };
+                        if (state === 'completed') return { label: trans.businessBenchmarkCompleted, classes: 'bg-violet-50 text-violet-700 border-violet-200', icon: 'briefcase', spin: false };
+                        if (state === 'in_progress') return { label: trans.businessBenchmarkInProgress, classes: 'bg-violet-50 text-violet-700 border-violet-200', icon: 'loader-2', spin: true };
+                        if (state === 'wait_cuda') return { label: trans.businessBenchmarkWaitCuda, classes: 'bg-amber-50 text-amber-700 border-amber-200', icon: 'wifi-off', spin: false };
+                        if (state === 'skipped') return { label: trans.businessBenchmarkSkipped, classes: 'bg-slate-50 text-slate-500 border-slate-200', icon: 'ban', spin: false };
+                        if (state === 'not_applicable') return { label: trans.businessBenchmarkNotApplicable, classes: 'bg-slate-100 text-slate-500 border-slate-200', icon: 'minus-circle', spin: false };
+                        return { label: trans.businessBenchmarkPending, classes: 'bg-slate-50 text-slate-600 border-slate-200', icon: 'clock', spin: false };
+                    }
+                    if (stage === 'human_review') {
+                        if (state === 'completed') return { label: trans.humanReviewCompleted, classes: 'bg-amber-50 text-amber-700 border-amber-200', icon: 'star', spin: false };
+                        return { label: trans.humanReviewPending, classes: 'bg-amber-50 text-amber-700 border-amber-200', icon: 'clock', spin: false };
+                    }
+                    if (state === 'locked') return { label: trans.stageLocked, classes: 'bg-slate-100 text-slate-400 border-slate-200', icon: 'lock', spin: false };
+                    if (state === 'completed') return { label: trans.optimizationCompleted, classes: 'bg-indigo-50 text-indigo-600 border-indigo-200', icon: 'zap', spin: false };
+                    if (state === 'in_progress') return { label: trans.optimizationInProgress, classes: 'bg-indigo-50 text-indigo-700 border-indigo-200', icon: 'loader-2', spin: true };
+                    if (state === 'skipped') return { label: trans.optimizationSkipped, classes: 'bg-slate-50 text-slate-500 border-slate-200', icon: 'ban', spin: false };
+                    if (state === 'not_applicable') return { label: trans.optimizationNotApplicable, classes: 'bg-slate-100 text-slate-500 border-slate-200', icon: 'minus-circle', spin: false };
+                    return { label: trans.optimizationPending, classes: 'bg-slate-50 text-slate-600 border-slate-200', icon: 'clock', spin: false };
+                };
+
+                const getPrimaryBadgeLabel = (stage, state) => {
+                    const trans = t.value || {};
+                    if (stage === 'human_review') {
+                        return state === 'completed' ? trans.humanReviewCompleted : trans.humanReviewPending;
+                    }
+                    const stageLabel =
+                        stage === 'adaptation' ? trans.stageNameAdaptation
+                            : stage === 'benchmark' ? trans.stageNameBenchmark
+                                : stage === 'optimization' ? trans.stageNameOptimization
+                                    : stage === 'business_benchmark' ? (trans.primaryStageNameBusinessBenchmark || trans.stageNameBusinessBenchmark)
+                                        : trans.stageNameHumanReview;
+                    return `${stageLabel} · ${getStateLabel(state)}`;
+                };
+
+                const getPipelineStages = (model) => {
+                    if (!model || typeof model !== 'object') return null;
+                    const adaptationState = getAdaptationStageState(model);
+                    const benchmarkState = getBenchmarkStageState(model);
+                    const optimizationState = getOptimizationStageState(model);
+                    const businessBenchmarkState = getBusinessBenchmarkStageState(model);
+                    return [
+                        { stageId: 'adaptation', ...getStageBadgeDescriptor('adaptation', adaptationState), hasTooltip: false },
+                        { stageId: 'benchmark', ...getStageBadgeDescriptor('benchmark', benchmarkState), hasTooltip: false },
+                        { stageId: 'optimization', ...getStageBadgeDescriptor('optimization', optimizationState), hasTooltip: optimizationState === 'completed' },
+                        { stageId: 'business_benchmark', ...getStageBadgeDescriptor('business_benchmark', businessBenchmarkState), hasTooltip: businessBenchmarkState === 'completed' }
+                    ];
+                };
+
+                const parseOptimizationNotes = (model) => {
+                    const raw = (model?.optimization_notes ?? '').toString().trim();
+                    if (!raw) return null;
+                    try {
+                        const notes = JSON.parse(raw);
+                        if (!notes || typeof notes !== 'object') return null;
+
+                        const asNumberOrNull = (v) => {
+                            if (v === '' || v === null || v === undefined) return null;
+                            const n = Number(v);
+                            return Number.isFinite(n) ? n : null;
+                        };
+
+                        const asRateOrNull = (v) => {
+                            const n = asNumberOrNull(v);
+                            if (n == null) return null;
+                            return n > 1 && n <= 100 ? n / 100 : n;
+                        };
+
+                        const pickFirst = (...vals) => {
+                            for (const v of vals) {
+                                if (v !== undefined && v !== null && v !== '') return v;
+                            }
+                            return null;
+                        };
+
+                        const getCosine = (obj) => {
+                            if (!obj || typeof obj !== 'object') return null;
+                            const oc = (obj.output_compare && typeof obj.output_compare === 'object') ? obj.output_compare : null;
+                            const v = pickFirst(
+                                obj.cosine_similarity,
+                                obj.cosine,
+                                obj.avg_cosine_similarity,
+                                obj.logits_avg_cosine_similarity,
+                                oc?.avg_cosine_similarity,
+                                oc?.logits_avg_cosine_similarity
+                            );
+                            return asNumberOrNull(v);
+                        };
+
+                        const bestRaw = (notes.best_result && typeof notes.best_result === 'object') ? notes.best_result : null;
+                        const firstResult = (Array.isArray(notes.results) && notes.results.length > 0 && typeof notes.results[0] === 'object') ? notes.results[0] : null;
+
+                        const speedup = pickFirst(bestRaw?.speedup_ratio, firstResult?.speedup_ratio);
+
+                        // Normalize fields so UI can render legacy notes formats.
+                        // - perf_latency_s: accept perf_latency_s or legacy latency_s
+                        // - cosine_similarity: accept multiple common keys (including nested output_compare)
+                        const baselineLatency = asNumberOrNull(pickFirst(bestRaw?.baseline_latency_s, bestRaw?.baseline_latency, firstResult?.baseline_latency_s, firstResult?.baseline_latency));
+                        const perfLatency = asNumberOrNull(pickFirst(bestRaw?.perf_latency_s, bestRaw?.latency_s, bestRaw?.latency, firstResult?.perf_latency_s, firstResult?.latency_s, firstResult?.latency));
+                        const baselineWallClock = asNumberOrNull(pickFirst(bestRaw?.baseline_wall_clock_s, firstResult?.baseline_wall_clock_s, baselineLatency));
+                        const perfWallClock = asNumberOrNull(pickFirst(bestRaw?.perf_wall_clock_s, firstResult?.perf_wall_clock_s, perfLatency));
+                        const computedLatencyReduction = (baselineLatency != null && perfLatency != null && baselineLatency > 0)
+                            ? ((baselineLatency - perfLatency) / baselineLatency) * 100
+                            : null;
+                        const computedWallClockReduction = (baselineWallClock != null && perfWallClock != null && baselineWallClock > 0)
+                            ? ((baselineWallClock - perfWallClock) / baselineWallClock) * 100
+                            : null;
+
+                        const best = bestRaw ? {
+                            ...bestRaw,
+                            measurement_contract_version: asNumberOrNull(notes?.measurement_contract_version),
+                            dtype: pickFirst(bestRaw?.dtype, firstResult?.dtype),
+                            dataset: pickFirst(bestRaw?.dataset, firstResult?.dataset),
+                            output_type: pickFirst(bestRaw?.output_type, firstResult?.output_type),
+                            num_samples: asNumberOrNull(pickFirst(bestRaw?.num_samples, firstResult?.num_samples)),
+                            baseline_wall_clock_s: baselineWallClock,
+                            perf_wall_clock_s: perfWallClock,
+                            baseline_latency_s: baselineLatency,
+                            perf_latency_s: perfLatency,
+                            wall_clock_reduction_pct: asNumberOrNull(pickFirst(bestRaw.wall_clock_reduction_pct, firstResult?.wall_clock_reduction_pct, computedWallClockReduction)),
+                            latency_reduction_pct: asNumberOrNull(pickFirst(bestRaw.latency_reduction_pct, firstResult?.latency_reduction_pct, computedLatencyReduction)),
+                            cosine_similarity: pickFirst(getCosine(bestRaw), getCosine(firstResult)),
+                            text_match_rate: asRateOrNull(pickFirst(bestRaw?.text_match_rate, firstResult?.text_match_rate)),
+                            match_rate: asRateOrNull(pickFirst(bestRaw?.match_rate, firstResult?.match_rate)),
+                            ppl_avg_rel_diff_pct: asNumberOrNull(pickFirst(bestRaw?.ppl_avg_rel_diff_pct, firstResult?.ppl_avg_rel_diff_pct)),
+                            comparison_method: pickFirst(bestRaw?.comparison_method, firstResult?.comparison_method),
+                            comparison_scope: pickFirst(bestRaw?.comparison_scope, firstResult?.comparison_scope),
+                            precision_method: pickFirst(bestRaw?.precision_method, firstResult?.precision_method),
+                            wall_clock_source: pickFirst(bestRaw?.wall_clock_source, firstResult?.wall_clock_source),
+                            baseline_warmup_iterations: asNumberOrNull(pickFirst(bestRaw?.baseline_warmup_iterations, firstResult?.baseline_warmup_iterations)),
+                            perf_warmup_iterations: asNumberOrNull(pickFirst(bestRaw?.perf_warmup_iterations, firstResult?.perf_warmup_iterations)),
+                            warmup_policy: pickFirst(bestRaw?.warmup_policy, firstResult?.warmup_policy),
+                            validation_note: (pickFirst(bestRaw?.validation_note, firstResult?.validation_note) || '').toString().trim() || null,
+                            note_excerpt: (pickFirst(bestRaw?.validation_note, bestRaw?.notes, firstResult?.validation_note, firstResult?.notes) || '').toString().trim() || null,
+                        } : null;
+
+                        return {
+                            speedup: asNumberOrNull(speedup),
+                            optimizations: (notes.optimizations ?? '').toString().trim() || null,
+                            best
+                        };
+                    } catch (_) {
+                        return null;
+                    }
+                };
+
+                const formatOptimizationRate = (value, digits = 1) => {
+                    if (value === null || value === undefined || value === '') return t.value?.optTooltipNone || 'None';
+                    const num = Number(value);
+                    if (!Number.isFinite(num)) return String(value);
+                    const pct = num <= 1 ? num * 100 : num;
+                    return `${pct.toFixed(digits)}%`;
+                };
+
+                const hasOptimizationMeasurementRedFlag = (text) => {
+                    const normalized = (text || '').toString().trim().toLowerCase();
+                    if (!normalized) return false;
+                    return [
+                        'derived from per-sample latencies',
+                        'derived from latency',
+                        'artifact timestamps appear to measure partial run',
+                        'partial run',
+                        'baseline was cold',
+                        'cold baseline',
+                        'no warmup',
+                        'violates team-lead measurement requirement',
+                        'not directly comparable',
+                        'ttft vs batch-avg-latency',
+                    ].some(flag => normalized.includes(flag));
+                };
+
+                const getOptimizationQualityMetric = (best) => {
+                    if (!best || typeof best !== 'object') return { label: t.value.optMetricCosine, value: t.value.optTooltipNone };
+                    if (best.text_match_rate != null) return { label: t.value.optMetricTextMatch, value: formatOptimizationRate(best.text_match_rate, 1) };
+                    if (best.match_rate != null) return { label: t.value.optMetricMatchRate, value: formatOptimizationRate(best.match_rate, 1) };
+                    if (best.ppl_avg_rel_diff_pct != null) return { label: t.value.optMetricPplDiff, value: formatOptimizationValue(best.ppl_avg_rel_diff_pct, '%', 1) };
+                    return { label: t.value.optMetricCosine, value: formatOptimizationValue(best.cosine_similarity, '', 4) };
+                };
+
+                const getOptimizationCardData = (model) => {
+                    const status = (model?.optimization_status ?? '').toString().toLowerCase().trim();
+                    if (status !== 'completed') return null;
+                    const parsed = parseOptimizationNotes(model);
+                    if (!parsed?.best) return null;
+
+                    const best = parsed.best;
+                    const speedup = parsed.speedup;
+                    const hasMeasurementRisk = hasOptimizationMeasurementRedFlag(best.validation_note || best.note_excerpt || '');
+                    const metaChips = [
+                        best.dtype ? { label: String(best.dtype).toUpperCase(), classes: 'bg-slate-50 text-slate-600 border-slate-200' } : null,
+                        best.dataset ? { label: best.dataset, classes: 'bg-slate-50 text-slate-600 border-slate-200' } : null,
+                        best.output_type ? { label: best.output_type, classes: 'bg-slate-50 text-slate-600 border-slate-200' } : null,
+                    ].filter(Boolean);
+
+                    const evidenceChips = [];
+                    if (best.comparison_method) {
+                        evidenceChips.push({
+                            label: `${t.value.optChipMethodPrefix}: ${best.comparison_method}`,
+                            classes: 'bg-white/80 text-slate-600 border-slate-200'
+                        });
+                    }
+                    if (best.comparison_scope) {
+                        evidenceChips.push({
+                            label: `${t.value.optChipScopePrefix}: ${best.comparison_scope}`,
+                            classes: 'bg-white/80 text-slate-600 border-slate-200'
+                        });
+                    }
+                    if (best.precision_method) {
+                        evidenceChips.push({
+                            label: `${t.value.optChipPrecisionPrefix}: ${best.precision_method}`,
+                            classes: 'bg-white/80 text-slate-600 border-slate-200'
+                        });
+                    }
+                    if (best.wall_clock_source) {
+                        evidenceChips.push({
+                            label: `${t.value.optChipWallClockPrefix}: ${best.wall_clock_source}`,
+                            classes: 'bg-white/80 text-slate-600 border-slate-200'
+                        });
+                    }
+                    if (best.warmup_policy && best.baseline_warmup_iterations != null && best.perf_warmup_iterations != null) {
+                        evidenceChips.push({
+                            label: `${t.value.optChipWarmupPrefix}: ${best.warmup_policy} ${best.baseline_warmup_iterations}/${best.perf_warmup_iterations}`,
+                            classes: 'bg-white/80 text-slate-600 border-slate-200'
+                        });
+                    }
+                    if (best.measurement_contract_version != null) {
+                        evidenceChips.push({
+                            label: `${t.value.optChipContractPrefix}: v${best.measurement_contract_version}`,
+                            classes: 'bg-white/80 text-slate-600 border-slate-200'
+                        });
+                    }
+                    evidenceChips.push(
+                        hasMeasurementRisk
+                            ? { label: t.value.optChipRisk, classes: 'bg-status-error-50 text-status-error-700 border-status-error-200' }
+                            : best.validation_note
+                                ? { label: t.value.optChipValidated, classes: 'bg-status-success-50 text-status-success-700 border-status-success-200' }
+                                : { label: t.value.optChipNeedsReview, classes: 'bg-status-warning-50 text-status-warning-700 border-status-warning-200' }
+                    );
+
+                    let stateChip = { label: t.value.optStateLegacy, classes: 'bg-slate-100 text-slate-600 border-slate-200' };
+                    let headline = null;
+                    if (hasMeasurementRisk) {
+                        stateChip = { label: t.value.optStateRisk, classes: 'bg-status-error-50 text-status-error-700 border-status-error-200' };
+                        headline = best.validation_note || best.note_excerpt || null;
+                    } else if (speedup != null && speedup <= 1) {
+                        stateChip = { label: t.value.optStateNoSpeedup, classes: 'bg-status-error-50 text-status-error-700 border-status-error-200' };
+                        headline = best.note_excerpt || null;
+                    } else if (speedup != null && speedup >= 3 && best.validation_note && best.comparison_method === 'independent_baseline_artifact') {
+                        stateChip = { label: t.value.optStateHighGain, classes: 'bg-indigo-100 text-indigo-700 border-indigo-200' };
+                        headline = best.validation_note;
+                    } else if (best.validation_note || best.comparison_method) {
+                        stateChip = { label: t.value.optStateVerified, classes: 'bg-status-success-50 text-status-success-700 border-status-success-200' };
+                        headline = best.validation_note || null;
+                    }
+
+                    const normalizedHeadline = (headline || '').trim();
+                    const normalizedOptimizations = (parsed.optimizations || '').trim();
+                    const normalizedNarrative = (best.note_excerpt || '').trim();
+
+                    const optimizationsText = normalizedOptimizations && normalizedOptimizations !== normalizedHeadline
+                        ? normalizedOptimizations
+                        : null;
+                    const narrative = normalizedNarrative && normalizedNarrative !== normalizedHeadline && normalizedNarrative !== normalizedOptimizations
+                        ? normalizedNarrative
+                        : null;
+
+                    const chips = [...metaChips, ...evidenceChips];
+
+                    return {
+                        speedup,
+                        samples: best.num_samples ?? null,
+                        best,
+                        chips,
+                        narrative,
+                        optimizationsText,
+                        quality: getOptimizationQualityMetric(best),
+                        showCosineRow: getOptimizationQualityMetric(best).label !== t.value.optMetricCosine,
+                        headline,
+                        stateChip,
+                    };
+                };
+
+                const getOptimizationTooltipData = (model) => {
+                    if (!model || typeof model !== 'object') return null;
+                    const status = (model.optimization_status ?? '').toString().toLowerCase().trim();
+                    if (status !== 'completed') return null;
+                    const parsed = parseOptimizationNotes(model);
+                    if (parsed) return { ...parsed, hasDetails: true };
+                    return {
+                        speedup: null,
+                        optimizations: null,
+                        best: { baseline_wall_clock_s: null, perf_wall_clock_s: null, wall_clock_reduction_pct: null, baseline_latency_s: null, perf_latency_s: null, latency_reduction_pct: null, cosine_similarity: null },
+                        hasDetails: false
+                    };
+                };
+
+                const parseBusinessBenchmarkNotes = (model) => {
+                    const raw = (model?.business_benchmark_notes ?? '').toString().trim();
+                    if (!raw) return null;
+                    try {
+                        const notes = JSON.parse(raw);
+                        if (!notes || typeof notes !== 'object') return null;
+
+                        const asNumberOrNull = (v) => {
+                            if (v === '' || v === null || v === undefined) return null;
+                            const n = Number(v);
+                            return Number.isFinite(n) ? n : null;
+                        };
+                        const pickFirst = (...vals) => {
+                            for (const v of vals) {
+                                if (v !== undefined && v !== null && v !== '') return v;
+                            }
+                            return null;
+                        };
+
+                        const results = Array.isArray(notes.results) ? notes.results.filter(item => item && typeof item === 'object') : [];
+                        const byRole = Object.fromEntries(results.map(item => [String(item.role || '').trim(), item]));
+                        const bestRaw = (notes.best_result && typeof notes.best_result === 'object') ? notes.best_result : null;
+                        const evidence = (notes.comparison_evidence && typeof notes.comparison_evidence === 'object') ? notes.comparison_evidence : {};
+
+                        if (!bestRaw) return null;
+
+                        return {
+                            dataset: pickFirst(bestRaw.dataset, notes.dataset, byRole.npu_perf?.dataset),
+                            outputType: pickFirst(bestRaw.output_type, byRole.npu_perf?.output_type),
+                            numSamples: asNumberOrNull(pickFirst(bestRaw.num_samples, notes.num_samples, byRole.npu_perf?.num_samples)),
+                            comparisonScope: (notes.comparison_scope || '').toString().trim() || null,
+                            remoteMode: (notes.remote_execution?.mode || '').toString().trim() || null,
+                            npuSpeedup: asNumberOrNull(bestRaw.npu_speedup_ratio),
+                            vsCudaRatio: asNumberOrNull(bestRaw.vs_cuda_latency_ratio),
+                            qualityMetricName: (pickFirst(bestRaw.quality_metric_name, byRole.npu_perf?.quality_metric_name, evidence.npu_perf_quality_metric_name) || '').toString().trim() || null,
+                            qualityMetricValue: asNumberOrNull(pickFirst(bestRaw.quality_metric_value, byRole.npu_perf?.quality_metric_value, evidence.npu_perf_quality_metric_value)),
+                            npuPerfThroughputName: (pickFirst(bestRaw.npu_perf_throughput_metric_name, byRole.npu_perf?.throughput_metric_name, evidence.npu_perf_throughput_metric_name) || '').toString().trim() || null,
+                            npuPerfThroughputValue: asNumberOrNull(pickFirst(bestRaw.npu_perf_throughput_metric_value, byRole.npu_perf?.throughput_metric_value, evidence.npu_perf_throughput_metric_value)),
+                            cudaThroughputName: (pickFirst(bestRaw.cuda_baseline_throughput_metric_name, byRole.cuda_baseline?.throughput_metric_name, evidence.cuda_baseline_throughput_metric_name) || '').toString().trim() || null,
+                            cudaThroughputValue: asNumberOrNull(pickFirst(bestRaw.cuda_baseline_throughput_metric_value, byRole.cuda_baseline?.throughput_metric_value, evidence.cuda_baseline_throughput_metric_value)),
+                            npuPerfPeakMemoryMb: asNumberOrNull(pickFirst(bestRaw.npu_perf_peak_memory_mb, byRole.npu_perf?.peak_memory_mb, evidence.npu_perf_peak_memory_mb)),
+                            cudaPeakMemoryMb: asNumberOrNull(pickFirst(bestRaw.cuda_baseline_peak_memory_mb, byRole.cuda_baseline?.peak_memory_mb, evidence.cuda_baseline_peak_memory_mb)),
+                            npuPerfDeviceModel: (pickFirst(bestRaw.npu_perf_device_model, byRole.npu_perf?.device_model, evidence.npu_perf_device_model) || '').toString().trim() || null,
+                            cudaDeviceModel: (pickFirst(bestRaw.cuda_baseline_device_model, byRole.cuda_baseline?.device_model, evidence.cuda_baseline_device_model) || '').toString().trim() || null,
+                            npuBaselineQualityMetricName: (pickFirst(byRole.npu_baseline?.quality_metric_name, evidence.npu_baseline_quality_metric_name) || '').toString().trim() || null,
+                            npuBaselineQualityMetricValue: asNumberOrNull(pickFirst(byRole.npu_baseline?.quality_metric_value, evidence.npu_baseline_quality_metric_value)),
+                            npuPerfQualityMetricName: (pickFirst(byRole.npu_perf?.quality_metric_name, evidence.npu_perf_quality_metric_name, bestRaw.quality_metric_name) || '').toString().trim() || null,
+                            npuPerfQualityMetricValue: asNumberOrNull(pickFirst(byRole.npu_perf?.quality_metric_value, evidence.npu_perf_quality_metric_value, bestRaw.quality_metric_value)),
+                            cudaQualityMetricName: (pickFirst(byRole.cuda_baseline?.quality_metric_name, evidence.cuda_baseline_quality_metric_name) || '').toString().trim() || null,
+                            cudaQualityMetricValue: asNumberOrNull(pickFirst(byRole.cuda_baseline?.quality_metric_value, evidence.cuda_baseline_quality_metric_value)),
+                        };
+                    } catch (_) {
+                        return null;
+                    }
+                };
+
+                const formatOptimizationValue = (value, suffix = '', digits = null) => {
+                    if (value === null || value === undefined || value === '') return t.value?.optTooltipNone || 'None';
+                    const num = Number(value);
+                    if (Number.isFinite(num)) {
+                        const text = digits == null ? String(num) : num.toFixed(digits);
+                        return `${text}${suffix}`;
+                    }
+                    return `${value}${suffix}`;
+                };
+
+                const BUSINESS_THRESHOLD = Object.freeze({
+                    npuSpeedupWarnMin: 0.91,
+                    vsCudaWarnMin: 0.25,
+                    vsCudaWarnMax: 1.15,
+                    boundedQualityAlignedMax: 0.002,
+                    boundedQualityCloseMax: 0.005,
+                });
+
+                const BOUNDED_BUSINESS_METRICS = new Set([
+                    "exact_match",
+                    "accuracy",
+                    "cosine_similarity",
+                    "match_rate",
+                    "text_match_rate",
+                    "rougel",
+                    "map",
+                    "map50",
+                    "ndcg_at_10",
+                    "mrr",
+                    "top1_accuracy",
+                    "f1"
+                ]);
+
+                const getBusinessQualityMetric = (parsed) => {
+                    if (!parsed?.qualityMetricName) return { label: t.value.businessMetricQuality, value: t.value.optTooltipNone };
+                    const rawKey = parsed.qualityMetricName.toString().trim();
+                    const key = rawKey.toLowerCase();
+                    const labelMap = {
+                        exact_match: t.value.businessMetricExactMatch,
+                        accuracy: t.value.businessMetricAccuracy,
+                        cosine_similarity: t.value.businessMetricCosine,
+                        match_rate: t.value.businessMetricMatchRate,
+                        text_match_rate: t.value.businessMetricTextMatch,
+                        rougel: t.value.businessMetricRouge,
+                        wer: t.value.businessMetricWer,
+                        map: t.value.businessMetricMap,
+                        map50: t.value.businessMetricMap,
+                        ndcg_at_10: t.value.businessMetricNdcg,
+                        mrr: t.value.businessMetricMrr,
+                        perplexity: t.value.businessMetricPerplexity,
+                    };
+                    const percentMetrics = new Set(["exact_match", "accuracy", "cosine_similarity", "match_rate", "text_match_rate", "rougel", "map", "map50", "ndcg_at_10", "mrr"]);
+                    const value = percentMetrics.has(key)
+                        ? formatOptimizationRate(parsed.qualityMetricValue, 1)
+                        : formatOptimizationValue(parsed.qualityMetricValue, '', key === 'wer' ? 4 : 3);
+                    return { label: labelMap[key] || rawKey, value };
+                };
+
+                const getBusinessConsistencyMetric = (parsed) => {
+                    const buildMetric = (status, statusLabel, deltaLabel, detail = null) => {
+                        const styleMap = {
+                            aligned: {
+                                cardClasses: 'bg-slate-50 border-emerald-100',
+                                primaryClasses: 'text-emerald-700',
+                                badgeClasses: 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                            },
+                            close: {
+                                cardClasses: 'bg-slate-50 border-violet-100',
+                                primaryClasses: 'text-violet-700',
+                                badgeClasses: 'bg-violet-50 text-violet-700 border-violet-200'
+                            },
+                            drift: {
+                                cardClasses: 'bg-slate-50 border-amber-100',
+                                primaryClasses: 'text-amber-700',
+                                badgeClasses: 'bg-amber-50 text-amber-700 border-amber-200'
+                            },
+                            mismatch: {
+                                cardClasses: 'bg-slate-50 border-status-warning-100',
+                                primaryClasses: 'text-status-warning-700 text-[1.2rem]',
+                                badgeClasses: 'bg-status-warning-50 text-status-warning-700 border-status-warning-200'
+                            },
+                            unknown: {
+                                cardClasses: 'bg-slate-50 border-slate-100 text-slate-900',
+                                primaryClasses: 'text-slate-700 text-[1.2rem]',
+                                badgeClasses: 'bg-white/90 text-slate-600 border-slate-200'
+                            },
+                        };
+                        const isDeltaPrimary = status === 'aligned' || status === 'close' || status === 'drift';
+                        return {
+                            label: t.value.businessMetricConsistency,
+                            status,
+                            primaryValue: isDeltaPrimary ? deltaLabel : statusLabel,
+                            badgeLabel: isDeltaPrimary ? statusLabel : null,
+                            detailText: !isDeltaPrimary && detail ? detail : null,
+                            detail,
+                            ...styleMap[status],
+                        };
+                    };
+                    if (!parsed) return buildMetric('unknown', t.value.optTooltipNone, '—');
+                    const names = [
+                        parsed.npuBaselineQualityMetricName,
+                        parsed.npuPerfQualityMetricName,
+                        parsed.cudaQualityMetricName,
+                    ]
+                        .filter(Boolean)
+                        .map(name => {
+                            const raw = name.toString().trim();
+                            return { raw, normalized: raw.toLowerCase() };
+                        });
+                    if (!names.length) return buildMetric('unknown', t.value.optTooltipNone, '—');
+                    const uniqueNames = [...new Map(names.map(item => [item.normalized, item.raw])).values()];
+                    const normalizedNames = [...new Set(names.map(item => item.normalized))];
+                    if (normalizedNames.length > 1) {
+                        return buildMetric('mismatch', t.value.businessConsistencyMetricMismatch, uniqueNames.join(' / '), uniqueNames.join(' / '));
+                    }
+                    const values = [
+                        parsed.npuBaselineQualityMetricValue,
+                        parsed.npuPerfQualityMetricValue,
+                        parsed.cudaQualityMetricValue,
+                    ].filter(v => Number.isFinite(v));
+                    if (values.length < 2) return buildMetric('unknown', t.value.optTooltipNone, '—', uniqueNames[0] || null);
+                    const delta = Math.max(...values) - Math.min(...values);
+                    const metricName = normalizedNames[0] || '';
+                    const percentMetrics = BOUNDED_BUSINESS_METRICS;
+                    const deltaText = percentMetrics.has(metricName)
+                        ? `Δ ${(delta * 100).toFixed(1)}pp`
+                        : `Δ ${delta.toFixed(metricName === 'wer' ? 4 : 3)}`;
+                    const alignedMax = percentMetrics.has(metricName) ? BUSINESS_THRESHOLD.boundedQualityAlignedMax : 0.01;
+                    const closeMax = percentMetrics.has(metricName)
+                        ? Math.max(BUSINESS_THRESHOLD.boundedQualityCloseMax, Number.isFinite(parsed.numSamples) && parsed.numSamples > 0 ? 1 / parsed.numSamples : 0)
+                        : 0.03;
+                    if (delta <= alignedMax) {
+                        return buildMetric('aligned', t.value.businessConsistencyAligned, deltaText, uniqueNames[0]);
+                    }
+                    if (delta <= closeMax) {
+                        return buildMetric('close', t.value.businessConsistencyClose, deltaText, uniqueNames[0]);
+                    }
+                    return buildMetric('drift', t.value.businessConsistencyDrift, deltaText, uniqueNames[0]);
+                };
+
+                const formatBusinessThroughput = (name, value) => {
+                    if (value == null) return t.value.optTooltipNone;
+                    const suffix = name && name !== 'throughput' ? ` ${name}` : '';
+                    return `${formatOptimizationValue(value, '', 2)}${suffix}`;
+                };
+
+                const formatBusinessRemoteMode = (mode) => {
+                    const normalized = (mode || '').toString().trim();
+                    if (!normalized) return t.value.businessRemoteModeUnknown;
+                    const labelMap = {
+                        manual_github_sync: t.value.businessRemoteModeManualGithubSync,
+                    };
+                    return labelMap[normalized] || normalized;
+                };
+
+                const getBusinessBenchmarkCardData = (model) => {
+                    const status = (model?.business_benchmark_status ?? '').toString().toLowerCase().trim();
+                    if (status !== 'completed') return null;
+                    const parsed = parseBusinessBenchmarkNotes(model);
+                    if (!parsed) return null;
+
+                    const consistency = getBusinessConsistencyMetric(parsed);
+                    const hasSuspiciousNpuSpeedup = Number.isFinite(parsed.npuSpeedup) && parsed.npuSpeedup < BUSINESS_THRESHOLD.npuSpeedupWarnMin;
+                    const hasSuspiciousVsCudaRatio = Number.isFinite(parsed.vsCudaRatio) && (parsed.vsCudaRatio < BUSINESS_THRESHOLD.vsCudaWarnMin || parsed.vsCudaRatio > BUSINESS_THRESHOLD.vsCudaWarnMax);
+                    const hasRatioRisk = hasSuspiciousNpuSpeedup || hasSuspiciousVsCudaRatio;
+                    let stateChip = { label: t.value.businessStateNeedsReview, classes: 'bg-status-warning-50 text-status-warning-700 border-status-warning-200' };
+                    if (!hasRatioRisk && consistency.status === 'aligned') {
+                        stateChip = { label: t.value.businessStateAligned, classes: 'bg-status-success-50 text-status-success-700 border-status-success-200' };
+                    } else if (!hasRatioRisk && consistency.status === 'close') {
+                        stateChip = { label: t.value.businessStateClose, classes: 'bg-violet-50 text-violet-700 border-violet-200' };
+                    }
+
+                    const chips = [
+                        parsed.dataset ? { label: parsed.dataset, classes: 'bg-white/80 text-slate-600 border-slate-200' } : null,
+                        parsed.outputType ? { label: parsed.outputType, classes: 'bg-white/80 text-slate-600 border-slate-200' } : null,
+                        parsed.numSamples != null ? {
+                            label: `${t.value.businessChipSamplesPrefix}: ${formatOptimizationValue(parsed.numSamples, '', 0)}`,
+                            classes: 'bg-white/80 text-slate-600 border-slate-200'
+                        } : null,
+                        parsed.numSamples != null ? {
+                            label: `${t.value.businessChipGatePrefix}: ${parsed.numSamples > 50 ? t.value.businessChipGatePassed : t.value.businessChipGateRisk}`,
+                            classes: parsed.numSamples > 50
+                                ? 'bg-status-success-50 text-status-success-700 border-status-success-200'
+                                : 'bg-status-warning-50 text-status-warning-700 border-status-warning-200'
+                        } : null,
+                        parsed.comparisonScope ? { label: `${t.value.businessChipScopePrefix}: ${parsed.comparisonScope}`, classes: 'bg-white/80 text-slate-600 border-slate-200' } : null,
+                        parsed.remoteMode ? { label: `${t.value.businessChipRemotePrefix}: ${formatBusinessRemoteMode(parsed.remoteMode)}`, classes: 'bg-white/80 text-slate-600 border-slate-200' } : null,
+                        consistency.detail ? { label: `${t.value.businessMetricQuality}: ${consistency.detail}`, classes: 'bg-white/80 text-slate-600 border-slate-200' } : null,
+                        parsed.npuPerfDeviceModel ? { label: `${t.value.businessChipDevicePrefix}: ${parsed.npuPerfDeviceModel}`, classes: 'bg-white/80 text-violet-700 border-violet-200' } : null,
+                        parsed.cudaDeviceModel ? { label: `${t.value.businessChipDevicePrefix}: ${parsed.cudaDeviceModel}`, classes: 'bg-white/80 text-slate-600 border-slate-200' } : null,
+                    ].filter(Boolean);
+
+                    return {
+                        npuSpeedup: parsed.npuSpeedup,
+                        vsCudaRatio: parsed.vsCudaRatio,
+                        npuSpeedupCardClasses: hasSuspiciousNpuSpeedup ? 'bg-amber-50 border-amber-200' : 'bg-violet-50 border-violet-100',
+                        npuSpeedupValueClasses: hasSuspiciousNpuSpeedup ? 'text-amber-700' : 'text-violet-700',
+                        vsCudaCardClasses: hasSuspiciousVsCudaRatio ? 'bg-amber-50 border-amber-200' : 'bg-violet-50 border-violet-100',
+                        vsCudaValueClasses: hasSuspiciousVsCudaRatio ? 'text-amber-700' : 'text-violet-700',
+                        quality: consistency,
+                        throughputPerf: formatBusinessThroughput(parsed.npuPerfThroughputName, parsed.npuPerfThroughputValue),
+                        throughputCuda: formatBusinessThroughput(parsed.cudaThroughputName, parsed.cudaThroughputValue),
+                        memoryPerf: formatOptimizationValue(parsed.npuPerfPeakMemoryMb, ' MB', 0),
+                        memoryCuda: formatOptimizationValue(parsed.cudaPeakMemoryMb, ' MB', 0),
+                        headline: parsed.npuPerfDeviceModel && parsed.cudaDeviceModel ? `${parsed.npuPerfDeviceModel} vs ${parsed.cudaDeviceModel}` : null,
+                        stateChip,
+                        chips,
+                    };
+                };
+
+                const getStatusInfo = (model) => {
+                    if (!model || typeof model !== 'object') return { label: '—', classes: 'bg-slate-50 text-slate-600 border-slate-200', icon: 'clock', spin: false };
+                    const current = getCurrentPipelineStage(model);
+                    return { ...getStageBadgeDescriptor(current.stage, current.state), label: getPrimaryBadgeLabel(current.stage, current.state) };
+                };
+
+                const REFRESH_INTERVAL_MS = 60000; // 每 60 秒读取 db 刷新一次
+
+                onMounted(() => {
+                    document.title = t.value.pageTitle;
+                    loadData();
+                    setInterval(loadData, REFRESH_INTERVAL_MS);
+                    lucide.createIcons();
+                });
+
+                return {
+                    allModels, agentsList, searchQuery, currentLang, loading, t,
+                    filteredModels, sortedModels, paginatedModels, currentPage, totalPages, visiblePageItems, changePage, onPageAfterEnter,
+                    stats, lastUpdated, setLanguage, getStatusInfo, getPipelineStages, parseOptimizationNotes, getOptimizationTooltipData, getOptimizationCardData, parseBusinessBenchmarkNotes, getBusinessBenchmarkCardData, formatOptimizationValue, formatOptimizationRate, getAgentStatusInfo, getAgentAvatarInfo, getAgentHoverHint, isLeadAgent, getOptimizationTooltipPositionClass, getDisplayStageUpdatedLabel, formatDuration, formatDurationMs, formatRatio,
+                    stageFilter, stageStatusFilter, stageReadinessCount, setStageFilter, setStageStatusFilter, getFilterStatusOptions, getFilterStatusLabel, getFilterStatusCount, sortKey, hasDownload, getDownloadUrl, isValidUrl, listTopRef, hasHumanReviewStar
+                };
+            }
+        }).mount('#app');
+    </script>
+</body>
+
+</html>

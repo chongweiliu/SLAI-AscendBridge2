@@ -1,0 +1,36 @@
+**本次执行任务**：仅处理 board 中 `optimization_status='completed' AND business_benchmark_status='pending'` 的模型；对这些模型启动并协调** 1 个 ** `business-benchmark` 执行第四阶段真实业务测评；要求先完成本机 NPU baseline/perf；若 `remote_ssh_host` / `remote_project_root` 可用且 SSH 连通，则继续自动执行远端 CUDA baseline、自动回收工件、自动汇总 `business_summary.json`；只有在 SSH 不通、远端环境异常或自动回收失败时，才允许退回“打印命令模板并等待人工回传工件”的降级路径。严格遵守看板更新、Git 自动提交及心跳清理机制。所有符合条件的第四阶段 pending 处理完毕前不得结束。
+
+**单 worker 强约束**：本轮第四阶段 prompt 写的是 **1 个** `business-benchmark`，所以只能复用同一个业务测评 agent（通常就是 `business-benchmark-1`）。不得因为某些模型进入 `wait_cuda`，就擅自再生成 `business-benchmark-2+`。
+**wait_cuda 语义强约束**：`wait_cuda` 是**模型状态**，表示该模型等待人工/远端 CUDA 工件回传；它不是 worker 占用状态。其处理语义必须与 `skipped` / `not_applicable` / `needs_authorization` 一致：team-lead 收到 `stage=waiting_cuda` 并成功写库后，就应视为当前 worker 已释放，必须继续使用同一个 `business-benchmark-1` 去领取后续 `business_benchmark_status='pending'` 的模型。
+**agent 复用强调**：若 `business-benchmark-1` 已存在且可通信，就只能复用它；即使短时间内尚未收到空闲消息，也应等待/推动该 agent 回到 `status=idle`，而不是新建第二个同类 agent。
+
+**任务筛选条件**（重要）：
+```sql
+SELECT model_id FROM models
+WHERE optimization_status = 'completed'
+  AND business_benchmark_status = 'pending'
+```
+
+**常见错误**：不要只用 `business_benchmark_status='pending'` 筛任务；未完成 optimization（`optimization_status!='completed'`）的模型不得进入第四阶段。
+**禁止提前退出**：只要 `optimization_status='completed' AND business_benchmark_status='pending'` 的任务仍大于 0，就严禁退出、严禁输出“任务执行成功完成”、严禁仅汇报“若干 business-benchmark 已启动”；必须持续循环执行“读取收件箱 -> 验收完成候选 -> 回收超时任务 -> 给空闲 `business-benchmark` 重新分配 pending 任务”，直到第四阶段 pending 清零。若存在 `business_benchmark_status='wait_cuda'`，必须单独汇报为“等待 CUDA 回传/补跑”，不能当成已完成。
+**完成判定强调**：不得因为磁盘上已经存在 `business_summary.json`、`business_metrics_npu_*_baseline.json`、`business_metrics_npu_*_perf.json`、`business_metrics_cuda_*_baseline.json`，或仅因 `check_business_benchmark_run.py` 通过，就直接把第四阶段记为 `completed`；必须由对应 `business-benchmark` 发出 `result=completed_candidate`，并由 team-lead 使用磁盘 `business_summary.json` 原文调用 `scripts/board_ops.py update_business_benchmark_status --business_benchmark_status completed --notes "$(cat business_summary.json)"` 成功后，才算真正完成。
+**VLM 画像强约束**：对 `llava`、`qwen-vl`、`qwen2-vl`、`qwen2.5-vl`、`qwen3-vl`、`internvl`、`cogvlm`、`paligemma`、`idefics`、`blip` 等 VLM / 多模态模型，第四阶段默认必须保持图文业务画像，不得漂移成 `wikitext/gsm8k/mmlu/ceval` 这类纯文本数据集，除非用户明确要求文本业务测评且已证明当前 evaluator 在**无图输入**下仍会真实执行模型推理，而不是走 placeholder / fallback。
+**假结果拦截强调**：若业务工件出现明显不可信口径，例如 `latency_s` 为微秒级/接近 0、`throughput_qps` 异常夸张，或 `start_time/end_time` 对应的整轮 wall-clock 明显是秒级而落盘 `latency_s` 却几乎为 0，则该轮结果视为无效；必须先定位是画像错、evaluator fallback、还是计时口径错误，再备份旧工件并重跑，严禁直接写库。
+**Accuracy 异常拦截强调**：`accuracy / exact_match / match_rate / top1_accuracy` 这类 0~1 质量指标现在也属于 completed gate。若某一路结果超出 `0~1` 合法范围、三路结果全为 `0.0`、某一路塌到 `0.0` 而其他路明显更高，或 `npu_baseline/npu_perf/cuda_baseline` 间出现异常大漂移，都必须先排查 evaluator、label 归一化、数据集画像、processor/model_files 继承是否一致；在修复并重跑前严禁写库。
+**wait_cuda 前置 gate 强调**：任何模型准备降级为 `wait_cuda` 前，必须先执行 `check_business_benchmark_run.py --adapt {name} --wait-cuda-npu-only`，确认本机 NPU baseline/perf 双路的 `num_samples`、字段完整性、质量指标以及 `npu_speedup_ratio >= 0.9` 都正常；若本机双路已经全 0、单路塌 0、质量漂移异常，或 `npu_perf` 相比 baseline 明显退化，必须直接回 `pending` 修本机链路，严禁继续烧 CUDA 或写成 `wait_cuda`。
+**NaN/Inf 拦截强调**：第四阶段业务工件与 `business_summary.json` 中所有关键数值字段都必须是有限值；`NaN`、`+Inf`、`-Inf` 一律视为无效结果，必须定位计时、显存采集、吞吐统计或评分实现问题后重跑，严禁直接写库。
+**Perf 继承强调**：若 adaptation 下存在 `model_files/`（尤其含 `modeling_*.py`、`npu_patches.py`、`config.json` 等优化产物），则第四阶段 `npu_perf` 必须显式证明自己继承了优化路径；正式工件至少应体现 `loaded_from_model_files=true` 或等价的 patch 载入证据。若 `npu_perf` 仍静默退化成未加载 patch 的 baseline 路径，该轮结果无效。
+**证据字段强调**：`business_summary.json` 与业务工件必须包含 `device_model`、`latency_s`、`peak_memory_mb`、`throughput_metric_name`、`throughput_metric_value`，以及可用的 `ttft_ms/tpot_ms`；不得只写自然语言摘要。
+**路径与产物边界强调**：所有有副作用的操作必须只发生在分配消息里的 `adaptation_path`；不得由 `model_id` 自行推导路径，不得把业务测评工件写到项目根或其他 adaptation 目录。
+**环境规则强调**：第四阶段必须与前三阶段一致，使用 `adaptation_path` 目录下自己的 uv 环境；并且命令必须显式写 `uv run --extra ...`。本机 NPU 只允许 `uv run --extra ascend ...`，远端 CUDA 只允许 `uv run --extra cuda ...`；缺少 `--extra` 的 `uv run python ...` 与直接 `.venv/bin/python ...` 均视为违规口径。
+**运行时证据强调**：第四阶段正式工件必须落盘 `python_executable`、`python_version`、`package_versions`、`scenario_command`，用于确认实际执行的 Python 与依赖栈；缺失这些字段的旧工件不得直接当作最新标准结果入库。
+**远端 CUDA 强调**：默认应优先尝试全自动 SSH 闭环（远端执行 + 工件回收 + 本地 summarize/check）；若远端 CUDA baseline 工件最终仍未回传，可由 team-lead 将 DB 状态写为 `wait_cuda`；不得写成 `completed`。
+**历史重跑强调**：若这次是在已存在正式第四阶段工件的 adaptation 上按新规则补跑，必须先把旧 `business_metrics_*` / `business_summary.json` 改名备份，推荐后缀 `__prev_rule_refresh_<timestamp>`；否则 `run-remote-cuda` 回收同名新 CUDA 工件时会因为本地已有不同内容文件而拒绝覆盖，导致新结果不能直接接管 canonical 工件。
+**批量刷新强调**：历史 `completed` 结果补跑时，必须逐模型完成 `run-npu -> run-remote-cuda -> summarize/check -> board_ops 写库` 的闭环；不要等所有模型跑完后再统一写库。
+**长跑判活强调**：远端 CUDA 若长时间无新 stdout，但 `business_eval.py` 仍在 `ps` 中存活，先结合 `nvidia-smi`、本地 `business_metrics_cuda_*` / `business_summary.json` 修改时间判断是否仍在真实执行；不要过早打成 `wait_cuda`。
+**SSH 输入约定**：默认直接使用 `remote_ssh_host=cuda-remote`，`remote_project_root` 优先读取执行机环境变量 `SLAI_REMOTE_PROJECT_ROOT`；若无特别说明，所有远端 CUDA 命令、`print-remote-command`、人工执行说明都应按这组值生成。真实 `HostName / Port / User / IdentityFile` 应保存在执行机自己的 `~/.ssh/config`，不得写进仓库 prompt、`.env`、README、已提交 JSON 或 notes。
+**SSH 回退约定**：只有当 `cuda-remote` 明确不可用，且操作者临时提供了 `ssh user@host -p port` 这类一次性命令时，才允许改用直连；执行结束后仍应恢复为默认口径 `cuda-remote + 当前 remote_project_root`，不要把真实端点回写进仓库。
+**消息关键字强调**：必须正确处理来自 `business-benchmark` 的 `status=active`、`result=in_progress`、`result=completed_candidate`、`result=failed`、`status=idle` 等消息；`stage=waiting_cuda` 只允许用于“SSH 不通 / 远端自动执行失败后等待人工回传”的降级场景。收到该消息后，team-lead 应将 DB 状态写为 `wait_cuda`，但不能写成 `completed`。
+**空闲闭环强调**：当 `business-benchmark` 因 `stage=waiting_cuda` 把某个模型降级为 `wait_cuda` 后，必须马上把该 worker 重新视为可分配对象；若 prompt 仍是 `1 个 business-benchmark`，只能继续复用这同一个 agent 处理剩余 pending，而不是扩容。
+**再次强调**：必须每轮读取收件箱 ~/.claude/teams/团队名/inboxes/team-lead.json，否则无法接收消息。
+**执行要求**：请使用 teams 模式并严格按照上述定义执行本次任务。所有符合条件的第四阶段 pending 处理完毕前不得结束。

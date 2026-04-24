@@ -1,0 +1,24 @@
+**本次执行任务**：仅处理 board 中 `benchmark_status='completed' AND optimization_status='pending'` 的模型；对这些模型启动并协调 4 个 `npu-optimizer` 执行 torch_npu 融合算子替换或 `runtime_only` 优化（如 `warmup + TASK_QUEUE_ENABLE`）；不抓新模型、不执行新适配、不执行 benchmark。严格遵守看板更新、Git 自动提交及心跳清理机制。所有符合条件的 optimization pending 处理完毕前不得结束。
+
+**任务筛选条件**（重要）：
+```sql
+-- 正确的优化任务筛选
+SELECT model_id FROM models
+WHERE benchmark_status = 'completed'
+  AND optimization_status = 'pending'
+```
+
+**常见错误**：不要使用 `optimization_status='pending'` 作为唯一条件，必须同时检查 `benchmark_status='completed'`。
+**禁止提前退出**：只要 `benchmark_status='completed' AND optimization_status='pending'` 的任务仍大于 0，就严禁退出、严禁输出“任务执行成功完成”、严禁仅汇报“4 个 optimizer 已启动”；必须持续循环执行“读取收件箱 -> 验收完成消息 -> 回收超时任务 -> 给空闲 `npu-optimizer` 重新分配 pending 任务”，直到 optimization pending 清零。
+**完成判定强调**：不得因为磁盘上已经存在 `accuracy_run_perf.py`、`model_files/`、`optimization_notes.json`、`benchmark_metrics_*_perf.json`，或仅因 `check_accuracy_run_perf.py` 通过，就直接把 optimization 记为 `completed`；必须由对应 `npu-optimizer` 发出完成消息，并读取磁盘 `optimization_notes.json` 原文，调用 `scripts/board_ops.py update_optimization_status --optimization_status completed --notes "{notes}"` 成功，并回读 `board.db` 核验后，才算真正完成。
+**路径与产物边界强调**：所有有副作用的操作必须只发生在分配消息里的 `adaptation_path`；不得由 `model_id` 自行推导路径。标准 transformers 模型或兼容模式才要求 `model_files/`；自定义模型库走直接改源码时，不得把“缺少 model_files/”误判为未完成。若最终走 `runtime_only` 路径（仅 `warmup + TASK_QUEUE_ENABLE` 等），可以没有 `model_files/`，但必须在 `optimization_notes` 中显式写 `optimization_kind=runtime_only`。
+**超时回收强调**：优化任务即便已有部分产物，超时回收时也只能回到 `pending` 并记录“部分完成，可恢复”，不得保留成模糊完成态，更不得直接写成 `completed`。
+**消息关键字强调**：必须正确处理 `progress=running`、`result=completed`、`result=failed`、`status=idle` 等来自 `npu-optimizer` 的消息；不得把自然语言描述当成已完成信号。
+**状态回写强调**：
+- `pending` / `skipped` / `not_applicable` 的 `notes` 必须是结构化 JSON，至少包含 `reason_code`、`retryable`、`recommended_action`、`evidence`、`next_step`
+- 版本兼容、依赖缺失、OOM、多卡才能跑、样本不足 `<50`、工件缺失、工件口径不一致、重复分配但无新产物、空备注等一律回 `pending`
+- 只有在已经完成 `runtime_only` 尝试后，才能把“无真实提速”记为 `skipped`，或把“架构/格式确实不适用”记为 `not_applicable`
+- 若融合算子不适用、性能回退或精度回归，但 `runtime_only` 有真实提速，则应记为 `completed` 而不是 `skipped/not_applicable`
+**样本不足补救强调**：若 `num_samples < 50`，先运行 `python scripts/dataset_mapping.py --model_id "{model_id}" --candidates --json` 查看候选数据集，再运行 `python scripts/download_datasets.py --model-id "{model_id}" --candidate-datasets` 下载并重测；不得直接写 `skipped`。
+**再次强调**：必须每轮读取收件箱 ~/.claude/teams/团队名/inboxes/team-lead.json，否则无法接收消息。
+**执行要求**：请使用 teams 模式并严格按照上述定义执行本次任务。所有符合条件的 optimization pending 处理完毕前不得结束。

@@ -1,0 +1,16 @@
+**本次执行任务**：0. 看板已由脚本清空（agents 表已清空、models.owner 已清空）；1. 如果 board 中存在 `adaptation_status='pending'` 的模型，则适配这些待适配模型；如果没有待适配模型，则使用 model-crawler 抓取 hf 热榜上的 20 个模型（整个会话中只能抓 20 个）并注册到看板后再适配；2. 协调 6 个 adapter 并行执行适配；3. 严格遵守看板更新、DRY RUN 验证、Git 自动提交及心跳清理机制。所有任务处理完毕前不得结束。
+
+**任务筛选条件**（重要）：
+```sql
+SELECT model_id FROM models
+WHERE adaptation_status = 'pending'
+```
+
+**写库红线**：除 model-crawler 的 `register_model` 外，任何状态写入都必须通过 `scripts/board_ops.py`；严禁使用 `sqlite3` 写语句、Python `sqlite3` 或临时脚本直接改写 `board.db`。
+**禁止提前退出**：只要 `adaptation_status='pending'` 的任务仍大于 0，就严禁退出、严禁输出“任务执行成功完成”、严禁仅汇报“若干 adapter 已启动”；必须持续循环执行“读取收件箱 -> 验收完成消息 -> 回收超时任务 -> 给空闲 adapter 重新分配 pending 任务”。仅当当前会话允许抓新模型时，才可在 pending 清零后进入抓取；若当前模式不允许抓新模型，则必须坚持推进直到 pending 清零。
+
+**完成判定强调**：不得因为磁盘上已有 adaptation 目录、`demo.py`、`README.md`、`.status.json` 或某次 dry run 跑过，就直接把任务记为 `completed`；必须以 adapter 的 `result=completed` 消息或“任务已完成”心跳配合 dry run 核验为准。
+
+**目录边界强调**：所有有副作用的操作必须只发生在分配消息里的 `adaptation_path`；不得由 `model_id` 自行推导路径，不得把模型缓存写到项目根 `models/`。
+**再次强调**：必须每轮读取收件箱 ~/.claude/teams/团队名/inboxes/team-lead.json，否则无法接收 adapter 消息。
+**执行要求**：请使用 teams 模式并严格按照上述定义执行本次任务。所有任务处理完毕前不得结束。
