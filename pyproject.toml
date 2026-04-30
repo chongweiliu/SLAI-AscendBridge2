@@ -1,5 +1,5 @@
 [project]
-name = "slai-ascendbridgenext"
+name = "slai-ascendbridge2"
 version = "0.1.0"
 description = "Framework for adapting and evaluating PyTorch models on Huawei Ascend NPUs"
 requires-python = ">=3.10"

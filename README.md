@@ -1,8 +1,8 @@
-# SLAI-AscendBridgeNext
+# SLAI-AscendBridge2
 
-`SLAI-AscendBridgeNext` 是一款面向华为昇腾 NPU 的自动化智能体编排与单模型适配框架，用于将 PyTorch 模型迁移到 Ascend。它支持从模型发现、环境治理、代码适配、精度评测到 NPU 性能优化的闭环流程；如果需要，也可以继续扩展到第四阶段 `business_benchmark`。
+`SLAI-AscendBridge2` 是一款面向华为昇腾 NPU 的自动化智能体编排与单模型适配框架，用于将 PyTorch 模型迁移到 Ascend。它支持从模型发现、环境治理、代码适配、精度评测到 NPU 性能优化的闭环流程；如果需要，也可以继续扩展到第四阶段 `business_benchmark`。
 
-这个仓库是**框架仓**，负责脚本、检查器、调度骨架、dashboard、`.claude` 下的 agents / skills / agent-memory，以及 prompt 模板，不默认携带公开 adaptation 集合。模型级 adaptation 建议放在独立仓库 `SLAI-AscendBridgeNext-Adaptations`，或按你的内部目录结构单独维护。
+这个仓库是**框架仓**，负责脚本、检查器、调度骨架、dashboard、`.claude` 下的 agents / skills / agent-memory，以及 prompt 模板，不默认携带公开 adaptation 集合。模型级 adaptation 建议放在独立仓库 `SLAI-AscendBridge2-Adaptations`，或按你的内部目录结构单独维护。
 
 为兼容不同 agent / IDE 的入口约定，仓库根目录额外保留了两个软链接：
 
@@ -11,17 +11,17 @@
 
 ## 仓库定位
 
-- `SLAI-AscendBridgeNext`
+- `SLAI-AscendBridge2`
   - 框架、脚本、检查器、dashboard、`.claude` agents / skills / agent-memory
   - 适合批量调度、多阶段闭环、统一状态管理
-- `SLAI-AscendBridgeNext-Adaptations`
+- `SLAI-AscendBridge2-Adaptations`
   - 模型级 `adaptations/{name}/` 产物集合
   - 适合单模型复用、逐步公开、按需筛选发布
 
 ## 仓库文件架构
 
 ```text
-SLAI-AscendBridgeNext/
+SLAI-AscendBridge2/
 ├── .claude/
 │   ├── agent-memory/                  # 智能体阶段记忆与规则沉淀
 │   ├── agents/                        # 智能体定义
@@ -136,14 +136,14 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 如果你已经有本地副本，直接进入仓库目录即可：
 
 ```bash
-cd /path/to/SLAI-AscendBridgeNext
+cd /path/to/SLAI-AscendBridge2
 ```
 
 如果你还需要公开 adaptation 仓中的单模型产物，可按需把某个目录同步到本仓库：
 
 ```bash
 mkdir -p adaptations
-rsync -av /path/to/SLAI-AscendBridgeNext-Adaptations/adaptations/<name>/ ./adaptations/<name>/
+rsync -av /path/to/SLAI-AscendBridge2-Adaptations/adaptations/<name>/ ./adaptations/<name>/
 ```
 
 ### 3. 初始化框架环境
@@ -275,7 +275,7 @@ uv run python scripts/board_ops.py list_optimization_tasks --status pending
 启动示例：
 
 ```bash
-cd /path/to/SLAI-AscendBridgeNext
+cd /path/to/SLAI-AscendBridge2
 uv sync
 uv run python scripts/board_ops.py init
 IS_SANDBOX=1 claude --dangerously-skip-permissions
@@ -290,7 +290,7 @@ IS_SANDBOX=1 claude --dangerously-skip-permissions --agent team-lead
 #### 推荐提示词
 
 ```text
-你当前在 SLAI-AscendBridgeNext 仓库根目录。
+你当前在 SLAI-AscendBridge2 仓库根目录。
 
 只处理单个模型：Qwen/Qwen2.5-0.5B-Instruct
 模型权重路径：/mnt/model/qwen/Qwen2.5-0.5B-Instruct
@@ -334,7 +334,7 @@ IS_SANDBOX=1 claude --dangerously-skip-permissions --agent team-lead
 
 ```bash
 npm i -g @openai/codex
-cd /path/to/SLAI-AscendBridgeNext
+cd /path/to/SLAI-AscendBridge2
 codex
 ```
 
@@ -373,7 +373,7 @@ Done when:
 
 推荐流程：
 
-1. 用 Cursor 打开 `SLAI-AscendBridgeNext` 仓库根目录
+1. 用 Cursor 打开 `SLAI-AscendBridge2` 仓库根目录
 2. 进入 `Agent mode` 或 `Agents Window`
 3. 明确告诉 agent：只处理一个模型、只改一个 adaptation 目录
 4. 先让 agent 制定计划，再让它落地修改和运行命令
@@ -429,10 +429,10 @@ uv run python accuracy_run_perf.py --use-pretrained
 
 ## 与 adaptation 仓配合
 
-如果你已经在 `SLAI-AscendBridgeNext-Adaptations` 中维护了单模型目录，可按需同步到本框架仓：
+如果你已经在 `SLAI-AscendBridge2-Adaptations` 中维护了单模型目录，可按需同步到本框架仓：
 
 ```bash
-rsync -av /path/to/SLAI-AscendBridgeNext-Adaptations/adaptations/<name>/ ./adaptations/<name>/
+rsync -av /path/to/SLAI-AscendBridge2-Adaptations/adaptations/<name>/ ./adaptations/<name>/
 ```
 
 然后继续在本框架仓中跑 checker、benchmark、optimization 和 dashboard。

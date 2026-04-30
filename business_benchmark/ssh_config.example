@@ -17,7 +17,7 @@ Host cuda-remote
 #   instead of hardcoding HostName / Port / User inside the repository.
 
 # Recommended remote project root (documented convention only; not an SSH config key)
-# export SLAI_REMOTE_PROJECT_ROOT=/path/to/remote/SLAI-AscendBridgeNext
+# export SLAI_REMOTE_PROJECT_ROOT=/path/to/remote/SLAI-AscendBridge2
 
 # Recommended matching fields in business_benchmark_config.json
 # {

@@ -1,10 +1,10 @@
-# SLAI-AscendBridgeNext - Project Context
+# SLAI-AscendBridge2 - Project Context
 
 ## 项目概述
 
 自动化智能体编排系统，将 PyTorch 模型适配到华为昇腾 (Ascend) NPU。
 
-这是拆分后的**框架仓**。它负责脚本、检查器、调度骨架、dashboard、`.claude` 下的 agents / skills / agent-memory，以及 prompt 模板；模型级 adaptation 建议放在独立仓库 `SLAI-AscendBridgeNext-Adaptations` 中按需维护和公开。
+这是拆分后的**框架仓**。它负责脚本、检查器、调度骨架、dashboard、`.claude` 下的 agents / skills / agent-memory，以及 prompt 模板；模型级 adaptation 建议放在独立仓库 `SLAI-AscendBridge2-Adaptations` 中按需维护和公开。
 
 为兼容不同 agent / IDE 的入口约定，仓库根目录额外保留：
 
@@ -24,7 +24,7 @@ export HF_ENDPOINT=https://hf-mirror.com
 ## 仓库结构
 
 ```
-SLAI-AscendBridgeNext/
+SLAI-AscendBridge2/
 .claude/
 ├── agent-memory/     # 智能体阶段记忆与规则沉淀
 ├── agents/           # 智能体定义

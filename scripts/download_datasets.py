@@ -907,7 +907,7 @@ def _download_ncbi_disease_dataset(out_dir: Path) -> None:
 
     def _fetch_text(urls: list[str]) -> str:
         errors: list[str] = []
-        headers = {"User-Agent": "slai-ascendbridgenext/1.0"}
+        headers = {"User-Agent": "slai-ascendbridge2/1.0"}
         curl_path = shutil.which("curl")
         for url in urls:
             if curl_path:
@@ -1045,7 +1045,7 @@ def _download_bionlp2004_dataset(out_dir: Path) -> None:
 
     def _fetch_text(urls: list[str]) -> str:
         errors: list[str] = []
-        headers = {"User-Agent": "slai-ascendbridgenext/1.0"}
+        headers = {"User-Agent": "slai-ascendbridge2/1.0"}
         curl_path = shutil.which("curl")
         for url in urls:
             if curl_path:

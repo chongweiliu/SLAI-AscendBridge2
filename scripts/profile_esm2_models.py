@@ -4,7 +4,7 @@ Uses torch_npu.profiler L1 level to collect operator-level performance data.
 Runs in config mode (random weights, shrunk layers) for fast execution.
 
 Usage:
-    cd /path/to/SLAI-AscendBridgeNext/adaptations/{model_dir}
+    cd /path/to/SLAI-AscendBridge2/adaptations/{model_dir}
     uv run python ../../scripts/profile_esm2_models.py
 """
 

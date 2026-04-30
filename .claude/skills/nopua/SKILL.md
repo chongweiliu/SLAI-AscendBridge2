@@ -366,7 +366,7 @@ PUA 的方法论是好的。驱动力是毒药。
 
 ---
 
-## Agent Team 集成（适配 SLAI-AscendBridgeNext 架构）
+## Agent Team 集成（适配 SLAI-AscendBridge2 架构）
 
 > 本节将 NoPUA 方法论映射到 `team-lead` / `adapter` / `benchmark-runner` / `npu-optimizer` / `model-crawler` 五角色体系。
 
