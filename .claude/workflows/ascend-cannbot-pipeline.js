@@ -1,6 +1,6 @@
 // ascend-cannbot-pipeline.js
 // 将现有模型适配工具链与 cannbot Ascend C 算子生成工具串成一条确定性 pipeline，
-// 扩大可适配模型范围（专治算子缺口型模型，如 TRELLIS 这类带稀疏卷积/哈希表/QEF/光栅化的 3D 生成模型）。
+// 扩大可适配模型范围（专治算子缺口型模型：带稀疏卷积/哈希表/QEF/光栅化的 3D 生成、SSM selective_scan、block-sparse attention 等）。
 //
 // 编排原则：
 // - 只用项目已有 agent（model-crawler/adapter/benchmark-runner/npu-optimizer/business-benchmark/team-lead）
@@ -11,8 +11,8 @@
 
 export const meta = {
   name: 'ascend-cannbot-pipeline',
-  description: 'TRELLIS式全流程：适配→算子缺口分析→cannbot算子开发→评测→优化→业务测评→同步',
-  whenToUse: '需要用 cannbot 补齐 Ascend C 算子才能跑通/跑好的模型（如 TRELLIS）',
+  description: '算子缺口型模型全流程：适配→算子缺口分析→cannbot算子开发→评测→优化→业务测评→同步',
+  whenToUse: '需要用 cannbot 补齐 Ascend C 算子才能跑通/跑好的算子缺口型模型（3D 生成/SSM/稀疏视觉等）',
   phases: [
     { title: 'Preflight' },
     { title: 'Adaptation' },
@@ -38,18 +38,18 @@ const _args = (function () {
 })()
 const REPLAY = !!_args.replay
 
-// ───────────────────────────── codex 验证过的可复用模式（TRELLIS.2-4B）─────────────────────────────
-// 以下模式来自 codex 在 microsoft/TRELLIS.2-4B 上的成功实践，固化进 workflow 作为各阶段 agent 的指引。
+// ───────────────────────────── cannbot 协同适配可复用模式 ─────────────────────────────
+// 以下模式来自算子缺口型模型（3D 生成/SSM/稀疏视觉）的 cannbot 协同适配实践，固化进 workflow 作为各阶段 agent 的指引。
 const CODEX_PATTERNS = [
-  '【codex 验证模式（来自 TRELLIS.2-4B，同类 custom-repo cannbot 模型适用）】',
+  '【cannbot 协同适配可复用模式（算子缺口型 custom-repo 模型通用）】',
   '',
   '■ custom-repo 模型识别与处理：',
-  '- 非 standard transformers（无 modeling_*.py / 无 setup.py）→ custom-repo。克隆源码到 adaptation_path/{repo}/（删嵌套 .git），sys.path.insert 注入 trellis2 包，不 uv add。',
+  '- 非 standard transformers（无 modeling_*.py / 无 setup.py）→ custom-repo。克隆源码到 adaptation_path/{repo}/（删嵌套 .git），sys.path.insert 注入模型包，不 uv add。',
   '- model_source_kind=custom_repo_*_checkpoint，tokenizer_source_kind=not_applicable_custom_repo（custom-repo 通常无 tokenizer）。',
-  '- 画像必须手写 business_benchmark_config.json 固定（dataset/evaluation_profile/primary_metric）。dataset_mapping.py --business-profile 会把无标准信号的 custom-repo 误判成 causal_lm+mmlu 或 image_matting。',
+  '- 画像必须手写 business_benchmark_config.json 固定（dataset/evaluation_profile/primary_metric）。dataset_mapping.py --business-profile 会把无标准信号的 custom-repo 误判成 causal_lm+mmlu 或 image_matting（实测被误判过）。',
   '',
   '■ 绕过 manager 自动生成（关键陷阱）：',
-  '- custom-repo 模型禁止用 business_benchmark_manager.py 的 run-npu / print-remote-command 自动生成——它们会用通用模板覆盖 custom business_run.py，并把 config 画像改成错误值（TRELLIS.2 曾被改成 image_matting）。',
+  '- custom-repo 模型禁止用 business_benchmark_manager.py 的 run-npu / print-remote-command 自动生成——它们会用通用模板覆盖 custom business_run.py，并把 config 画像改成错误值（实测曾被改成 image_matting）。',
   '- 自己写 business_run.py（复用 accuracy_run.py loader），不写 business_eval.py/business_model_eval.py（避免被当通用 evaluator 调用）。直接 .venv/bin/python business_run.py --scenario {npu_baseline|npu_perf|cuda_baseline} 执行。',
   '- 若误跑了 manager print-remote-command，立即检查 business_run.py 是否被覆盖，从备份恢复。config 里写 custom_repo_note 记录此风险。',
   '',
@@ -90,7 +90,7 @@ const CODEX_PATTERNS = [
   '',
   '■ 优化口径（runtime_only 边际收益）：',
   '- accuracy_run.py(baseline) 与 accuracy_run_perf.py(perf) loader/images/mesh_to_stats 完全相同（直接可比）。perf 版无 Step1 profiler，run_perf 显式 run_warmup 后 timed pass，t0 前额外 synchronize。',
-  '- code patch 先试（如 segment_reduce→scatter_add），更慢或数值漂移则 revert（TRELLIS.2 实测 0.92x 已 revert）。退 runtime_only（warmup+TQE）。',
+  '- code patch 先试（如 segment_reduce→scatter_add），更慢或数值漂移则 revert（实测 0.92x 已 revert）。退 runtime_only（warmup+TQE）。',
   '- 共享卡噪声 → perf 多轮 best_of_runs（取 min latency over N runs），记 measurement_note。NPU 16 卡满载时 phase4 比 phase3 升 40-50% latency 属真实环境，npu_speedup_ratio<1.0 但 >0.90 gate 且 cosine=1.0 即真实业务结果。',
   '- optimization_notes: code_modified=false + code_change_attempts>=2 + 注明"模型代码无更改"时允许 runtime_only speedup_ratio=1.0。',
   '',
@@ -99,27 +99,11 @@ const CODEX_PATTERNS = [
   '- 远端 CUDA_VISIBLE_DEVICES=0 .venv/bin/python business_run.py --scenario cuda_baseline --max-samples 52 --use-pretrained。scp 回收 metrics+outputs（md5 校验），summarize 重建 business_summary.json。',
   '- SSH 不通降级 print-remote-command 命令模板 + 写 wait_cuda 释放 owner。',
   '',
-  '■ 防工件污染（TRELLIS.2 实踩坑）：',
+  '■ 防工件污染（实踩坑）：',
   '- canonical business_metrics_*.json 曾被一次 2 样本 smoke run 覆盖（num_samples=2 vs 真实 52），导致 check 不过。business_run.py 落盘前必须校验 num_samples==config.max_samples，smoke/aligned run 写独立后缀文件（如 __2sample_aligned），绝不覆盖 canonical。',
   '- wait_cuda 前置 gate：check_business_benchmark_run.py --wait-cuda-npu-only（npu_speedup_ratio>=0.9、质量非全 0、num_samples>50）。',
   '',
   '■ 记忆沉淀：每个 custom-repo cannbot 模型适配完成后，写 .claude/agent-memory/business-benchmark/<model>.md（frontmatter + Why + How to apply + 实跑结果 + 相关 memory 链接），覆盖画像漂移、manager 覆盖、env bootstrap、wall_clock 口径、gate 坑、NPU 噪声等可复用陷阱。',
-].join('\n')
-
-// TRELLIS.2 has a verified quality path. Agents must invoke this path instead of
-// reconstructing an approximate 512/default or compressed preview command.
-const TRELLIS2_CANONICAL_QUALITY = [
-  '【TRELLIS.2-4B 正式质量路径：禁止分叉】',
-  '- 唯一正式入口：adaptation_path/run_verified_quality.sh。该脚本调用 run_fixed_1024_light.py，不得另写 run_wfval.py、不得改成默认/512 pipeline、不得用 d8k/点云/简化预览代替正式 GLB。',
-  '- runner 内锁定：pipeline_type=1024_cascade、seed=42、DINO 全 NPU（npu_exact GELU）、dense attention FP32 累加、SPARSE_CONV_BACKEND=none、SPARSE_ATTN_BACKEND=npu_fusion、ATTN_BACKEND=sdpa。',
-  '- 导出锁定：8,000,000 face target、1024 texture、COLOR_0、四组 vertex-PBR material、input accent projection；禁止 meshfix/补洞/平滑/重建几何改变模型输出。',
-  '- 正式调用：TRELLIS_CLEAN_BUILD=1 bash run_verified_quality.sh <absolute_input_image> <output_dir> "<ground truth description>" <vision_prompt_file>。同输入复验可用 TRELLIS_CLEAN_BUILD=0，但仍须 manifest-only 校验。',
-  '- 必备工件：00_input.png、01_preprocessed.png、fixed_1024.glb、metrics.json、run.log、sha256.txt、input_accents.json、四视角 PNG、render_sanity.json、operator_manifest.json、vision_report.md。少一项都不得 completed。',
-  '- 最终展示必须区分诊断渲染与 PBR：四张 render_{front,side,back,three-quarter}.png 只是白底 vertex-color 机器门禁，禁止当最终效果。Blender 可用时必须运行 render_blender_pbr.py 生成 render_pbr.png；锁定 ORTHO、yaw=300、height=0.75、ortho_scale=1.16、background=0.12。Blender 不可用则明确 PBR=INCONCLUSIVE。',
-  '- 视觉规则：GLM-5.2 文本 agent 不能看图。vision_probe.py 的红图与绿底黑方块探针必须先 PASS；Task/Read 若只返回 CDN URL 判 INCONCLUSIVE；使用 vision_check.py base64 直传并保留 raw response。',
-  '- 三方 gate：raw vision response、机器结构/颜色/取景 gate、人工输入-渲染对照必须一致；任何冲突不得 PASS。软件 vertex-color render 不能验证 PBR；只有 render_pbr.png 真实 PBR renderer 证据可判 PBR，并且 GLM-5.2 必须调用 vision agent 或 vision_check.py 看输入图与 PBR 图，不能凭文本/hash 判断。',
-  '- 算子证据必须来自实际 runtime marker；仅 load/patch 日志不算执行。segment_reduce 可记 enabled_not_observed，O-Voxel host 路径未调用 qef 时必须写 false，不得伪造 6/6。',
-  '- _wfval 不得通过 symlink 复用另一个 adaptation 的 npu_patches/operators/TRELLIS.2 后再声称独立适配。权重缓存可只读共享，但代码、patch、构建清单和运行日志必须属于当前 adaptation。',
 ].join('\n')
 
 
@@ -326,9 +310,6 @@ function commonPreamble(ctx) {
     '',
     CODEX_PATTERNS,
   ]
-  if ((ctx.model_id || '').toLowerCase() === 'microsoft/trellis.2-4b') {
-    parts.push('', TRELLIS2_CANONICAL_QUALITY)
-  }
   return parts.join('\n')
 }
 
@@ -338,7 +319,7 @@ phase('Preflight')
 
 const modelId = _args.model_id
 const upstreamRepo = _args.upstream_repo
-if (!modelId) throw new Error('args.model_id 必填（如 microsoft/TRELLIS.2-4B）')
+if (!modelId) throw new Error('args.model_id 必填（如 state-spaces/mamba-130m-hf）')
 if (!upstreamRepo) throw new Error('args.upstream_repo 必填（上游 git 仓库）')
 
 log('Preflight: 注册模型 + 环境校验 model_id=' + modelId + (REPLAY ? ' [REPLAY]' : ''))
@@ -349,7 +330,7 @@ const regPrompt = [
   '你是 model-crawler。任务：注册模型并推导 adaptation_path。',
   REPLAY
     ? '【REPLAY】模型已入库。只读确认：list_adaptation_tasks 找到该 model_id；推导现有 adaptation_path（读 adaptations/ 目录已存在的 sanitized 子目录）。不注册、不修改任何文件。'
-    : '1. 若 board.db 未入库：' + BOARD + ' register_model --model_id "' + modelId + '" --url "' + upstreamRepo + '" --source huggingface（按 --help 补全参数）。\n2. 若已入库则跳过。\n3. 推导 adaptation_path：参考现有 adaptations/ 目录命名（model_id 的 / → _，参考 microsoft_trellis_2_4b 这类 sanitized 形式）。\n4. 通过 list_adaptation_tasks 确认该 model_id 存在且 adaptation_status=pending。',
+    : '1. 若 board.db 未入库：' + BOARD + ' register_model --model_id "' + modelId + '" --url "' + upstreamRepo + '" --source huggingface（按 --help 补全参数）。\n2. 若已入库则跳过。\n3. 推导 adaptation_path：参考现有 adaptations/ 目录命名（model_id 的 / → _，如 state-spaces/mamba-130m-hf → state_spaces_mamba_130m_hf）。\n4. 通过 list_adaptation_tasks 确认该 model_id 存在且 adaptation_status=pending。',
   '返回 schema：registered / already_existed / adaptation_path / model_id。',
 ].join('\n')
 
@@ -417,7 +398,7 @@ const adaptPrompt = [
         '2. 克隆 ' + upstreamRepo + ' 进 adaptation_path/{repo}/，删除嵌套 .git/（.gitignore 加 **/{repo}/.git）。',
         '3. 写 pyproject.toml（含 ascend extra）、demo.py（支持 --dry-run）。',
         '4. 【custom-repo 检测】若非 standard transformers（无 modeling_*.py / 无 setup.py），按 CODEX_PATTERNS 的 custom-repo 处理：sys.path.insert 注入包，不 uv add；model_source_kind=custom_repo_*_checkpoint。',
-        '5. 建 npu_patches/，优先复用现成 patch（参考 adaptations/microsoft_trellis_2_4b/npu_patches/ 与 cadpalette_1460）：conv_none、attention_torch_sdpa、o_voxel_npu、ovoxel_runtime、scatter_reduce→double scatter_add_、aclnnInplaceCopy 规避（torchvision Normalize 改手动 out-of-place）、.cuda()→input device、coords.long()、spatial_shape int64。',
+        '5. 建 npu_patches/，优先复用现成 patch（参考已有 adaptation 的 npu_patches/）：conv_none、attention_torch_sdpa、o_voxel_npu、ovoxel_runtime、scatter_reduce→double scatter_add_、aclnnInplaceCopy 规避（torchvision Normalize 改手动 out-of-place）、.cuda()→input device、coords.long()、spatial_shape int64。',
         '6. 【CUDA 扩展降级】若模型含 CUDA C++ 扩展（如 o-voxel）且本机无 nvcc/aarch64，按 CODEX_PATTERNS 写 setup_cpu.py（CppExtension，排除 .cu，ext_cpu.cpp），CUDA-only 算子用纯 numpy/torch shim 补齐。',
         '7. healing loop：uv run python demo.py → 抓 Traceback → 自修，直到通过。',
         '8. gate：adaptation/scripts/check_adaptation.py 通过；output.txt 必须含 [Run] Output: / [Success]，不得含 "Falling back to simpler validation"。',
@@ -455,7 +436,7 @@ const gapPrompt = [
     ? [
         '【REPLAY】不重跑 profile。只读现有工件重建候选清单：',
         '1. 读 ' + ctx.adaptation_path + '/operator_gap_report.md（若存在）。',
-        '2. 读 ' + ctx.adaptation_path + '/npu_patches/cannbot_ops.py 与仓库根 operators/ 下已被集成的算子目录，反推 decision=ascend_c 的算子清单（TRELLIS.2 应为 hashmap_3d / submanifold_conv3d / qef_solve_3x3 / uv_rasterize_interp / sparse_grid_sample_3d）。',
+        '2. 读 ' + ctx.adaptation_path + '/npu_patches/cannbot_ops.py 与仓库根 operators/ 下已被集成的算子目录，反推 decision=ascend_c 的算子清单（按模型实际缺口，如 hashmap_3d / submanifold_conv3d / qef_solve_3x3 / uv_rasterize_interp / sparse_grid_sample_3d / selective_scan / block_attention_score 等）。',
         '3. 不修改任何文件。',
       ].join('\n')
     : [
@@ -543,7 +524,7 @@ if (gap.has_gap && ascendOps.length > 0) {
       '你是 ascendc-kernel-developer。任务：实现 ' + op.op_name + '。',
       '工作目录：' + operatorsDirFor(op) + '。读取 DESIGN.md / PLAN.md / WALKTHROUGH.md。',
       '产出 op_kernel/*.asc、op_host/*.asc、op_extension/*.cpp（register.cpp 注册 torch.ops.npu.' + op.op_name + '），编译出 .so，写测试用例。',
-      '【pitfall（TRELLIS v2 教训）】507035 vector-core exception：禁用标量 GetValue/SetValue relay，改批量 ReduceSum Pattern::Reduce::AR；UB 192KB 限制下大 Co 走 gather-scatter fallback。',
+      '【pitfall（实测教训）】507035 vector-core exception：禁用标量 GetValue/SetValue relay，改批量 ReduceSum Pattern::Reduce::AR；UB 192KB 限制下大 Co 走 gather-scatter fallback。',
       '验证：独立用例 max_diff 达标（fp32 累加），tests_pass=true。',
       '返回 schema：op_name / so_path / torch_op_name / tests_pass / max_diff / success / notes。',
     ].join('\n')
@@ -586,7 +567,7 @@ if (gap.has_gap && ascendOps.length > 0) {
     '你是 adapter。任务：把 cannbot 产出的算子集成进 ' + ctx.adaptation_path + '/npu_patches/cannbot_ops.py。',
     '已通过算子（torch_op_name）：' + okOps.map(function (o) { return o.op_name }).join(', '),
     '1. 写 cannbot_ops.py：CANNBOT_OPS 总开关 + 逐算子 CANNBOT_{OP} 覆盖，默认开启；加载各 .so，注册 torch.ops.npu.{op}。',
-    '2. e2e 稳定性验证：在真实 pipeline 中多次调用（对齐 TRELLIS v2 的 29 次含 N=13383 Cin=Co=1024），e2e_stable=true。',
+    '2. e2e 稳定性验证：在真实 pipeline 中多次调用（如 24 层 × 50 样本连续调用，含大 N/Cin/Co 配置），e2e_stable=true。',
     '3. 【诚实降级（v1 教训）】若某 kernel 实测慢于 torch fallback，默认关闭该算子（如 SPCONV_SKIP_CANNBOT=1），但保留 kernel + 设计文档。',
     '4. 把 .so 路径、torch_op_name、enabled_by_default 记入 notes。',
     '返回 schema：ops_integrated / loader_path / e2e_stable / e2e_calls / success / notes。',
@@ -623,9 +604,7 @@ const benchPrompt = [
       ].join('\n')
     : [
         '1. 领任务：' + BOARD + ' assign_benchmark_task --agent_id benchmark-runner-1。',
-        ((modelId || '').toLowerCase() === 'microsoft/trellis.2-4b'
-          ? '2. 【TRELLIS.2 专用】禁止生成通用 accuracy_run 代替质量推理。直接执行 TRELLIS_CLEAN_BUILD=1 bash ' + ctx.adaptation_path + '/run_verified_quality.sh <absolute_input_image> <formal_output_dir> "<ground truth description>" <vision_prompt_file>；逐项核对 TRELLIS2_CANONICAL_QUALITY 的必备工件和 gate，d8k/preview/contact sheet 不能作为正式输出。'
-          : '2. 生成并运行 accuracy_run.py（--use-pretrained 加载真实权重；--cpu 兜底）。产出 outputs_*.pt、benchmark_metrics_*.json、trace_*.json。'),
+        '2. 生成并运行 accuracy_run.py（--use-pretrained 加载真实权重；--cpu 兜底）。产出 outputs_*.pt、benchmark_metrics_*.json、trace_*.json。',
         '3. 要求 num_samples>=50；不足则先用 scripts/dataset_mapping.py --model-id ' + modelId + ' --candidates 补候选数据集并重测。',
         '4. 若 cannbot 已集成（' + (integration ? '是' : '否') + '），确保 accuracy_run 能加载 npu_patches/cannbot_ops.py 的 patch。',
         '5. gate：benchmark/scripts/check_accuracy_run.py --adapt ' + ctx.adaptation_path + ' 通过。',
@@ -667,7 +646,7 @@ const optPrompt = [
     : [
         '1. 领任务：' + BOARD + ' assign_optimization_task --agent_id npu-optimizer-1。',
         '2. 先执行 benchmark/scripts/check_accuracy_run.py --adapt ' + ctx.adaptation_path + ' 核对 baseline 脚本；不通过先修 accuracy_run.py。',
-        '3. 写 accuracy_run_perf.py。先试 code patch（如 segment_reduce→scatter_add）；若更慢则 revert（TRELLIS v2 实测 0.92× 已 revert）。',
+        '3. 写 accuracy_run_perf.py。先试 code patch（如 segment_reduce→scatter_add）；若更慢则 revert（实测 0.92× 已 revert）。',
         '4. 退 runtime_only（warmup + TASK_QUEUE_ENABLE=1）。',
         '5. 产 optimization_notes.json：',
         '   - code_patch 要求 best_result.speedup_ratio>1.0；',
