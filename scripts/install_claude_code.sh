@@ -222,6 +222,8 @@ check_nodejs() {
             curl -fsSL "https://nodejs.org/dist/${NODE_FULL_VER}/${NODE_TAR}" -o "/tmp/${NODE_TAR}" || {
                 log_error "Failed to download Node.js from nodejs.org"; exit 1
             }
+            # tar 解压 .tar.xz 需要 xz，openEuler/centos minimal 可能没装
+            command -v xz >/dev/null 2>&1 || { dnf install -y xz 2>/dev/null || yum install -y xz 2>/dev/null || apt-get install -y xz 2>/dev/null; }
             cd /tmp && tar -xf "${NODE_TAR}" && cp -r "node-${NODE_FULL_VER}-${NODE_ARCH}/"* /usr/local/ && rm -rf "node-${NODE_FULL_VER}-${NODE_ARCH}" "${NODE_TAR}"
             cd "$ORIG_PWD"
             ;;
