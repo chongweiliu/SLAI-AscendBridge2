@@ -229,8 +229,6 @@ agent 自行硬编码（如 `--id "npu-optimizer-1"`）而非从 team config 读
 
 ---
 
-
-
 ## ⚠️ 每次 session 必须：team-lead 也要注册心跳
 
 **新 session 开始时**，team-lead **必须**立即执行心跳注册（否则 board_ops list_agents 看不到自己）：

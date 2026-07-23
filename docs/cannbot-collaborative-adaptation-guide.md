@@ -2,8 +2,6 @@
 
 cannbot 协同适配是 SLAI-AscendBridge2 的算子缺口补齐机制：当模型有 CUDA-only 算子缺口（NPU 原生/gitcode 社区都没有）时，由 cannbot-adapter agent 走 cannbot 4 角色流程生成 Ascend C 算子补齐，让模型在 NPU 跑通/提速。
 
-> 本流程已通过两类模型实证：通用层（Mamba SSM，selective_scan 4.03x 提速）+ 专属层（Direct3D-S2 2D-to-3D，block_attention_score v2 验收 PASS 91/100）。
-
 ---
 
 ## 一、什么模型适合触发
@@ -12,9 +10,9 @@ cannbot 协同适配是 SLAI-AscendBridge2 的算子缺口补齐机制：当模�
 
 | 模型类型 | 典型算子缺口 | 适合度 |
 |---------|-------------|--------|
-| 3D 生成（Direct3D-S2/cadpalette）| sparse conv / hashmap / QEF / 光栅化 / block-sparse attn | 高 ✅ |
+| 3D 生成（image-to-3D 等）| sparse conv / hashmap / QEF / 光栅化 / block-sparse attn | 高 ✅ |
 | 点云/稀疏视觉 | sparse conv / scatter_reduce / 自定义采样 | 高 ✅ |
-| Mamba/SSM | selective_scan / selective_state_update / causal_conv1d | 高 ✅ |
+| SSM 类 | SSM 算子 / selective_state_update / causal_conv1d | 高 ✅ |
 | 自定义 diffusion（triton kernel）| 自定义 sampler / 融合 kernel | 中 |
 | 标准 transformer LLM（Llama/Qwen）| 几乎无（attention/MLP NPU 原生）| 不需要 ❌ |
 | 标准 CNN | conv/bn 原生 | 不需要 ❌ |
@@ -74,8 +72,8 @@ adapter 继续 / npu-optimizer 集成测速 → benchmark → optimization → b
 
 1. **三段式优先级**：torch_npu 原生 > gitcode CANN 社区 > cannbot 新建。cannbot 是最后手段，不重复造 NPU 已有算子的轮子（如 matmul 用原生 bmm）。
 2. **先获取参考源码**：Architect 前必做。CUDA kernel（设计蓝本）+ 纯 torch golden（精度对照）+ 模型调用点（形状/dtype/是否非连续）。
-3. **cannbot 算子集成必须 `.contiguous()`**：算子按裸指针读不遵守 torch strides，来自 torch.split/transpose/view 的非连续张量必须 `.contiguous()`（Mamba 根因，曾 3 次误诊为 bf16 精度悬崖/stream 取错流）。
-4. **Reviewer 必须含真实权重 fuzz**：synthetic test_torch.py 测不到边界（两算子都因此返工/被证伪）。加载 pretrained 跑 50+ 样本 op vs golden，覆盖实际模型配置。
+3. **cannbot 算子集成必须 `.contiguous()`**：算子按裸指针读不遵守 torch strides，来自 torch.split/transpose/view 的非连续张量必须 `.contiguous()`（实测根因，曾 3 次误诊为 bf16 精度悬崖/stream 取错流）。
+4. **Reviewer 必须含真实权重 fuzz**：synthetic test_torch.py 测不到边界（曾因此返工/被证伪）。加载 pretrained 跑 50+ 样本 op vs golden，覆盖实际模型配置。
 5. **stream 一致性**：`at::full(-1)` 等用 torch_npu 默认流，与算子 aclStream 不同步致非确定性。用 aclStream 上的 memsetAsync + synchronize。
 6. **MIX 模式陷阱**：`__mix__(1,2)` 融合 Cube+Vector kernel 与自定义 program 调度冲突，AIC 不被驱动。优先非融合双 kernel（纯 AIC `__aicore__` + 纯 AIV `__vector__`）。
 7. **编译用 adaptation .venv python**：`cmake -DPython3_EXECUTABLE=<adaptation>/.venv/bin/python`，否则 dlopen 崩 `std::length_error`。
@@ -90,17 +88,6 @@ adapter 继续 / npu-optimizer 集成测速 → benchmark → optimization → b
 - **Reviewer 嵌套 spawn 在 GLM-5.2 下可能卡**：前 3 角色可靠出 .so，Reviewer 可能卡。建议 team-lead 顶层 spawn Reviewer（不嵌套）。
 - **speedup_ratio ≥3x 需独立 baseline 工件** + comparison_method=independent_baseline_artifact + 非 self_baseline + steady_state latencies 正数。
 - **board_ops 写库 + 回读 DB 核验**。
-
----
-
-## 六、验证实证（2026-07）
-
-| 层 | 模型 | cannbot 算子 | 触发入口 | 结果 |
-|----|------|-------------|---------|------|
-| 通用层（非 3D）| Mamba-130m（SSM）| selective_scan_ssm | optimization 性能瓶颈 | PASS 90/100 + **4.03x 提速**（cosine 0.99999）|
-| 专属层（2D-to-3D）| Direct3D-S2 | block_attention_score | adaptation 硬缺口 | v1 FAIL 62→返工→v2 PASS 91/100 |
-
-**结论**：cannbot 协同适配对通用层（非 3D）和专属层（2D-to-3D）都有效。
 
 ---
 
@@ -124,4 +111,4 @@ adapter 继续 / npu-optimizer 集成测速 → benchmark → optimization → b
 - 算子 NPU 原生有（matmul→bmm）：三段式第一段解决，不到 cannbot
 - 算子 gitcode 社区有：三段式第二段解决
 
-**一句话**：给 team-lead"模型可能有算子缺口，遇缺口走 cannbot 协同"的提示词，选算子缺口型模型（3D/稀疏/Mamba/自定义 diffusion），team-lead 自动按 cannbot-adapter.md + methodology.md 走流程。
+**一句话**：给 team-lead"模型可能有算子缺口，遇缺口走 cannbot 协同"的提示词，选算子缺口型模型（3D/稀疏/SSM/自定义 diffusion），team-lead 自动按 cannbot-adapter.md + methodology.md 走流程。

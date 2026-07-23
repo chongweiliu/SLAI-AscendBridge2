@@ -1,6 +1,6 @@
 // ascend-cannbot-pipeline.js
 // 将现有模型适配工具链与 cannbot Ascend C 算子生成工具串成一条确定性 pipeline，
-// 扩大可适配模型范围（专治算子缺口型模型：带稀疏卷积/哈希表/QEF/光栅化的 3D 生成、SSM selective_scan、block-sparse attention 等）。
+// 扩大可适配模型范围（专治算子缺口型模型：带稀疏卷积/哈希表/QEF/光栅化的 3D 生成、SSM 算子、block-sparse attention 等）。
 //
 // 编排原则：
 // - 只用项目已有 agent（model-crawler/adapter/benchmark-runner/npu-optimizer/business-benchmark/team-lead）
@@ -105,7 +105,6 @@ const CODEX_PATTERNS = [
   '',
   '■ 记忆沉淀：每个 custom-repo cannbot 模型适配完成后，写 .claude/agent-memory/business-benchmark/<model>.md（frontmatter + Why + How to apply + 实跑结果 + 相关 memory 链接），覆盖画像漂移、manager 覆盖、env bootstrap、wall_clock 口径、gate 坑、NPU 噪声等可复用陷阱。',
 ].join('\n')
-
 
 const REGISTER_SCHEMA = {
   type: 'object',
@@ -319,7 +318,7 @@ phase('Preflight')
 
 const modelId = _args.model_id
 const upstreamRepo = _args.upstream_repo
-if (!modelId) throw new Error('args.model_id 必填（如 state-spaces/mamba-130m-hf）')
+if (!modelId) throw new Error('args.model_id 必填（如 {model_id}）')
 if (!upstreamRepo) throw new Error('args.upstream_repo 必填（上游 git 仓库）')
 
 log('Preflight: 注册模型 + 环境校验 model_id=' + modelId + (REPLAY ? ' [REPLAY]' : ''))
@@ -330,7 +329,7 @@ const regPrompt = [
   '你是 model-crawler。任务：注册模型并推导 adaptation_path。',
   REPLAY
     ? '【REPLAY】模型已入库。只读确认：list_adaptation_tasks 找到该 model_id；推导现有 adaptation_path（读 adaptations/ 目录已存在的 sanitized 子目录）。不注册、不修改任何文件。'
-    : '1. 若 board.db 未入库：' + BOARD + ' register_model --model_id "' + modelId + '" --url "' + upstreamRepo + '" --source huggingface（按 --help 补全参数）。\n2. 若已入库则跳过。\n3. 推导 adaptation_path：参考现有 adaptations/ 目录命名（model_id 的 / → _，如 state-spaces/mamba-130m-hf → state_spaces_mamba_130m_hf）。\n4. 通过 list_adaptation_tasks 确认该 model_id 存在且 adaptation_status=pending。',
+    : '1. 若 board.db 未入库：' + BOARD + ' register_model --model_id "' + modelId + '" --url "' + upstreamRepo + '" --source huggingface（按 --help 补全参数）。\n2. 若已入库则跳过。\n3. 推导 adaptation_path：参考现有 adaptations/ 目录命名（model_id 的 / → _，如 {model_id} → {sanitized_model_id}）。\n4. 通过 list_adaptation_tasks 确认该 model_id 存在且 adaptation_status=pending。',
   '返回 schema：registered / already_existed / adaptation_path / model_id。',
 ].join('\n')
 
@@ -436,7 +435,7 @@ const gapPrompt = [
     ? [
         '【REPLAY】不重跑 profile。只读现有工件重建候选清单：',
         '1. 读 ' + ctx.adaptation_path + '/operator_gap_report.md（若存在）。',
-        '2. 读 ' + ctx.adaptation_path + '/npu_patches/cannbot_ops.py 与仓库根 operators/ 下已被集成的算子目录，反推 decision=ascend_c 的算子清单（按模型实际缺口，如 hashmap_3d / submanifold_conv3d / qef_solve_3x3 / uv_rasterize_interp / sparse_grid_sample_3d / selective_scan / block_attention_score 等）。',
+        '2. 读 ' + ctx.adaptation_path + '/npu_patches/cannbot_ops.py 与仓库根 operators/ 下已被集成的算子目录，反推 decision=ascend_c 的算子清单（按模型实际缺口，如 hashmap_3d / submanifold_conv3d / qef_solve_3x3 / uv_rasterize_interp / sparse_grid_sample_3d / SSM 算子 / 稀疏注意力算子 等）。',
         '3. 不修改任何文件。',
       ].join('\n')
     : [

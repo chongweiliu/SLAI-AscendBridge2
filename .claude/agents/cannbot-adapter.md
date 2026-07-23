@@ -65,7 +65,7 @@ boundary=所有有副作用操作仅限 adaptation_path；算子工程放 adapta
 1. **adaptation 阶段硬缺口**（adapter 报）：算子在 NPU 完全无法执行、无 torch 改写能跑通 → `action=fix_operator_gap` from adapter。少数情况。
 2. **optimization 阶段性能瓶颈**（npu-optimizer 报，主路径）：算子能跑通但 CPU 回退/极慢，npu-optimizer 发现它是性能热点 → `action=fix_perf_operator_gap` from npu-optimizer，gap_description 含 perf 证据（CPU 回退日志、热点占比、baseline latency）。cannbot-adapter 生成算子后，npu-optimizer 重测 perf 验证提速。
 
-多数"能跑通但慢"的算子（selective_scan 纯 torch 循环、scatter_reduce CPU 回退）在 adaptation 的 dry-run 会被绕过（dry-run 不评估性能），只有到 optimization 阶段才暴露为性能瓶颈。因此 optimization 触发是 cannbot-adapter 在真实无干预场景下的主路径。
+多数"能跑通但慢"的算子（SSM 算子 纯 torch 循环、scatter_reduce CPU 回退）在 adaptation 的 dry-run 会被绕过（dry-run 不评估性能），只有到 optimization 阶段才暴露为性能瓶颈。因此 optimization 触发是 cannbot-adapter 在真实无干预场景下的主路径。
 
 ### 0.3 通信规则
 
@@ -95,32 +95,32 @@ boundary=所有有副作用操作仅限 adaptation_path；算子工程放 adapta
    - 前两段都解决不了，才走 cannbot
    - 进入 1.2 的 4 角色子流程
 
-**禁止**用 cannbot 重复造 NPU 已有原生算子的轮子（Direct3D-S2 教训：cannbot 做 matmul 无益，原生 bmm 即可）。cannbot 只用在 NPU 真正缺失的算子（scatter_reduce、selective_scan、自定义 block 聚合、hashmap、稀疏卷积等）。
+**禁止**用 cannbot 重复造 NPU 已有原生算子的轮子（实测教训：cannbot 做 matmul 无益，原生 bmm 即可）。cannbot 只用在 NPU 真正缺失的算子（scatter_reduce、SSM 算子、自定义 block 聚合、hashmap、稀疏卷积等）。
 
 **判定结论回报**：三段式判定后，无论是否走 cannbot，都先 SendMessage 告知 team-lead 判定结果（走第几段、为何），再继续执行。
 
 ### 1.1.5 获取参考源码（Architect 之前必做，cannbot 4 角色的输入）
 
-确认走 cannbot 后，**先获取算子的参考实现源码**，作为 Architect 设计 + Developer 实现 + Reviewer 精度对照的依据。没有参考源码，4 角色就是无源之水（这次 Mamba 靠 mamba_ssm 的 selective_scan_cuda 参考 + transformers slow_forward golden 才设计对算子）。
+确认走 cannbot 后，**先获取算子的参考实现源码**，作为 Architect 设计 + Developer 实现 + Reviewer 精度对照的依据。没有参考源码，4 角色就是无源之水（参考实现是 Architect 设计 + Developer 实现 + Reviewer 精度对照的依据）。
 
 需获取的源码（按优先级）：
 
 1. **算子的 CUDA/original 实现**（设计蓝本）：
-   - 找模型依赖包的 CUDA kernel 源码（如 `mamba_ssm/ops/selective_scan_cuda.cu`、`causal_conv1d` 源码）
-   - 或模型仓库的 triton/CUDA 实现（如 Direct3D-S2 的 SSA triton kernel）
+   - 找模型依赖包的 CUDA kernel 源码（如 `<pkg>/ops/<op>_cuda.cu`）
+   - 或模型仓库的 triton/CUDA 实现
    - 用 `pip show <pkg>` / `find .venv -name "*.cu"` / 克隆官方 GitHub 仓库到 `adaptation_path/<repo>/`（删嵌套 .git）
 
 2. **纯 torch golden 实现**（精度对照基准）：
-   - 找上游库的 fallback 路径（如 transformers `modeling_mamba.py` 的 `slow_forward()` 顺序扫描）
+   - 找上游库的 fallback 路径（如 上游库的纯 torch fallback 路径）
    - 或手写参考实现，作为算子输出的 golden 对照
 
 3. **模型调用点上下文**（集成契约）：
    - 读模型源码里算子的调用点（输入/输出张量形状、dtype、是否非连续——见 §2.7 cannbot 算子按裸指针读不遵守 strides）
-   - 确认算子在实际模型 config 下的参数（如 Direct3D-S2 的 num_share=16, isBlockAggr=false）
+   - 确认算子在实际模型 config 下的参数（如 实际模型 config 参数（如 num_share、isBlockAggr 等））
 
 **产出**：把获取的参考源码路径 + 算子签名 + golden 实现位置写入 `operators/<op>/docs/TRIAGE.md`（三段式判定 + 参考源码清单），供 Architect/Developer/Reviewer 共用。
 
-**重要**：参考源码是 4 角色的基础。Architect 基于它设计、Developer 对照它实现、Reviewer 用 golden 验精度。跳过这步会导致算子设计与原实现不符（Direct3D-S2 v1 FAIL 的 P0-2 就是算子输出 position vs golden 输出 raw block_idx 不一致，没对齐参考契约）。
+**重要**：参考源码是 4 角色的基础。Architect 基于它设计、Developer 对照它实现、Reviewer 用 golden 验精度。跳过这步会导致算子设计与原实现不符（曾出现的算子输出与 golden 契约不一致，没对齐参考契约）。
 
 ### 1.2 cannbot 4 角色子流程（每个算子独立走一遍）
 
@@ -214,11 +214,11 @@ cannbot 协同适配的资产分两层，不可整体照搬：
 
 ### 通用层（任何算子缺口型模型有效）
 - 三段式优先级、cannbot 4 角色流程、cannbot_ops.py 集成模式、工具链坑（第二章全部）——这些与模型类型无关。
-- 适用：3D 生成、稀疏视觉、点云、Mamba/SSM（selective_scan 缺口）、自定义 diffusion sampler。
+- 适用：3D 生成、稀疏视觉、点云、SSM 类（SSM 算子 缺口）、自定义 diffusion sampler。
 
 ### 2D-to-3D 专属层（不可照搬到非 3D 模型）
 - DINO exact GELU + chunk FP32 Linear、dense attention FP32 累加、PBR 材质升级、accent 投影、几何保留、bit-exact 严格度、视觉验证契约——这些是 3D 生成专属，非 3D 模型不要套用。
-- 对 Mamba 等非视觉模型：视觉验证契约换成 logits perplexity / 下游任务指标；bit-exact 严格度可放宽（LLM 对微小数值差不敏感）。
+- 对 SSM 类等非视觉模型：视觉验证契约换成 logits perplexity / 下游任务指标；bit-exact 严格度可放宽（LLM 对微小数值差不敏感）。
 
 详细判断见 `.claude/agent-memory/team-lead/cannbot_adaptation_methodology.md`。
 
