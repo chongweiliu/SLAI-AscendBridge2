@@ -203,10 +203,36 @@ check_nodejs() {
     fi
 
     log_info "Installing Node.js..."
-    curl -fsSL https://deb.nodesource.com/setup_${NODE_INSTALL_VERSION}.x | bash - 2>/dev/null || {
-        curl -fsSL https://mirrors.tuna.tsinghua.edu.cn/nodesource/deb_${NODE_INSTALL_VERSION}.x/setup_${NODE_INSTALL_VERSION}.x | bash - 2>/dev/null
-    }
-    apt-get install -y nodejs 2>/dev/null || yum install -y nodejs 2>/dev/null
+    ORIG_PWD=$(pwd)
+    # 检测系统类型，非 Debian 系（openEuler/centos/rhel 等）用 nodejs.org tar 包
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+    fi
+    case "${ID:-}" in
+        openEuler|centos|rhel|fedora|anolis|kylin)
+            ARCH=$(uname -m)
+            case "$ARCH" in
+                aarch64) NODE_ARCH="linux-arm64" ;;
+                x86_64)  NODE_ARCH="linux-x64" ;;
+                *) log_error "Unsupported arch: $ARCH"; exit 1 ;;
+            esac
+            NODE_FULL_VER="v${NODE_INSTALL_VERSION}.14.0"
+            NODE_TAR="node-${NODE_FULL_VER}-${NODE_ARCH}.tar.xz"
+            log_info "Downloading Node.js ${NODE_FULL_VER} (${NODE_ARCH}) from nodejs.org..."
+            curl -fsSL "https://nodejs.org/dist/${NODE_FULL_VER}/${NODE_TAR}" -o "/tmp/${NODE_TAR}" || {
+                log_error "Failed to download Node.js from nodejs.org"; exit 1
+            }
+            cd /tmp && tar -xf "${NODE_TAR}" && cp -r "node-${NODE_FULL_VER}-${NODE_ARCH}/"* /usr/local/ && rm -rf "node-${NODE_FULL_VER}-${NODE_ARCH}" "${NODE_TAR}"
+            cd "$ORIG_PWD"
+            ;;
+        *)
+            # Debian 系，用 nodesource
+            curl -fsSL https://deb.nodesource.com/setup_${NODE_INSTALL_VERSION}.x | bash - 2>/dev/null || {
+                curl -fsSL https://mirrors.tuna.tsinghua.edu.cn/nodesource/deb_${NODE_INSTALL_VERSION}.x/setup_${NODE_INSTALL_VERSION}.x | bash - 2>/dev/null
+            }
+            apt-get install -y nodejs 2>/dev/null || yum install -y nodejs 2>/dev/null
+            ;;
+    esac
     log_success "Node.js installed: $(node -v)"
     log_success "npm version: $(npm -v)"
 }
