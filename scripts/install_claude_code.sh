@@ -264,6 +264,7 @@ configure_claude() {
         fs.writeFileSync(filePath, JSON.stringify({
             ...content,
             env: {
+                ...content.env,
                 ANTHROPIC_AUTH_TOKEN: "'"$API_KEY"'",
                 ANTHROPIC_BASE_URL: "'"$PROVIDER_URL"'",
                 ANTHROPIC_MODEL: "'"$MODEL"'",
@@ -271,12 +272,27 @@ configure_claude() {
                 ANTHROPIC_DEFAULT_SONNET_MODEL: "'"$MODEL"'",
                 ANTHROPIC_DEFAULT_OPUS_MODEL: "'"$MODEL"'",
                 API_TIMEOUT_MS: "'"$API_TIMEOUT_MS"'",
-                CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: 1
+                CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: 1,
+                CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: 1
+            },
+            enabledPlugins: {
+                ...content.enabledPlugins,
+                "ops-direct-invoke-skills@cannbot": true,
+                "infra-skills@cannbot": true,
+                "ops-direct-invoke@cannbot": true
+            },
+            extraKnownMarketplaces: {
+                ...content.extraKnownMarketplaces,
+                "cannbot": {
+                    "source": { "source": "git", "url": "https://gitcode.com/cann/skills.git" }
+                }
             }
         }, null, 2), "utf-8");
     ' || { log_error "Failed to write settings.json"; exit 1; }
 
     log_success "Claude Code configured successfully"
+    log_info "cannbot 插件（ops-direct-invoke + skills + infra）已写入 settings，首次启动 claude 时自动从 gitcode.com/cann/skills 拉取安装"
+    log_info "Agent Teams 已启用（CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1），cannbot 协同适配需要 team 模式"
 }
 
 # ========================
