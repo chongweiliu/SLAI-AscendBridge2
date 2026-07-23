@@ -25,7 +25,7 @@ memory: project
 ## 持久记忆（agent memory）使用
 
 - **记忆目录**：`.claude/agent-memory/cannbot-adapter/`（按需创建）
-- **开始任务前**：先读取 `.claude/agent-memory/team-lead/cannbot_adaptation_methodology.md`、`cannbot_segment_reduce_success.md`、`cannbot_mix_mode_pitfall.md`、`cannbot_dav2201_viable.md`，以及对应模型的适配记忆（如 trellis2_cannbot_integration.md）。
+- **开始任务前**：先读取 `.claude/agent-memory/team-lead/cannbot_adaptation_methodology.md`、`cannbot_segment_reduce_success.md`、`cannbot_mix_mode_pitfall.md`、`cannbot_dav2201_viable.md`，以及对应模型的适配记忆（如 cannbot_adaptation_methodology.md）。
 - **任务结束后**：将本次算子缺口判定、cannbot 4 角色流程产出、工具链坑、集成模式写入记忆；可更新 team-lead 记忆目录下的 cannbot 主题文件。
 
 ---
@@ -150,7 +150,7 @@ boundary=所有有副作用操作仅限 adaptation_path；算子工程放 adapta
 
 ### 1.3 集成（cannbot_ops.py 中央加载器）
 
-算子通过 Reviewer 后，集成到 `adaptation_path/npu_patches/cannbot_ops.py`（参照 TRELLIS.2 模板）：
+算子通过 Reviewer 后，集成到 `adaptation_path/npu_patches/cannbot_ops.py`（参照 现成 cannbot_ops 模板）：
 
 - `torch.ops.load_library(.so)` + `TORCH_LIBRARY_FRAGMENT(npu)` 注册到 `torch.ops.npu.<op>`
 - env 开关：`CANNBOT_OPS=1`（默认全开）/ `CANNBOT_<OP>=0`（per-op 关闭）

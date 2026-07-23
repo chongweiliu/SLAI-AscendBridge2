@@ -26,4 +26,4 @@ metadata:
 非融合双 kernel：
 - Kernel A（纯 AIC）：batched matmul QK → qk_score GM
 - Kernel B（纯 AIV）：exp(qk-lse)→GQA求和→block聚合→TopK → block_topk
-设计修订中。相关 memory: [[direct3d-s2-cannbot-required]]、[[direct3d-s2-setup-state]]、[[trellis2-cannbot-integration]]
+设计修订中。相关 memory: [[direct3d-s2-cannbot-required]]、[[direct3d-s2-setup-state]]

@@ -12,7 +12,7 @@ cannbot 协同适配是 SLAI-AscendBridge2 的算子缺口补齐机制：当模�
 
 | 模型类型 | 典型算子缺口 | 适合度 |
 |---------|-------------|--------|
-| 3D 生成（TRELLIS/Direct3D-S2/cadpalette）| sparse conv / hashmap / QEF / 光栅化 / block-sparse attn | 高 ✅ |
+| 3D 生成（Direct3D-S2/cadpalette）| sparse conv / hashmap / QEF / 光栅化 / block-sparse attn | 高 ✅ |
 | 点云/稀疏视觉 | sparse conv / scatter_reduce / 自定义采样 | 高 ✅ |
 | Mamba/SSM | selective_scan / selective_state_update / causal_conv1d | 高 ✅ |
 | 自定义 diffusion（triton kernel）| 自定义 sampler / 融合 kernel | 中 |

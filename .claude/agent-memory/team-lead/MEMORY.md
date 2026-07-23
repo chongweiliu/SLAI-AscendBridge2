@@ -382,7 +382,7 @@ cat ~/.claude/teams/{team_name}/config.json | python3 -c \
 
 ## 记忆文件索引
 
-- [ascend-cannbot-pipeline workflow](ascend_cannbot_pipeline_workflow.md) — TRELLIS 式 cannbot 全流程 workflow 脚本（9 阶段），含 codex 验证模式与踩坑（custom-repo 绕过 manager、CUDA 扩展降 CppExtension、防 smoke run 覆盖 canonical metrics）。
+- [ascend-cannbot-pipeline workflow](ascend_cannbot_pipeline_workflow.md) — 通用 cannbot 全流程 workflow 脚本（9 阶段），含 codex 验证模式与踩坑（custom-repo 绕过 manager、CUDA 扩展降 CppExtension、防 smoke run 覆盖 canonical metrics）。
 - [cannbot 协同适配方法论](cannbot_adaptation_methodology.md) — 通用层 vs 2D-to-3D 专属层、三段式算子优先级、触发路径、嵌套 spawn 心跳盲区、Reviewer synthetic test 盲区、.contiguous() 规则、board_ops 状态机限制、stream 一致性等教训。
 - [cannbot MIX 模式陷阱](cannbot_mix_mode_pitfall.md) — `__mix__(1,2)` 融合 Cube+Vector kernel 的 AIC 驱动问题，优先非融合双 kernel。
 - [cannbot dav-2201 硬件可用](cannbot_dav2201_viable.md) — 本机 dav-2201（Atlas A2/A3）在 cannbot Ascend C 支持矩阵内（arch22，--npu-arch=dav-2201），推翻旧"Ascend910 不支持"记忆。

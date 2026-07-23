@@ -7,7 +7,7 @@ metadata:
 
 # cannbot 协同适配方法论
 
-## 四步基础方法论（用户指定，TRELLIS/Direct3D-S2 通用）
+## 四步基础方法论（用户指定，算子缺口型模型通用）
 
 适配需要自定义算子的模型时，严格按以下四步执行：
 
@@ -19,7 +19,7 @@ metadata:
    - 都没有，再描述清楚功能与需求，用 **cannbot 生成 Ascend C 算子**
 4. **结果对齐**：最终 NPU 推理输出必须与 GitHub 项目页展示的效果对比一致（质量/形状/纹理不漂移）。
 
-**Why:** TRELLIS 1/2 + Direct3D-S2 已用此方法论跑通。cannbot 是最后手段而非首选。Direct3D-S2 实战教训：cannbot 不要做 NPU 已有算子的重复造轮子（matmul 用原生 bmm 即可），只用在 NPU 真正缺失的算子（scatter_reduce、自定义 block 聚合）。
+**Why:** Mamba + Direct3D-S2 已用此方法论跑通。cannbot 是最后手段而非首选。Direct3D-S2 实战教训：cannbot 不要做 NPU 已有算子的重复造轮子（matmul 用原生 bmm 即可），只用在 NPU 真正缺失的算子（scatter_reduce、自定义 block 聚合）。
 
 ## 关键分层判断：通用层 vs 2D-to-3D 专属层（2026-07-21 沉淀）
 
@@ -55,7 +55,7 @@ cannbot 协同适配的资产要拆两层看，**不可整体照搬**。
 
 | 模型类型 | 算子缺口 | cannbot 价值 |
 |---------|---------|-------------|
-| 3D 生成（TRELLIS/Direct3D-S2/cadpalette） | 稀疏卷积/hashmap/QEF/光栅化/block-sparse attn | 高，已验证 |
+| 3D 生成（Direct3D-S2/cadpalette） | 稀疏卷积/hashmap/QEF/光栅化/block-sparse attn | 高，已验证 |
 | 点云/稀疏视觉 | sparse conv / scatter_reduce / 自定义采样 | 高，未验证但同类 |
 | Mamba/SSM 类 | selective_scan（NPU 可能不支持） | 中高，潜在缺口，**待验证** |
 | 某些扩散模型 | 自定义 sampler / triton kernel | 中，看具体算子 |
@@ -65,7 +65,7 @@ cannbot 协同适配的资产要拆两层看，**不可整体照搬**。
 
 ## 实操迁移规则
 
-- **下一个 3D 生成 / 稀疏视觉 / 点云模型**：直接复用整套（三段式 + cannbot_ops 模板 + workflow 骨架 + 工具链坑）。TRELLIS 数值修复可参考思路（前端数值对齐→后处理不掩盖前级），具体改什么看源码。
+- **下一个 3D 生成 / 稀疏视觉 / 点云模型**：直接复用整套（三段式 + cannbot_ops 模板 + workflow 骨架 + 工具链坑）。前端数值对齐思路可参考（前端数值对齐→后处理不掩盖前级），具体改什么看源码。
 - **Mamba/SSM 等有特殊算子的非视觉模型**：复用通用层，但视觉验证契约换成对应模态（logits perplexity / 下游任务指标），bit-exact 严格度可放宽。
 - **标准 LLM/CNN**：不需要 cannbot 协同适配，走普通 adapter→benchmark→optimization 流程即可。
 - **生成式模型（图像/视频/3D/音频）**：都该有"禁止 text-only 模型凭文件名断言质量 + 多证据 + probe"契约，评测器按模态换。
@@ -77,7 +77,7 @@ cannbot-adapter 的自然触发点是个架构关键点。**不能只依赖 adap
 真实场景下无人工提示词干预，cannbot-adapter 的正确触发路径：
 
 - **adaptation 阶段触发（仅限"跑不通"的算子）**：算子在 NPU 完全无法执行（报错 not supported 且无任何 torch 改写能跑通）→ adapter 报 blocked_by_operator_gap。这是硬缺口，少数情况。
-- **optimization 阶段触发（"能跑但慢"的算子，主路径）**：npu-optimizer 发现性能瓶颈是某 CPU 回退算子（日志 `fallback to CPU` / aten 算子回退 / 极慢的热点）→ 报 perf_blocked_by_operator_gap → cannbot-adapter 生成 Ascend C 算子 → npu-optimizer 重测 perf → 真实提速。TRELLIS 的 segment_reduce 等 cannbot 算子实质就是为性能而生，这是最自然的触发点。
+- **optimization 阶段触发（"能跑但慢"的算子，主路径）**：npu-optimizer 发现性能瓶颈是某 CPU 回退算子（日志 `fallback to CPU` / aten 算子回退 / 极慢的热点）→ 报 perf_blocked_by_operator_gap → cannbot-adapter 生成 Ascend C 算子 → npu-optimizer 重测 perf → 真实提速。segment_reduce 等 cannbot 算子实质就是为性能而生，这是最自然的触发点。
 
 **结论**：cannbot-adapter 需要两个触发入口——adapter 的 adaptation 硬缺口 + npu-optimizer 的 optimization 性能瓶颈。当前 cannbot-adapter.md 只定义了前者，需补后者。验证时若用人工提示词强制 adapter 报缺口，能验证 cannbot 技术可行性，但不反映真实触发；真实场景要靠 optimization 阶段 npu-optimizer 上报才能自然触发。
 
@@ -96,6 +96,6 @@ cannbot-adapter 的自然触发点是个架构关键点。**不能只依赖 adap
 
 ## 已验证实战案例（截至 2026-07-21）
 
-全部集中在 3D 生成：TRELLIS v1/v2（6 算子）、Direct3D-S2（block_attention_score）、cadpalette（conv_none/FlexGEMM）。**非 3D 算子缺口型模型尚未有 cannbot 实战验证**——这是当前方法论的空白区，下一个值得验证的方向是 Mamba/SSM 的 selective_scan。
+全部集中在 3D 生成：Mamba（selective_scan_ssm）、Direct3D-S2（block_attention_score）、cadpalette（conv_none/FlexGEMM）。**非 3D 算子缺口型模型尚未有 cannbot 实战验证**——这是当前方法论的空白区，下一个值得验证的方向是 Mamba/SSM 的 selective_scan。
 
-相关 memory: [[trellis2-cannbot-integration]]、[[trellis2-full-pipeline]]、[[cannbot-segment-reduce-success]]、[[cannbot-mix-mode-pitfall]]、[[direct3d-s2-cannbot-required]]、[[cannbot-dav2201-viable]]、[[ascend-cannbot-pipeline-workflow]]。
+相关 memory: [[cannbot-segment-reduce-success]]、[[cannbot-mix-mode-pitfall]]、[[direct3d-s2-cannbot-required]]、[[cannbot-dav2201-viable]]、[[ascend-cannbot-pipeline-workflow]]。
