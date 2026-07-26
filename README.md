@@ -437,6 +437,12 @@ rsync -av /path/to/SLAI-AscendBridge2-Adaptations/adaptations/<name>/ ./adaptati
 
 然后继续在本框架仓中跑 checker、benchmark、optimization 和 dashboard。
 
+## 论文
+
+该项目的技术报告：
+
+- Liu, Chognwei, et al. [SLAI-AscendBridge: Execution-Grounded Evaluation for Agent-Built PyTorch-to-Ascend Migration](https://zenodo.org/records/21585210). Zenodo, 2026. DOI: [10.5281/zenodo.21585210](https://doi.org/10.5281/zenodo.21585210)
+
 ## 开源说明
 
 - 本仓库已移除内部运行数据、缓存、历史产物和私有环境文件
