@@ -1,0 +1,85 @@
+#!/usr/bin/env bash
+# KTP 一键部署（deploy-ktp.sh）
+# 由 vllm-ascend-auto-deploy Skill 按 deploy-config.yaml 渲染。
+# 用法: bash deploy-ktp.sh [submit|delete|status]
+#   submit (默认): 校验 manifest -> 冻结 -> ktp apply --min-available -> 轮询 -> 语义断言
+#   delete: 删除 KTP job（失败或手动清理）
+#   status: 查 job/pod 状态
+# jinja2 变量：{{ var }} 由部署拓扑填充。
+
+set -euo pipefail
+
+DEPLOY_DIR="{{ deploy_dir }}"
+PROJECT_ROOT="{{ project_root }}"
+MODEL_NAME="{{ model_name }}"
+KTP_MANIFEST="{{ ktp_manifest }}"
+PROXY_PORT={{ proxy_port | default(port) }}
+MASTER_HOST="{{ master_host }}"          # 提交后从 KTP status 解析
+TOTAL_REPLICAS={{ total_replicas }}
+KTP_BIN="{{ ktp_bin }}"                  # KTP CLI 可执行，如 ktp / kubectl-ac
+INFER_VALIDATOR="scripts/validate_inference_result.py"
+
+cd "$DEPLOY_DIR"
+
+do_submit () {
+  echo "[ktp] === 1/6 validate manifest (gang) ==="
+  python "$PROJECT_ROOT/.claude/skills/vllm-ascend-auto-deploy/scripts/validate_ktp_manifest.py" \
+    "$KTP_MANIFEST" --require-gang
+
+  echo "[ktp] === 2/6 validate frozen artifact --write ==="
+  python "$PROJECT_ROOT/.claude/skills/vllm-ascend-auto-deploy/scripts/validate_frozen_artifact.py" \
+    "$DEPLOY_DIR" --write
+
+  echo "[ktp] === 3/6 dry-run (verify rendered values) ==="
+  "$KTP_BIN" apply -f "$KTP_MANIFEST" --dry-run --min-available "$TOTAL_REPLICAS" \
+    --dry-run-output /tmp/ktp-dryrun-$$ >/tmp/ktp-dryrun-stdout-$$ 2>&1 || {
+      cat /tmp/ktp-dryrun-stdout-$$; rm -f /tmp/ktp-dryrun-$$ /tmp/ktp-dryrun-stdout-$$; exit 1; }
+  rm -f /tmp/ktp-dryrun-$$ /tmp/ktp-dryrun-stdout-$$
+
+  echo "[ktp] === 4/6 apply (min-available=$TOTAL_REPLICAS) ==="
+  "$KTP_BIN" apply -f "$KTP_MANIFEST" --min-available "$TOTAL_REPLICAS"
+
+  echo "[ktp] === 5/6 poll job/pod AllReady ==="
+  for i in $(seq 1 180); do
+    ready=$("$KTP_BIN" get -f "$KTP_MANIFEST" -o json 2>/dev/null \
+      | python -c "import sys,json;d=json.load(sys.stdin);print(d.get('ready',0)==d.get('replicas',0))" 2>/dev/null || echo false)
+    if [ "$ready" = "True" ]; then
+      echo "[ktp] AllReady (after ${i}0s)"; break
+    fi
+    sleep 10
+    [ "$i" = "180" ] && { echo "[ktp] FATAL: job 未就绪超时"; do_delete; exit 1; }
+  done
+
+  echo "[ktp] === 6/6 poll /v1/models + semantic assert ==="
+  ENDPOINT="${MASTER_HOST:+http://${MASTER_HOST}:${PROXY_PORT}}"
+  ENDPOINT="${ENDPOINT:-http://127.0.0.1:${PROXY_PORT}}"
+  for i in $(seq 1 120); do
+    if curl -sf "$ENDPOINT/v1/models" >/dev/null 2>&1; then
+      echo "[ktp] /v1/models 200"; break
+    fi
+    sleep 10
+    [ "$i" = "120" ] && { echo "[ktp] FATAL: /v1/models 超时"; do_delete; exit 1; }
+  done
+  python "$PROJECT_ROOT/$INFER_VALIDATOR" --endpoint "$ENDPOINT" --model "$MODEL_NAME" \
+    || { echo "[ktp] FATAL: 语义断言失败"; do_delete; exit 1; }
+
+  echo "[ktp] SUCCESS: endpoint=$ENDPOINT"
+  echo "[ktp] manifest: $KTP_MANIFEST"
+  echo "[ktp] delete: bash deploy-ktp.sh delete"
+}
+
+do_delete () {
+  echo "[ktp] deleting job..."
+  "$KTP_BIN" delete -f "$KTP_MANIFEST" 2>/dev/null || true
+}
+
+do_status () {
+  "$KTP_BIN" get -f "$KTP_MANIFEST" 2>/dev/null || echo "[ktp] job not found"
+}
+
+case "${1:-submit}" in
+  submit) do_submit ;;
+  delete) do_delete ;;
+  status) do_status ;;
+  *) echo "usage: $0 [submit|delete|status]"; exit 2 ;;
+esac

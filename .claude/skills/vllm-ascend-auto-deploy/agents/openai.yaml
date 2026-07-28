@@ -1,0 +1,4 @@
+interface:
+  display_name: "vLLM-Ascend Auto Deploy"
+  short_description: "交互式完成单机、多机及 PD 分离 vLLM-Ascend 部署"
+  default_prompt: "Use $vllm-ascend-auto-deploy to deploy a model, including a Prefill/Decode-separated topology when requested."
