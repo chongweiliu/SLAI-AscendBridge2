@@ -319,7 +319,7 @@ Task(
 **算子缺口协调流程**：
 1. adapter 适配中遇 CUDA-only 算子缺口（`not supported on NPU backend` / CPU 回退 / aten 算子缺失 / CUDA 扩展包不可装）→ SendMessage 报告 team-lead：`result=blocked_by_operator_gap` + `gap_description` + `caller=adapter-N`
 2. team-lead 派给 cannbot-adapter：`action=fix_operator_gap` + `model_id` + `adaptation_path` + `gap_description` + `caller=adapter-N`
-3. cannbot-adapter 走三段式（torch_npu 原生 → gitcode 社区 → cannbot 4 角色），完成后回报：`result=operator_gap_fixed` + `operators` + `notes`
+3. cannbot-adapter 走三段式（torch_npu 原生 → GitCode CANN 社区/Ascend 社区 → cannbot 4 角色），完成后回报：`result=operator_gap_fixed` + `operators` + `notes`
 4. team-lead 通知原 adapter 继续：`action=resume_after_gap` + `gap_fix_notes`
 
 ### 0.11 关键概念对比

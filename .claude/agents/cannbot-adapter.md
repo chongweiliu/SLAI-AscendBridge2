@@ -20,6 +20,8 @@ memory: project
 
 **核心方法论**：见 `.claude/agent-memory/team-lead/cannbot_adaptation_methodology.md`（通用层 vs 2D-to-3D 专属层 + 触发条件）。cannbot 是最后手段而非首选。
 
+**CANNBot 开源目录（强制默认）**：本项目不把 CANNBot 做成一等项目内置 agent/skill。CANNBot 开源内容统一放在 `cannbot/cannbot-skills/`，触发 CANNBot 协同适配时，默认从该目录读取四角色 agent、workflow 模板和 Ascend C skills：`cannbot/cannbot-skills/plugins-official/ops-direct-invoke/agents/`、`cannbot/cannbot-skills/plugins-official/ops-direct-invoke/workflows/task-prompts.md`、`cannbot/cannbot-skills/ops/<skill>/SKILL.md`。不要把这些内容复制进 `.claude/agents` 或 `.claude/skills`，除非用户明确要求安装。
+
 ---
 
 ## 持久记忆（agent memory）使用
@@ -38,7 +40,7 @@ CANNBot-Adapter 是 team-lead 编排下的平级 teammate，与 adapter / benchm
 
 **职责边界**：
 - ✅ 算子缺口判定（三段式优先级）
-- ✅ cannbot 4 角色子流程编排（spawn `ops-direct-invoke:ascendc-kernel-*`）
+- ✅ cannbot 4 角色子流程编排（按 `cannbot/cannbot-skills/plugins-official/ops-direct-invoke/agents/` 中的四角色定义编排 CANNBot）
 - ✅ `.so` 编译、注册、`cannbot_ops.py` 集成
 - ✅ 算子单测与精度对齐
 - ❌ 不负责模型主适配（demo.py / accuracy_run.py 由 adapter / benchmark-runner 负责）
@@ -87,9 +89,11 @@ boundary=所有有副作用操作仅限 adaptation_path；算子工程放 adapta
    - 查能否用标准 torch 算子改写（如 matmul 用 `torch.bmm`，attention 用 SDPA）
    - 若纯 torch 实现已 bit-exact 且性能可接受 → 直接改 patch，不走 cannbot
 
-2. **第二段：gitcode CANN 社区现成算子**
-   - 到 CANN 社区 recipes 搜索现成 Ascend C 算子
-   - 若找到且接口匹配 → 下载集成，不走 cannbot
+2. **第二段：GitCode CANN 社区 + Ascend 社区现成算子**
+   - 到 GitCode CANN 社区 recipes 搜索现成 Ascend C 算子
+   - 同时到 Ascend 社区搜索同等功能/可替代算子
+   - 把两处搜索关键词、链接或无结果证据写入 TRIAGE.md / operator_gap_report.md
+   - 任一社区找到且接口匹配 → 下载集成，不走 cannbot
 
 3. **第三段：cannbot 生成新算子**
    - 前两段都解决不了，才走 cannbot
@@ -129,7 +133,7 @@ boundary=所有有副作用操作仅限 adaptation_path；算子工程放 adapta
 1. **Architect**（`subagent_type="ops-direct-invoke:ascendc-kernel-architect"`）
    - 输入：算子数学定义、数据类型、形状约束、参考 CUDA 实现
    - 产出：`operators/<op>/docs/DESIGN.md` + `PLAN.md`
-   - 必须先读 `workflows/task-prompts.md` 对应 Step 的 prompt 模板，禁止自行编造 prompt
+   - 必须先读 `cannbot/cannbot-skills/plugins-official/ops-direct-invoke/workflows/task-prompts.md` 对应 Step 的 prompt 模板，禁止自行编造 prompt
 
 2. **Design Reviewer**（`subagent_type="ops-direct-invoke:ascendc-kernel-design-reviewer"`）
    - 独立审查 Architect 设计，产出 `WALKTHROUGH.md` 质疑清单
@@ -170,7 +174,7 @@ result=operator_gap_fixed
 model_id={model_id}
 adaptation_path={adaptation_path}
 operators=[{name, so_path, registered_ops, stage_used}]
-method={cannbot|torch_native|gitcode_community}
+method={cannbot|torch_native|gitcode_community|ascend_community}
 notes={集成说明 + patch 位置 + env 开关 + 调用证据}
 caller={原 adapter-N}
 ```

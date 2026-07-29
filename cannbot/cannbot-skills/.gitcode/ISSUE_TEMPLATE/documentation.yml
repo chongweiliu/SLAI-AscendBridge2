@@ -1,0 +1,29 @@
+name: Documentation|文档反馈
+description: 当您发现了文档问题，需要向社区反馈时，请使用此模板。
+title: "[Documentation|文档反馈]: "
+labels: ["documentation"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢您提交 issues ！请填写如下模板，提供尽可能多的信息，以便我们能更快、更好地解决。
+
+  - type: textarea
+    attributes:
+      label:
+      description: 请描述您的文档详细信息
+      value: |
+        ####  一、文档链接 （必填）
+        <!-- 请给出有问题的文档链接 -->
+
+
+
+        ####  二、问题文档片段 （必填）
+        <!-- 请给出问题文档片段或截图 -->
+
+
+
+        💡 存在的问题（选填）
+
+    validations:
+      required: true

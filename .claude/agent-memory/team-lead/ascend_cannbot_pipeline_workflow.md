@@ -17,7 +17,7 @@ metadata:
 **codex 验证的关键模式（已固化，勿丢）：**
 1. custom-repo 模型必须手写 business_benchmark_config.json 固定画像，**禁止 manager run-npu/print-remote-command 自动生成**（会覆盖 custom business_run.py + 把画像改成 image_matting 之类错误值）。自己写 business_run.py 复用 accuracy_run.py loader，不写 business_eval.py。
 2. business_run.py env bootstrap self re-exec：sentinel guard（非 ASCEND_HOME_PATH 判断，host 默认指向 CANN 8.2.RC1 坏版本），钉死 ASCEND_RT_VISIBLE_DEVICES。
-3. 算子缺口优先级：纯 torch bit-exact > 社区 cann-recipes > C++ CppExtension 降级（排除 .cu）> cannbot 新算子。cannbot 是最后手段。
+3. 算子缺口优先级：纯 torch bit-exact > GitCode CANN 社区/Ascend 社区现成算子 > C++ CppExtension 降级（排除 .cu）> cannbot 新算子。cannbot 是最后手段。
 4. CUDA 扩展降级：setup.py→setup_cpu.py，CUDAExtension→CppExtension，排除 .cu，ext.cpp→ext_cpu.cpp，CUDA-only 算子用 numpy/torch shim。
 5. business_metrics 必备字段：evaluation_profile/primary_metric/ttft_ms=null(非 token-streaming 业务)/model_source_kind/throughput_qps/num_samples>50(用 52)。
 6. 远端 CUDA 必须 scp NPU baseline outputs.pt 作跨设备 ref，否则 cosine=0.0。

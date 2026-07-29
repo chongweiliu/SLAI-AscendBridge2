@@ -1,12 +1,12 @@
 # cannbot 协同适配使用指导
 
-cannbot 协同适配是 SLAI-AscendBridge2 的算子缺口补齐机制：当模型有 CUDA-only 算子缺口（NPU 原生/gitcode 社区都没有）时，由 cannbot-adapter agent 走 cannbot 4 角色流程生成 Ascend C 算子补齐，让模型在 NPU 跑通/提速。
+cannbot 协同适配是 SLAI-AscendBridge2 的算子缺口补齐机制：当模型有 CUDA-only 算子缺口（NPU 原生/GitCode CANN 社区/Ascend 社区都没有）时，由 cannbot-adapter agent 走 cannbot 4 角色流程生成 Ascend C 算子补齐，让模型在 NPU 跑通/提速。
 
 ---
 
 ## 一、什么模型适合触发
 
-**判断标准**：模型有 CUDA-only 算子缺口，且 NPU 原生/gitcode 社区都没有现成替代。
+**判断标准**：模型有 CUDA-only 算子缺口，且 NPU 原生/GitCode CANN 社区/Ascend 社区都没有现成替代。
 
 | 模型类型 | 典型算子缺口 | 适合度 |
 |---------|-------------|--------|
@@ -56,7 +56,7 @@ model-crawler 注册模型 → team-lead 分配 adaptation 给 adapter
 adapter 适配遇算子缺口 → 报 blocked_by_operator_gap
   ↓ （或 optimization 阶段 npu-optimizer 报 perf 缺口）
 team-lead 派 cannbot-adapter：
-  1. 三段式判定（torch_npu 原生 → gitcode 社区 → cannbot，实测留证到 TRIAGE.md）
+  1. 三段式判定（torch_npu 原生 → GitCode CANN 社区/Ascend 社区 → cannbot，实测留证到 TRIAGE.md）
   2. 获取参考源码（CUDA kernel + 纯 torch golden + 模型调用点契约）
   3. cannbot 4 角色：Architect → DesignReviewer → Developer → Reviewer
      （产出 .so + DESIGN/PLAN/WALKTHROUGH/REVIEW.md）
@@ -70,7 +70,7 @@ adapter 继续 / npu-optimizer 集成测速 → benchmark → optimization → b
 
 ## 四、关键规则（必读，血泪换的）
 
-1. **三段式优先级**：torch_npu 原生 > gitcode CANN 社区 > cannbot 新建。cannbot 是最后手段，不重复造 NPU 已有算子的轮子（如 matmul 用原生 bmm）。
+1. **三段式优先级**：torch_npu 原生 > GitCode CANN 社区/Ascend 社区 > cannbot 新建。cannbot 是最后手段，不重复造 NPU 已有算子的轮子（如 matmul 用原生 bmm）。
 2. **先获取参考源码**：Architect 前必做。CUDA kernel（设计蓝本）+ 纯 torch golden（精度对照）+ 模型调用点（形状/dtype/是否非连续）。
 3. **cannbot 算子集成必须 `.contiguous()`**：算子按裸指针读不遵守 torch strides，来自 torch.split/transpose/view 的非连续张量必须 `.contiguous()`（实测根因，曾 3 次误诊为 bf16 精度悬崖/stream 取错流）。
 4. **Reviewer 必须含真实权重 fuzz**：synthetic test_torch.py 测不到边界（曾因此返工/被证伪）。加载 pretrained 跑 50+ 样本 op vs golden，覆盖实际模型配置。
@@ -109,6 +109,6 @@ adapter 继续 / npu-optimizer 集成测速 → benchmark → optimization → b
 
 - 标准 LLM/CNN：无算子缺口，cannbot 无用武之地，走普通 adapter→benchmark→optimization 即可
 - 算子 NPU 原生有（matmul→bmm）：三段式第一段解决，不到 cannbot
-- 算子 gitcode 社区有：三段式第二段解决
+- 算子 GitCode CANN 社区或 Ascend 社区有：三段式第二段解决
 
 **一句话**：给 team-lead"模型可能有算子缺口，遇缺口走 cannbot 协同"的提示词，选算子缺口型模型（3D/稀疏/SSM/自定义 diffusion），team-lead 自动按 cannbot-adapter.md + methodology.md 走流程。

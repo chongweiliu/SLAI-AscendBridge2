@@ -4,7 +4,7 @@
 //
 // 编排原则：
 // - 只用项目已有 agent（model-crawler/adapter/benchmark-runner/npu-optimizer/business-benchmark/team-lead）
-//   + cannbot 自带 4 角色（ascendc-kernel-architect/design-reviewer/developer/reviewer），不引入新 agent。
+//   + cannbot 自带 4 角色（优先参考 cannbot/cannbot-skills/plugins-official/ops-direct-invoke/agents/），不引入新 agent。
 // - 每阶段与 board.db 绑定：agent 内部走 board_ops.py 的 assign_*_task / update_*_status 受控接口。
 // - 副作用（写库、文件生成）全在 subagent 内；workflow 自身只编排、传上下文、过 gate、分支。
 // - Stage 2 命中算子缺口且 decision=ascend_c 时，Stage 3 用 pipeline() 逐算子跑 cannbot 4 步子流程。
@@ -70,8 +70,8 @@ const CODEX_PATTERNS = [
   '- num_samples > 50（check MIN_BUSINESS_SAMPLE_LOWER_BOUND=50，<=50 报错，用 52）。',
   '',
   '■ 算子缺口方法论（优先级，写进 operator_gap_report.md 每个缺口）：',
-  '- 每缺口列 (a) gitcode CANN recipe (b) cannbot Ascend C 新算子 (c) 采用方案 + 理由。',
-  '- 优先级：纯 torch bit-exact（如 conv_none、attention_torch_sdpa）> 社区 cann-recipes（如 Hunyuan3D render_npu、gaussian_splatting meta_gauss_render）> C++ CppExtension 降级（排除 .cu，aarch64 可编译）> cannbot 新算子。',
+  '- 每缺口列 (a) GitCode CANN recipe (b) Ascend 社区替代算子 (c) cannbot Ascend C 新算子 (d) 采用方案 + 理由。',
+  '- 优先级：纯 torch bit-exact（如 conv_none、attention_torch_sdpa）> GitCode CANN 社区/Ascend 社区现成算子（如 Hunyuan3D render_npu、gaussian_splatting meta_gauss_render）> C++ CppExtension 降级（排除 .cu，aarch64 可编译）> cannbot 新算子。',
   '- cannbot 新算子只在前三者都不适用时才开发。先用 ascendc-env-check skill 核 NPU arch 在 cannbot 支持矩阵内（如 dav-2201/arch22）。',
   '- 关键 NPU 小算子坑：scatter_reduce(module)→Tensor.scatter_reduce_(fp32)；coords.max/bincount int32→long（aclnnMaxDim rejects int32）；torchvision Normalize in-place→manual out-of-place（aclnnInplaceCopy fails）。',
   '',
@@ -440,8 +440,8 @@ const gapPrompt = [
       ].join('\n')
     : [
         '1. 跑 trace / demo 或 accuracy_run 带 --profile-level L1，定位 CPU fallback 算子与性能热点。',
-        '2. 产 ' + ctx.adaptation_path + '/operator_gap_report.md：每个缺口写明 功能、输入/输出/语义、缺口类型（precision/performance/missing）、三条方案 (a)gitcode CANN recipe (b)cannbot Ascend C 新算子 (c)采用方案 + 理由、UB/精度约束。',
-        '3. 【优先级，严格按序】纯 torch bit-exact（conv_none/attention_torch_sdpa）> 社区 cann-recipes（Hunyuan3D render_npu / gaussian_splatting meta_gauss_render）> C++ CppExtension 降级（排除 .cu）> cannbot 新算子。cannbot 只在前三者都不适用时才 decision=ascend_c。先用 ascendc-env-check skill 核 NPU arch 在 cannbot 支持矩阵内。',
+        '2. 产 ' + ctx.adaptation_path + '/operator_gap_report.md：每个缺口写明 功能、输入/输出/语义、缺口类型（precision/performance/missing）、四条方案 (a)GitCode CANN recipe (b)Ascend 社区替代算子 (c)cannbot Ascend C 新算子 (d)采用方案 + 理由、UB/精度约束。',
+        '3. 【优先级，严格按序】纯 torch bit-exact（conv_none/attention_torch_sdpa）> GitCode CANN 社区/Ascend 社区现成算子（Hunyuan3D render_npu / gaussian_splatting meta_gauss_render）> C++ CppExtension 降级（排除 .cu）> cannbot 新算子。cannbot 只在前三者都不适用时才 decision=ascend_c。先用 ascendc-env-check skill 核 NPU arch 在 cannbot 支持矩阵内。',
         '4. 仅列真正值得 cannbot 补齐的算子（精度关键如 sparse conv fp32 累加；性能关键如 hashmap 邻居查找、QEF、UV rasterize、sparse grid_sample）。python shim 可接受则 decision=shim；无价值则 skip。',
         '5. 对 decision=ascend_c 的算子给出 location：多 adaptation 共享 → repo_root（仓库根 operators/）；仅本模型 → adaptation_local。',
       ].join('\n'),
@@ -543,16 +543,16 @@ if (gap.has_gap && ascendOps.length > 0) {
   const cannbotResults = await pipeline(
     ascendOps,
     function (op) {
-      return agent(archPrompt(op), { agentType: 'ops-direct-invoke:ascendc-kernel-architect', schema: ARCH_SCHEMA, phase: 'CannbotDev', label: 'arch:' + op.op_name })
+      return agent(archPrompt(op), { agentType: 'ascendc-kernel-architect', schema: ARCH_SCHEMA, phase: 'CannbotDev', label: 'arch:' + op.op_name })
     },
     function (_prev, op) {
-      return agent(walkPrompt(_prev, op), { agentType: 'ops-direct-invoke:ascendc-kernel-design-reviewer', schema: WALK_SCHEMA, phase: 'CannbotDev', label: 'walk:' + op.op_name })
+      return agent(walkPrompt(_prev, op), { agentType: 'ascendc-kernel-design-reviewer', schema: WALK_SCHEMA, phase: 'CannbotDev', label: 'walk:' + op.op_name })
     },
     function (_prev, op) {
-      return agent(devPrompt(_prev, op), { agentType: 'ops-direct-invoke:ascendc-kernel-developer', schema: DEV_SCHEMA, phase: 'CannbotDev', label: 'dev:' + op.op_name })
+      return agent(devPrompt(_prev, op), { agentType: 'ascendc-kernel-developer', schema: DEV_SCHEMA, phase: 'CannbotDev', label: 'dev:' + op.op_name })
     },
     function (_prev, op) {
-      return agent(reviewPrompt(_prev, op), { agentType: 'ops-direct-invoke:ascendc-kernel-reviewer', schema: CANNBOT_REVIEW_SCHEMA, phase: 'CannbotDev', label: 'rev:' + op.op_name })
+      return agent(reviewPrompt(_prev, op), { agentType: 'ascendc-kernel-reviewer', schema: CANNBOT_REVIEW_SCHEMA, phase: 'CannbotDev', label: 'rev:' + op.op_name })
     }
   )
 

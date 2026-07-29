@@ -15,7 +15,7 @@ metadata:
 2. **完整获取权重**：从 HuggingFace 拉全量 checkpoint，不偷懒只取部分。
 3. **算子替换优先级（三段式）**：
    - 优先用 torch_npu 原生算子
-   - 缺失算子先到 **gitcode CANN 社区**找替代算子
+   - 缺失算子先到 **GitCode CANN 社区** 和 **Ascend 社区**找替代算子
    - 都没有，再描述清楚功能与需求，用 **cannbot 生成 Ascend C 算子**
 4. **结果对齐**：最终 NPU 推理输出必须与 GitHub 项目页展示的效果对比一致（质量/形状/纹理不漂移）。
 
@@ -27,7 +27,7 @@ cannbot 协同适配的资产要拆两层看，**不可整体照搬**。
 
 ### ✅ 通用层（任何算子缺口型模型都有效）
 
-1. **三段式算子优先级**本身（torch_npu 原生 > gitcode CANN 社区 > cannbot 新建）。
+1. **三段式算子优先级**本身（torch_npu 原生 > GitCode CANN 社区/Ascend 社区 > cannbot 新建）。
 2. **cannbot 工具链流程**：env-check → Architect(DESIGN+PLAN) → Design Reviewer(WALKTHROUGH) → Developer(代码+编译) → Reviewer(100 分制) → 修复循环。
 3. **cannbot 工具链的坑**（跨模型复用，已用血泪换）：
    - 编译必须用 adaptation `.venv` 的 python，否则 dlopen 崩 `std::length_error: vector::reserve`
@@ -51,7 +51,7 @@ cannbot 协同适配的资产要拆两层看，**不可整体照搬**。
 
 ## cannbot 价值触发条件（核心判断）
 
-**模型必须有"CUDA-only 算子缺口且 NPU 原生/社区都没有"才能让 cannbot 产生价值。没缺口就没价值。**
+**模型必须有"CUDA-only 算子缺口且 NPU 原生/GitCode CANN 社区/Ascend 社区都没有"才能让 cannbot 产生价值。没缺口就没价值。**
 
 | 模型类型 | 算子缺口 | cannbot 价值 |
 |---------|---------|-------------|
@@ -83,9 +83,9 @@ cannbot-adapter 的自然触发点是个架构关键点。**不能只依赖 adap
 
 **board_ops 状态机限制（2026-07-21 实测）**：`update_adaptation_status` 拒绝 completed→in_progress 回退（`adaptation_status is already completed and cannot be changed`）。这意味着"adaptation 先 completed（用 fallback 跑通 dry-run），后发现需 cannbot 重做 SSM 算子"的场景无法通过回退 adaptation 状态实现。后果：一旦 adapter 用 fallback 过了 dry-run 写库 completed，cannbot 算子只能以 optimization 阶段性能优化的方式介入（model_files 集成 + perf 测速），不能回头重做 adaptation。这强制印证了"optimization 触发是 cannbot 在真实场景的主路径"——不是设计选择，是状态机约束。若要支持 adaptation 回退重做，需 board_ops 增加 completed→in_progress 回退接口（带审计）。
 
-**嵌套 spawn 心跳监控盲区（2026-07-21 实证·重要）**：cannbot-adapter 走 4 角色流程时 spawn 子 subagent（ops-direct-invoke:ascendc-kernel-architect 等），**父 agent 阻塞等待子 agent 返回期间不更新自己的心跳**。team-lead 看父 agent 心跳停更（40+ 分钟）容易误判"卡死"，实际子 agent 在持续产出文件。诊断方法：**看子 agent 产出文件时间戳**（operators/<op>/docs/DESIGN.md、op_kernel/*.asc、build/*.so 的 mtime），文件在更新 = 在工作，别用心跳判卡死。cannbot 4 角色完整流程耗时 3-4 小时（每角色 spawn + 工作 30min-1h），是正常节奏。**严禁**因父 agent 心跳停更就 spawn 新 cannbot-adapter 接手——会破坏正在跑的 4 角色流程（差点犯错，被用户打断纠正）。正确做法：耐心等子 agent 产出，或 SendMessage 询问（但父 agent 阻塞期间不处理 inbox，回复会延迟到子 agent 返回后）。
+**嵌套 项目内置 心跳监控盲区（2026-07-21 实证·重要）**：cannbot-adapter 走 4 角色流程时 子 subagent（ascendc-kernel-architect 等），**父 agent 阻塞等待子 agent 返回期间不更新自己的心跳**。team-lead 看父 agent 心跳停更（40+ 分钟）容易误判"卡死"，实际子 agent 在持续产出文件。诊断方法：**看子 agent 产出文件时间戳**（operators/<op>/docs/DESIGN.md、op_kernel/*.asc、build/*.so 的 mtime），文件在更新 = 在工作，别用心跳判卡死。cannbot 4 角色完整流程耗时 3-4 小时（每角色 + 工作 30min-1h），是正常节奏。**严禁**因父 agent 心跳停更就 新 cannbot-adapter 接手——会破坏正在跑的 4 角色流程（差点犯错，被用户打断纠正）。正确做法：耐心等子 agent 产出，或 SendMessage 询问（但父 agent 阻塞期间不处理 inbox，回复会延迟到子 agent 返回后）。
 
-**cannbot 4 角色 Reviewer 阶段卡死（2026-07-21 实证）**：两个 cannbot-adapter（两个算子）都成功走完前 3 角色（Architect→DesignReviewer→Developer），.so 编译生成成功（一个可加载且注册成功；另一个可加载但未注册（注册名待查））。但**两个都在 .so 生成后卡在 Reviewer（第 4 角色）spawn**——文件时间戳停更 2h+，无 REVIEW.md，无 operator_gap_fixed 回报。根因推断：Reviewer subagent spawn 后卡住（可能 GLM-5.2 嵌套 spawn 在第 4 层失败，或 Reviewer 独立构建验证耗时超限）。结论：cannbot 4 角色流程在 GLM-5.2 下前 3 角色可靠出 .so，Reviewer 阶段不可靠。后续若需 Reviewer 验收，考虑 team-lead 直接 spawn Reviewer（顶层，不嵌套）或省略 Reviewer 以 .so 加载+注册+test_torch 精度对照作为验收。
+**cannbot 4 角色 Reviewer 阶段卡死（2026-07-21 实证）**：两个 cannbot-adapter（两个算子）都成功走完前 3 角色（Architect→DesignReviewer→Developer），.so 编译生成成功（一个可加载且注册成功；另一个可加载但未注册（注册名待查））。但**两个都在 .so 生成后卡在 Reviewer（第 4 角色）spawn**——文件时间戳停更 2h+，无 REVIEW.md，无 operator_gap_fixed 回报。根因推断：Reviewer subagent 后卡住（可能 GLM-5.2 嵌套 在第 4 层失败，或 Reviewer 独立构建验证耗时超限）。结论：cannbot 4 角色流程在 GLM-5.2 下前 3 角色可靠出 .so，Reviewer 阶段不可靠。后续若需 Reviewer 验收，考虑 team-lead 直接 Reviewer（顶层，不嵌套）或省略 Reviewer 以 .so 加载+注册+test_torch 精度对照作为验收。
 
 **Reviewer synthetic test 盲区（2026-07-22 实证·重要）**：cannbot 算子的 test_torch.py 用 synthetic 输入（正态分布 scale_a=0.5 等），**测不到真实权重下的边界情况**，导致 Reviewer PASS 但实际不可用：
 - 算子 Reviewer synthetic test 全过，但 npu-optimizer 集成真实权重时暴露精度悬崖/跨调用损坏（synthetic 输入测不到真实权重边界）。
