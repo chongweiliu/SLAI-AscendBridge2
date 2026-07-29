@@ -9,6 +9,7 @@ from pathlib import Path
 
 ALLOWED_MODES = {"single_node", "multi_node"}
 ALLOWED_TARGETS = {"local", "ssh", "scheduler"}
+ALLOWED_DISTRIBUTED_EXECUTOR_BACKENDS = {"mp", "ray"}
 ALLOWED_PD_CONNECTORS = {
     "MooncakeConnector",
     "MooncakeConnectorV1",
@@ -58,6 +59,7 @@ def validate(payload: dict) -> list[str]:
             "model_path_shared",
             "network_interface",
             "master_port",
+            "distributed_executor_backend",
         )
         if not isinstance(multi, dict):
             errors.append("multi_node deployment requires multi_node object")
@@ -77,6 +79,23 @@ def validate(payload: dict) -> list[str]:
             injected = master_port == "platform_injected" and target == "scheduler"
             if master_port not in (None, "") and not (valid_port or injected):
                 errors.append("multi_node master_port must be 1..65535 or platform_injected for scheduler")
+
+            executor_backend = multi.get("distributed_executor_backend")
+            if (
+                executor_backend not in (None, "")
+                and executor_backend not in ALLOWED_DISTRIBUTED_EXECUTOR_BACKENDS
+            ):
+                errors.append(
+                    "multi_node distributed_executor_backend must be one of "
+                    f"{sorted(ALLOWED_DISTRIBUTED_EXECUTOR_BACKENDS)}"
+                )
+            ray_requested = multi.get("ray_explicitly_requested", False)
+            if not isinstance(ray_requested, bool):
+                errors.append("multi_node ray_explicitly_requested must be boolean")
+            if executor_backend == "ray" and ray_requested is not True:
+                errors.append(
+                    "Ray requires ray_explicitly_requested=true from the current user prompt"
+                )
 
             allocation = multi.get("allocation_npu_per_node")
             if target == "scheduler":

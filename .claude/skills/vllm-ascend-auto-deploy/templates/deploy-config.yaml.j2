@@ -17,6 +17,8 @@ port: {{ port }}
 
 runtime:
   runtime_kind: "{{ runtime_kind }}"      # container | venv
+  distributed_executor_backend: "{{ distributed_executor_backend | default('mp') }}"  # multi_node 默认 mp；ray 仅限用户显式要求
+  ray_explicitly_requested: {{ ray_explicitly_requested | default(false) | lower }}
   tensor_parallel_size: {{ tensor_parallel_size }}
   data_parallel_size: {{ data_parallel_size }}
   expert_parallel: {{ expert_parallel | lower }}

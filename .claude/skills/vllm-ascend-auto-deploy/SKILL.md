@@ -110,6 +110,7 @@ profile match 块的 `image_ref` 允许取本地镜像名（如 `quay.io/ascend/
 - 本机：当前可用环境，端口 8000。
 - TP/DP/EP：读取 `config.json` 自动规划；MoE 开 EP，Dense 关 EP；默认 TP 不超过 KV heads。
 - 非 PD 多机：每节点一个 DP rank，运行 NPU 可小于申请 NPU。
+- 多机执行后端：默认且优先使用 vLLM 原生 `mp`。只有用户在当前提示词中显式要求 Ray，才允许选择 `ray` 并写入 `ray_explicitly_requested=true`。知识库示例、模型教程、已安装 Ray、现有 Ray 集群或 profile 均不能代替用户授权。若目标版本不支持所需原生 MP 拓扑，停止并报告版本/参数缺口；不得静默或自动回退 Ray。
 - PD：用户只输入几 P 几 D。先在本 Skill 的 `profiles/` 和当前项目 `adaptations/` 中查找同模型架构、权重量化、镜像、vLLM-Ascend 版本、平台资源规格及 xPyD 均匹配，并且有真实推理通过证据的配置。命中时必须复用完整拓扑和关键运行参数，不能只继承模型参数后重新计算 TP/DP。没有精确命中时，每个 P/D 默认是单节点 `independent_instances`，调用 `scripts/plan_pd_topology.py --config CONFIG --prefill-count P --decode-count D --allocation-npu-per-node N --vllm-ascend-version VERSION` 自动计算其余全部参数。版本从镜像检查，连接器按兼容矩阵选择，`use_ascend_direct=true`，prefix caching 关闭。
 - 性能优化：推测解码/MTP、动态 EPLB、图模式和特定预取策略只有在同模型制品、同镜像、同拓扑的真实推理证据中通过时才可默认启用；通用计算或候选 profile 默认采用保守值。失败证据必须保留且优先于未验证模板，禁止为了追求吞吐把已知失败优化重新带入部署。
 - 网络与服务：安全端口自动探测；Proxy 共置首个 Prefill；共享挂载、HCCL 网卡和运行时地址通过预检验证。探测失败或有多个冲突候选时才询问。
@@ -163,7 +164,7 @@ python scripts/plan_topology.py CONFIG.json --node-count N --runtime-cap-per-nod
    做精确兼容校验，其中包括权重绝对路径和 `config.json` SHA-256。任何模型架构、镜像、版本、模型制品、资源规格或 xPyD 不匹配都
    视为未命中并回退通用计算；禁止“近似套用”。配置摘要必须注明计划来源是
    `validated_profile` 还是 `generic_calculation`。
-4. 展示最终配置：申请资源、实际运行资源、TP/DP/EP、PD 角色与作用域、版本、连接器/Direct、节点、镜像、挂载、网络、全部端口和命令摘要；末尾询问“是否执行部署？”。
+4. 展示最终配置：申请资源、实际运行资源、TP/DP/EP、多机执行后端、PD 角色与作用域、版本、连接器/Direct、节点、镜像、挂载、网络、全部端口和命令摘要；末尾询问“是否执行部署？”。多机默认显示 `distributed_executor_backend=mp`；只有当前提示词显式要求 Ray 时才可显示 `ray`，并注明其授权来源。
 5. 只有用户明确确认后才生成部署文件并执行 Shell 语法检查和平台 dry-run。**每次部署必须渲染** `deploy-config.yaml`（按 `templates/deploy-config.yaml.j2` 填充 deploy-request 关键字段）、`run/*.sh` 角色脚本、以及 `deploy-baremetal.sh`（按 `templates/deploy-baremetal.sh.j2`）；`target=scheduler` 时额外渲染 `ktp-<topology>.yaml` manifest 与 `deploy-ktp.sh`（按 `templates/deploy-ktp.sh.j2`）。对生成的 `*.sh` 跑 `bash -n` 语法检查，`deploy-config.yaml` 跑 `python -c "import yaml;yaml.safe_load(open(...))"` 解析校验。KTP 固定 world 的多机
    ACJob 在 dry-run 前还必须执行
    `python scripts/validate_ktp_manifest.py job.yaml --require-gang`，确保

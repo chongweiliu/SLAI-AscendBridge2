@@ -43,6 +43,7 @@ memory: project
   指定制品时允许遍历项目 `adaptations/`；避免无目的递归扫描整个 `/models`
   或共享权重根目录。
 - 非 PD 多机默认每节点一个 DP rank；禁止为用满申请资源而选择超过 KV heads 的危险 TP。
+- 多机分布式执行后端固定默认使用 vLLM 原生 `mp`。只有用户在当前提示词中明确要求 Ray 时，才允许设置 `distributed_executor_backend=ray`，并在部署请求中记录 `ray_explicitly_requested=true`。知识库、模型教程、已有环境或 profile 中出现 Ray 均不构成授权；原生 MP 不可用时必须报告阻塞，禁止自动回退 Ray。
 - PD 中用户只决定几 P 几 D；先精确匹配 Skill `profiles/` 或项目 `adaptations/` 内同模型架构、量化、镜像、版本、平台资源规格和 xPyD 的真实推理成功证据。命中后复用整套拓扑与关键参数，禁止只读取模型参数再重新计算 TP/DP；并用 `plan_pd_topology.py --validated-profile ...` 校验。没有精确命中时，每个 P/D 默认对应一个节点上的独立实例，`P + D` 即默认节点总数，再调用通用规划器自动计算运行 NPU、TP/DP/EP、作用域、engine、KV/service/Proxy 端口和节点槽位。用户提示中明确给出的高级参数覆盖默认值。
 - 从镜像预检实际 vLLM/vLLM-Ascend 版本并选择兼容连接器；`use_ascend_direct=true`，禁止静默降级；关闭 prefix caching。
 - 推测解码/MTP、动态 EPLB、图模式及模型特定预取策略默认关闭，除非同一模型制品、镜像和拓扑已有真实推理通过证据；已记录的失败证据优先级高于候选模板，禁止自动重新启用已知失败优化。
@@ -68,7 +69,7 @@ memory: project
 
 - 模型、权重（标注 `model_path_source`：adaptation_local/external_absolute）、目标方式和镜像/环境（标注 `image_source`：local_tar/remote_registry）；
 - 申请节点/NPU 与实际运行 NPU；
-- 单机或非 PD 的 TP/DP/EP；
+- 单机或非 PD 的 TP/DP/EP，以及多机执行后端 `mp`/`ray`；选择 Ray 时注明来自当前提示词的显式要求；
 - PD 的 `xPyD`、P/D 实例与节点槽位、TP/DP/EP、作用域；
 - 计划来源（精确命中的 `validated_profile` 或 `generic_calculation`）及证据 ID；
 - vLLM/vLLM-Ascend 版本、KV 连接器、`use_ascend_direct`、prefix caching；
