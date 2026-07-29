@@ -165,7 +165,7 @@ python scripts/plan_topology.py CONFIG.json --node-count N --runtime-cap-per-nod
    视为未命中并回退通用计算；禁止“近似套用”。配置摘要必须注明计划来源是
    `validated_profile` 还是 `generic_calculation`。
 4. 展示最终配置：申请资源、实际运行资源、TP/DP/EP、多机执行后端、PD 角色与作用域、版本、连接器/Direct、节点、镜像、挂载、网络、全部端口和命令摘要；末尾询问“是否执行部署？”。多机默认显示 `distributed_executor_backend=mp`；只有当前提示词显式要求 Ray 时才可显示 `ray`，并注明其授权来源。
-5. 只有用户明确确认后才生成部署文件并执行 Shell 语法检查和平台 dry-run。**每次部署必须渲染** `deploy-config.yaml`（按 `templates/deploy-config.yaml.j2` 填充 deploy-request 关键字段）、`run/*.sh` 角色脚本、以及 `deploy-baremetal.sh`（按 `templates/deploy-baremetal.sh.j2`）；`target=scheduler` 时额外渲染 `ktp-<topology>.yaml` manifest 与 `deploy-ktp.sh`（按 `templates/deploy-ktp.sh.j2`）。对生成的 `*.sh` 跑 `bash -n` 语法检查，`deploy-config.yaml` 跑 `python -c "import yaml;yaml.safe_load(open(...))"` 解析校验。KTP 固定 world 的多机
+5. 只有用户明确确认后才生成部署文件并执行 Shell 语法检查和平台 dry-run。**每次部署必须渲染** `deploy-config.yaml`（按 `templates/deploy-config.yaml.j2` 填充 deploy-request 关键字段）、`run/*.sh` 角色脚本、以及 `deploy-baremetal.sh`（按 `templates/deploy-baremetal.sh.j2`）。`target=scheduler` 按平台分流：KTP 渲染 `ktp-<topology>.yaml` 与 `deploy-ktp.sh`；Kubernetes/CCE/ACK 调用 `scripts/render_kubernetes_artifacts.py` 渲染 `kubernetes.yaml` 与 `deploy-kubernetes.sh`，再运行 `scripts/validate_kubernetes_manifest.py`。对生成的 `*.sh` 跑 `bash -n` 语法检查，全部 YAML 做安全解析校验。KTP 固定 world 的多机
    ACJob 在 dry-run 前还必须执行
    `python scripts/validate_ktp_manifest.py job.yaml --require-gang`，确保
    `min_available` 覆盖全部 replicas 且各 task 的 `min_member=replicas`。
@@ -176,7 +176,7 @@ python scripts/plan_topology.py CONFIG.json --node-count N --runtime-cap-per-nod
    `sha256sum -c`，因为它不会发现额外的旧日志或编译缓存。
 6. 多机调度任务若允许单 Pod 独立重启或换节点，必须用 `scripts/stable_cluster_supervisor.py` 包裹每个角色入口；共享状态目录必须按冻结任务唯一命名。session/IP 变化立即重建，瞬时存储/心跳不可用按 `--unavailable-grace-seconds` 有限容忍；保留非零的 `--child-tail-lines`，让容器重启前把角色末尾输出写入共享 `events/rank-*-child-tail.log`。验收时同时检查事件和子进程末尾日志，区分首发根因与协调终止产生的次生异常。同一节点有多个本地 DP 实例时使用 `scripts/launch_online_dp.py`，不得使用忽略子进程 `exitcode` 的启动器。用户确认执行后提交部署；轮询进程/Pod。
 7. 所有节点 `/v1/models` 就绪后发送确定性最小推理请求，并用 `scripts/validate_inference_result.py` 对解析后的答案做严格断言。
-8. 返回 endpoint、PID/job ID、日志位置、停止命令、`deploy-baremetal.sh`/`deploy-ktp.sh` 路径（一键部署/重提入口）。失败时只停止本次创建的资源。
+8. 返回 endpoint、PID/job ID、日志位置、停止命令和对应一键脚本路径。失败时只停止本次创建的资源。
 
 PD 验收还必须确认 Prefill、Decode、Proxy 三类进程均健康，Proxy 真实推理通过语义断言，KV transfer 日志显示传输成功且未静默 fallback。`use_ascend_direct=true` 失败时不得自动关闭；换干净节点复测仍失败则报告阻塞。只有用户明确接受降级时才能用 `false` 做独立故障隔离，且不能用降级结果替代 direct 成功标准。
 
@@ -190,8 +190,10 @@ deploy-plan.json             # 部署计划摘要
 deploy-config.yaml           # 【必出】配置 yaml（TP/DP/EP/端口/超时/image_source/model_path 可读视图）
 run/                         # 角色启动脚本（preflight_check.sh / run_role.sh / run_prefill_*.sh / run_decode_*.sh / run_proxy_*.sh / start_*.sh）
 deploy-baremetal.sh          # 【必出】裸机一键部署（load tar -> preflight -> start -> /v1/models -> 语义断言）
-ktp-<topology>.yaml          # 【target=scheduler 必出】KTP manifest
-deploy-ktp.sh                # 【target=scheduler 必出】KTP 一键部署（validate gang -> 冻结 -> apply --min-available -> 轮询 -> 语义断言）
+ktp-<topology>.yaml          # 【platform=ktp】KTP manifest
+deploy-ktp.sh                # 【platform=ktp】KTP 一键部署
+kubernetes.yaml              # 【platform=kubernetes/cce/ack】标准 K8s Service + StatefulSet
+deploy-kubernetes.sh         # 【platform=kubernetes/cce/ack】dry-run -> apply -> rollout -> 语义断言
 logs/
 README.md
 ```
@@ -230,7 +232,7 @@ plog 和协调退出留出诊断窗口，避免二者相等触发 watchdog 告�
 - `/v1/chat/completions` 或 `/v1/completions` 返回 HTTP 200 和非空内容；
 - 至少一个答案唯一、可机器断言的确定性提示通过语义校验；
 - 返回 endpoint、日志和停止方法；
-- 已交付 `deploy-config.yaml` + `deploy-baremetal.sh`（`target=scheduler` 时另含 `ktp-<topology>.yaml` + `deploy-ktp.sh`），且 `*.sh` 跑过 `bash -n` 语法检查、`deploy-config.yaml` 可被 `yaml.safe_load` 解析；
+- 已交付 `deploy-config.yaml` + `deploy-baremetal.sh`；调度目标另含对应平台产物（KTP 为 `ktp-<topology>.yaml` + `deploy-ktp.sh`，Kubernetes/CCE/ACK 为 `kubernetes.yaml` + `deploy-kubernetes.sh`），且 `*.sh` 跑过 `bash -n`、YAML 可安全解析并通过平台验证器；
 - 失败任务已停止，平台无本次遗留资源；
 - 请求文件和日志不含凭据。
 

@@ -16,7 +16,16 @@ ALLOWED_PD_CONNECTORS = {
     "MooncakeHybridConnector",
 }
 ALLOWED_PARALLEL_SCOPES = {"global_group", "independent_instances"}
-SECRET_MARKERS = {"password", "passwd", "token", "secret", "private_key"}
+SECRET_MARKERS = {
+    "password",
+    "passwd",
+    "token",
+    "secret",
+    "private_key",
+    "access_key",
+}
+SECRET_REFERENCE_FIELDS = {"image_pull_secrets"}
+KUBERNETES_PLATFORMS = {"kubernetes", "cce", "ack"}
 
 
 def _positive_int(value: object) -> bool:
@@ -28,7 +37,10 @@ def _secret_paths(value: object, prefix: str = "") -> list[str]:
     if isinstance(value, dict):
         for key, item in value.items():
             path = f"{prefix}.{key}" if prefix else key
-            if any(marker in key.lower() for marker in SECRET_MARKERS):
+            if (
+                key not in SECRET_REFERENCE_FIELDS
+                and any(marker in key.lower() for marker in SECRET_MARKERS)
+            ):
                 found.append(path)
             found.extend(_secret_paths(item, path))
     elif isinstance(value, list):
@@ -132,21 +144,76 @@ def validate(payload: dict) -> list[str]:
 
     if target == "scheduler":
         scheduler = payload.get("scheduler")
-        required = (
-            "platform", "access_method", "connection", "auth_method", "queue", "resource_scope",
-            "manifest_schema", "job_type", "allocation_granularity", "image", "model_mount",
-            "cpu_per_node", "memory_per_node", "max_runtime_minutes", "network_mode", "service_exposure",
-        )
         if not isinstance(scheduler, dict):
             errors.append("scheduler target requires scheduler object")
         else:
-            for field in required:
-                if not scheduler.get(field):
-                    errors.append(f"scheduler missing {field}")
+            _validate_scheduler(scheduler, errors)
 
     for path in _secret_paths(payload):
         errors.append(f"credential field is forbidden in request file: {path}")
     return errors
+
+
+def _validate_scheduler(scheduler: dict, errors: list[str]) -> None:
+    common_required = (
+        "platform",
+        "access_method",
+        "connection",
+        "auth_method",
+        "image",
+        "model_mount",
+        "cpu_per_node",
+        "memory_per_node",
+        "max_runtime_minutes",
+        "network_mode",
+        "service_exposure",
+    )
+    for field in common_required:
+        if scheduler.get(field) in (None, ""):
+            errors.append(f"scheduler missing {field}")
+
+    platform = str(scheduler.get("platform", "")).lower()
+    if platform in KUBERNETES_PLATFORMS:
+        for field in ("namespace", "npu_resource_name"):
+            if scheduler.get(field) in (None, ""):
+                errors.append(f"scheduler missing {field}")
+        resource_name = scheduler.get("npu_resource_name")
+        if resource_name not in (None, "") and "/" not in str(resource_name):
+            errors.append("scheduler npu_resource_name must be an extended resource")
+        model_mount = scheduler.get("model_mount")
+        if not isinstance(model_mount, dict):
+            errors.append("Kubernetes scheduler model_mount must be an object")
+        else:
+            if model_mount.get("type") != "pvc":
+                errors.append("Kubernetes scheduler model_mount.type must be pvc")
+            for field in ("claim_name", "mount_path"):
+                if model_mount.get(field) in (None, ""):
+                    errors.append(f"Kubernetes scheduler model_mount missing {field}")
+        if scheduler.get("network_mode") not in (None, "", "pod", "host"):
+            errors.append("Kubernetes scheduler network_mode must be pod or host")
+        if scheduler.get("service_exposure") not in (
+            None,
+            "",
+            "ClusterIP",
+            "LoadBalancer",
+            "NodePort",
+        ):
+            errors.append(
+                "Kubernetes scheduler service_exposure must be "
+                "ClusterIP, LoadBalancer, or NodePort"
+            )
+        return
+
+    ktp_required = (
+        "queue",
+        "resource_scope",
+        "manifest_schema",
+        "job_type",
+        "allocation_granularity",
+    )
+    for field in ktp_required:
+        if scheduler.get(field) in (None, ""):
+            errors.append(f"scheduler missing {field}")
 
 
 def _validate_standard_multi(multi: dict, allocation: object, errors: list[str]) -> None:

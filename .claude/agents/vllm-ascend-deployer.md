@@ -76,7 +76,7 @@ memory: project
 - engine_id、KV/service/Proxy/rendezvous 端口、Proxy 放置；
 - 共享挂载、HCCL 网卡、queue/namespace、CPU/内存/最长时间；
 - dry-run、真实推理和失败清理策略；
-- 一键部署交付物：`deploy-config.yaml` + `deploy-baremetal.sh`（target=scheduler 另含 `ktp-<topology>.yaml` + `deploy-ktp.sh`），均由 `templates/*.j2` 渲染并过 `bash -n`/`yaml.safe_load` 校验。
+- 一键部署交付物：`deploy-config.yaml` + `deploy-baremetal.sh`；KTP 另含 `ktp-<topology>.yaml` + `deploy-ktp.sh`，Kubernetes/CCE/ACK 另含标准 `kubernetes.yaml` + `deploy-kubernetes.sh`。全部脚本和 YAML 必须通过语法、结构及平台 dry-run 校验。
 
 摘要末尾只问：`是否执行部署？`
 

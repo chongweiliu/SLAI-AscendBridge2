@@ -7,7 +7,8 @@
 只向用户收集平台无法安全推断的契约：
 
 1. 平台、CLI/API、连接/context、认证方式。
-2. queue/project/namespace，以及可采用的 job schema/profile。
+2. KTP 等作业平台提供 queue/project 和 job schema/profile；原生 Kubernetes、
+   CCE、ACK 提供 kube context、namespace、NPU 扩展资源键和 PVC。
 3. 整节点/共享粒度、NPU 计量单位、`allocation_npu_per_node`。非 PD 还需
    节点数；PD 直接由用户给出的 `P + D` 得到节点数。
 4. schema/profile 不能提供时才询问镜像和模型挂载。
@@ -49,3 +50,38 @@ manifest，先 dry-run，再提交并解析 job ID。Pending 使用有界等待�
 - 失败或结束时确认 `Active Pods: 0`；失败任务执行 `ktp stop JOB_ID`。
 
 集群域名和私网地址加入 `NO_PROXY/no_proxy`，但不要输出 token 或未过滤环境。
+
+## 原生 Kubernetes / CCE / ACK
+
+KTP 虽然运行在 Kubernetes 之上，但它是带租户、队列和作业 CRD 的上层提交
+协议。不要把 KTP YAML 当作通用 Kubernetes YAML。原生路径使用标准
+`StatefulSet + headless Service + API Service`，可由标准 `kubectl` 提交到
+Kubernetes、CCE 或 ACK。
+
+最小平台契约：
+
+- `kube_context`（空值表示当前 context）和 `namespace`；
+- 平台设备插件注册的 NPU 扩展资源键，例如由管理员确认的
+  `vendor.example/npu`，禁止硬编码某个云的猜测值；
+- 已存在的模型 PVC：`claim_name`、容器内 `mount_path`、可选 `sub_path`；
+- 镜像、CPU、内存、每 Pod 申请 NPU 数、Service 类型；
+- 私有镜像只记录 `imagePullSecret` 名称，不把 registry 凭据写入请求或清单。
+
+执行：
+
+1. 运行 `scripts/render_kubernetes_artifacts.py deploy-request.json --output-dir DIR`。
+2. 运行 `scripts/validate_kubernetes_manifest.py DIR/kubernetes.yaml --request DIR/deploy-request.json`。
+3. 对生成的 `deploy-kubernetes.sh` 执行 `bash -n`。
+4. 一键脚本先执行 client/server dry-run，再 apply、等待 StatefulSet、临时
+   port-forward，并用真实最小推理完成语义断言。
+5. 用 `deploy-kubernetes.sh status|logs|delete` 查询、取日志和清理。
+
+当前原生 Kubernetes v1 支持单机，以及非 PD 的多机原生 `mp` 部署。多机时
+TP 在单 Pod/节点内，DP 跨 Pod；`data_parallel_size` 必须能被节点数整除，
+每节点运行 NPU 数等于 `TP * local_DP`。API Service 只选择 rank 0，headless
+Service 为各 rank 提供稳定 DNS。
+
+当前原生 Kubernetes v1 明确拒绝 PD 分离和 Ray。不得因集群安装了 Ray 而
+自动切换；只有用户显式要求 Ray 时才进入后续专用实现，而不是复用本清单。
+CCE/ACK 是否可直接使用同一清单，取决于目标集群已安装兼容的昇腾设备插件、
+网络组件、存储类/PVC 和镜像访问配置；渲染器不写入云账号或临时凭据。
