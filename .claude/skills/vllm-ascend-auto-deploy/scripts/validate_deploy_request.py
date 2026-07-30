@@ -26,6 +26,7 @@ SECRET_MARKERS = {
 }
 SECRET_REFERENCE_FIELDS = {"image_pull_secrets"}
 KUBERNETES_PLATFORMS = {"kubernetes", "cce", "ack"}
+ALLOWED_SSH_AUTH_METHODS = {"agent", "key", "password"}
 
 
 def _positive_int(value: object) -> bool:
@@ -130,17 +131,7 @@ def validate(payload: dict) -> list[str]:
         errors.append("port must be an integer between 1 and 65535")
 
     if target == "ssh":
-        nodes = payload.get("nodes")
-        minimum = 2 if mode == "multi_node" else 1
-        if not isinstance(nodes, list) or len(nodes) < minimum:
-            errors.append(f"ssh target requires at least {minimum} node(s)")
-        else:
-            for index, node in enumerate(nodes):
-                for field in ("host", "username", "ssh_port", "auth_method"):
-                    if not node.get(field):
-                        errors.append(f"nodes[{index}] missing {field}")
-        if mode == "multi_node" and not payload.get("master_host"):
-            errors.append("multi_node ssh target requires master_host")
+        _validate_ssh(payload, mode, errors)
 
     if target == "scheduler":
         scheduler = payload.get("scheduler")
@@ -152,6 +143,61 @@ def validate(payload: dict) -> list[str]:
     for path in _secret_paths(payload):
         errors.append(f"credential field is forbidden in request file: {path}")
     return errors
+
+
+def _validate_ssh(payload: dict, mode: object, errors: list[str]) -> None:
+    nodes = payload.get("nodes")
+    expected = (
+        payload.get("multi_node", {}).get("node_count")
+        if mode == "multi_node" and isinstance(payload.get("multi_node"), dict)
+        else 1
+    )
+    if not isinstance(nodes, list):
+        errors.append("ssh target requires nodes list")
+        return
+    if _positive_int(expected) and len(nodes) != expected:
+        errors.append(f"ssh target requires exactly {expected} node(s)")
+
+    identities: set[tuple[str, int]] = set()
+    hosts: set[str] = set()
+    for index, node in enumerate(nodes):
+        if not isinstance(node, dict):
+            errors.append(f"nodes[{index}] must be an object")
+            continue
+        for field in ("host", "username", "ssh_port", "auth_method"):
+            if node.get(field) in (None, ""):
+                errors.append(f"nodes[{index}] missing {field}")
+        host = node.get("host")
+        username = node.get("username")
+        port = node.get("ssh_port")
+        auth_method = node.get("auth_method")
+        if host not in (None, ""):
+            hosts.add(str(host))
+        if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
+            errors.append(f"nodes[{index}] ssh_port must be 1..65535")
+        elif host not in (None, ""):
+            identity = (str(host), port)
+            if identity in identities:
+                errors.append(f"duplicate SSH node: {host}:{port}")
+            identities.add(identity)
+        if auth_method not in (None, "") and auth_method not in ALLOWED_SSH_AUTH_METHODS:
+            errors.append(
+                f"nodes[{index}] auth_method must be one of "
+                f"{sorted(ALLOWED_SSH_AUTH_METHODS)}"
+            )
+        for field, value in (("host", host), ("username", username)):
+            if isinstance(value, str) and (
+                not value.strip()
+                or any(char.isspace() or ord(char) < 32 for char in value)
+            ):
+                errors.append(f"nodes[{index}] {field} contains invalid characters")
+
+    if mode == "multi_node":
+        master_host = payload.get("master_host")
+        if not master_host:
+            errors.append("multi_node ssh target requires master_host")
+        elif str(master_host) not in hosts:
+            errors.append("multi_node master_host must match one nodes[].host")
 
 
 def _validate_scheduler(scheduler: dict, errors: list[str]) -> None:

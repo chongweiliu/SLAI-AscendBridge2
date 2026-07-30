@@ -24,6 +24,9 @@ manifest，先 dry-run，再提交并解析 job ID。Pending 使用有界等待�
 
 ## KTP
 
+KTP 仅作为内部平台测试适配。正式对外合入或发布分支必须排除 KTP 模板、
+验证器和交付说明，不能把内部 CLI 当作通用能力。
+
 - 单机用 `vcjob`，多机用 `acjob`。
 - 多机整节点申请值与 vLLM 实际运行 NPU 数分开记录。
 - 多机 ACJob 默认采用整组准入：`min_available` 必须等于所有 task 的
