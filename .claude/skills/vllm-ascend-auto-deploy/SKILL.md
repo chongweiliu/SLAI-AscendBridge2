@@ -9,56 +9,53 @@ description: 交互式部署 vLLM-Ascend 推理服务。用户要求“帮我部
 
 ## 对话硬门禁
 
-每次回复只处理第一个未完成 gate，提问后立即结束。gate 未完成时，不调用工具、不读取历史任务或平台配置、不写文件、不预检或提交。
+每次只处理第一个未完成 gate，提问后立即结束。gate 未完成时，除
+`AskUserQuestion` 外不调用任何工具，不读取历史任务或平台配置、不写文件、
+不预检或提交。
 
-提问必须给出选项清单，不得只抛一个裸问句。每条问题用 `数字编号 + 选项` 的 Markdown 列表形式呈现候选项，选项内括注简短含义，末尾仍只保留一个问句收束，不输出问候、解释、核对过程或下一步预告。固定门禁措辞如下：
+凡是有有限候选项的问题，必须调用 Claude Code 的 `AskUserQuestion`，让用户
+用方向键选择并按 Enter 确认。不得把候选项渲染成 `1/2/3` 文本，也不得要求
+用户输入对应数字。调用时设置 `multiSelect=false`，使用以下固定问题与选项：
 
-- 缺部署规模时只能输出：
+- 缺部署规模：
+  - question：`请确认部署规模`
+  - `单机部署`：`在单台机器上运行，无跨节点通信`
+  - `多机部署`：`跨节点张量并行或数据并行`
+- 单机缺目标：
+  - question：`请选择部署目标`
+  - `本机`：`在当前机器直接启动`
+  - `SSH`：`通过 SSH 部署到指定远程服务器`
+  - `调度平台`：`提交到 Kubernetes、CCE 或 ACK`
+- 多机缺目标：
+  - question：`请选择部署目标`
+  - `SSH`：`通过 SSH 部署到多台远程服务器`
+  - `调度平台`：`提交到 Kubernetes、CCE 或 ACK`
+- 多机未确认 PD：
+  - question：`是否启用 PD（Prefill/Decode）分离`
+  - `启用 PD 分离`：`Prefill 与 Decode 分角色独立部署`
+  - `不启用 PD 分离`：`统一以单一角色运行`
 
-  ```text
-  请确认部署规模：
-  1. 单机部署（在单台机器上运行，无跨节点通信）
-  2. 多机部署（跨节点张量并行或数据并行）
-  ```
-
-- 单机缺目标时只能输出：
-
-  ```text
-  请选择部署目标：
-  1. 本机（在当前机器直接启动）
-  2. SSH（通过 SSH 部署到指定远程服务器）
-  3. 调度平台（提交到 Kubernetes/CCE/ACK）
-  ```
-
-- 多机缺目标时只能输出：
-
-  ```text
-  请选择部署目标：
-  1. SSH（通过 SSH 部署到多台远程服务器）
-  2. 调度平台（提交到 Kubernetes/CCE/ACK）
-  ```
-
-- 多机未确认 PD 时只能输出：
-
-  ```text
-  是否启用 PD（Prefill/Decode）分离？
-  1. 启用 PD 分离（Prefill 与 Decode 分角色独立部署）
-  2. 不启用 PD 分离（统一以单一角色运行）
-  ```
+如果当前运行方式确实没有 `AskUserQuestion`（例如非交互 print 模式），才允许
+回退为无编号的项目符号，并接受选项文字或自然语言回答；仍不得要求输入数字。
+Claude Code 交互会话应使用 `default` 或 `plan` permission mode；
+`--permission-mode dontAsk` 会拒绝 `AskUserQuestion`，不得用该模式验收交互门禁。
 
 - 启用 PD 但未给 P/D 数量时只能输出 `请提供几 P 几 D（例如 2P2D）？`；此 gate 为自由数值输入，无需选项列表，但仍不得附加解释。
 
-输出前在内部逐字核对，不输出核对过程。除上述收束问句外，不得对裸问句做任何扩展。
+调用交互选择前在内部核对问题、标签和描述，不输出核对过程。
 
 运行参数默认自动规划，不把 Prefill/Decode 拓扑、作用域、版本、连接器、Direct KV、端口、Proxy、共享路径、网卡或 rendezvous 作为固定问卷。先通过模型配置、镜像、平台 profile 和预检推断；只有缺失或冲突会阻止成功部署时才追问，且一次最多三个。
 
 1. 缺 `model_name`/`model_id`：只补齐缺失项。拿到 `model_id` 后**先进入"模型来源解析（自闭环）"子流程**（见下节），不直接向用户索取绝对路径。
-2. 缺 `deployment_mode`：按上节固定措辞输出“单机部署 / 多机部署”选项清单，不得解释或追加问题。
-3. 缺 `target`：按上节固定措辞输出目标选项清单（单机三选一、多机二选一）。不得索取节点、账号或平台字段。
-4. 多机 PD 门禁：按上节固定措辞输出“启用 / 不启用 PD 分离”选项清单，然后结束；用户启用后只再问一次“几 P 几 D”。`P + D` 作为默认节点总数。
+2. 缺 `deployment_mode`：调用上述部署规模 `AskUserQuestion`，不得解释或追加问题。
+3. 缺 `target`：调用对应目标 `AskUserQuestion`（单机三选一、多机二选一）。不得索取节点、账号或平台字段。
+4. 多机 PD 门禁：调用上述 PD `AskUserQuestion`，然后结束；用户启用后只再问一次“几 P 几 D”。`P + D` 作为默认节点总数。
 5. 按目标 reference 收集不可安全推断的接入和资源契约。SSH 必须有主机、用户名、认证方式；调度平台必须有或明确授权读取 platform/context、queue/project/namespace、节点数、申请粒度/NPU 单位、每节点申请值、镜像和模型挂载。
 6. 接入信息足够后自动读取模型配置、预检环境并规划所有运行参数。只有预检歧义或硬约束冲突时才补问。
-7. 输出完整配置摘要，末尾只问 `是否执行部署？`。用户确认前禁止真实提交、启动服务或在 SSH 目标执行变更；确认后不再逐项确认自动参数。
+7. 输出完整配置摘要后调用 `AskUserQuestion` 询问 `是否执行部署`，选项为
+   `执行部署`（按上述配置启动并验收）和 `暂不执行`（保留计划但不改变目标
+   环境）。用户确认前禁止真实提交、启动服务或在 SSH 目标执行变更；确认后
+   不再逐项确认自动参数。
 
 一次最多问三个同批次问题。`multi_node + local` 无效，禁止创造“当前机 + SSH 其他节点”等第四种 target。用户明确说 Kubernetes/CCE/ACK 时可视为 `target=scheduler` 和对应 `platform` 已知。调度平台其余信息必须由用户在当前对话提供或明确确认；旧任务、CLI context 和环境只能在授权接入后做只读核验，不能替用户选择。
 
@@ -66,19 +63,15 @@ description: 交互式部署 vLLM-Ascend 推理服务。用户要求“帮我部
 
 项目要具备完全自闭环能力：`adaptations/` 是模型权重与代码的唯一落地处。**任何部署拿到 `model_id` 后，必须先在 `adaptations/` 查找，命中即复用，未命中再给选项**，不得默认索取外部绝对路径。
 
-1. 调 `scripts/adaptation_utils.model_id_to_adaptation_path(model_id)` 推导 `adaptations/{safe_name}`；检查目录是否存在 `models/` 子目录且含 `config.json` 与至少一个权重分片（`.safetensors`/`.bin`/`.pt` 等）。
+1. 调 `scripts/adaptation_utils.model_id_to_adaptation_path(model_id)` 推导 `adaptations/{safe_name}`，再运行 `scripts/resolve_model_artifact.py`。解析器同时支持扁平 `models/` 和 HuggingFace `models--*/snapshots/*` 布局，并以实际 `config.json` + 权重门禁为准；数据库或 `.status.json` 的 `completed` 不能替代制品检查。
 2. **命中** → 记录 `model_path = adaptations/{safe_name}/models`、`model_path_source = adaptation_local`、`config_path`、`config_sha256`，跳到预检，不再问用户。
-3. **未命中** → 输出选项清单（遵循"追问给选项"规则，不得只抛裸问句）：
-
-   ```text
-   在 adaptations/ 下未找到该模型。请选择：
-   1. 提供权重绝对路径（直接用外部路径部署，不入库 adaptations）
-   2. 自动下载并准备（在 adaptations/{safe_name}/ 下创建 demo.py + pyproject.toml + 下载权重到 models/，可复用于适配/评测/优化全链路）
-   3. 跳过本次部署
-   ```
+3. **未命中** → 调用 `AskUserQuestion`，question 为
+   `在 adaptations/ 下未找到该模型，请选择模型来源`，提供：
+   `提供权重绝对路径`、`自动下载并准备`、`跳过本次部署`。描述分别说明
+   外部路径不入库、下载后可复用、终止本次部署；不得输出编号列表。
 
 4. 选 1 → 追问绝对路径，`model_path_source = external_absolute`，跳过下载。
-5. 选 2 → **deployer 内化部分 adapter 能力**：执行 `scripts/prepare_adaptation.py --model-id {model_id}`。该脚本复用 `adaptation_utils` / `run_completed_adaptations.download_model_snapshot` / `get_model_info` / `demo.py.j2` 产出满足 DoD 最小子集的骨架（demo.py + pyproject.toml + README.md + .status.json + output.txt + 下载权重到 `models/`），并 best-effort 登记到 board.db 供后续 adapter/benchmark/optimization 链路复用。完成后 `model_path = adaptations/{safe_name}/models`、`model_path_source = adaptation_local`。deployer 内化的是目录准备 + 权重下载 + 骨架渲染，**不替代**完整 adapter 流程（不做精度评测/优化/业务测评）。
+5. 选 2 → **deployer 内化部分 adapter 能力**：执行 `scripts/prepare_adaptation.py --model-id {model_id} --revision {commit}`。该脚本把 HuggingFace snapshot 稳定解析为可直接部署的 `models/` 根目录，任何下载、环境、dry-run 或制品门禁失败均返回非零；只以 `pending` 登记 board.db，不冒充完整 adapter completed。完成后以 `resolve_model_artifact.py` 返回的 `model_root` 为准。deployer 内化的是目录准备 + 权重下载 + 骨架渲染，**不替代**完整 adapter 流程（不做精度评测/优化/业务测评）。
 6. 选 3 → 终止。
 
 `model_path` 允许两种形式：`adaptations/{safe_name}/models`（自闭环）或外部绝对路径。`validate_deploy_request.py` 与 `plan_pd_topology.py` 的校验/精确匹配均接受这两种形式；profile 精确匹配时 `--config` 指向 `adaptations/{safe_name}/models/.../config.json`，`--model-path` 指向 `adaptations/{safe_name}/models`，`--image-ref` 按下节"镜像来源"解析。
@@ -103,6 +96,36 @@ profile match 块的 `image_ref` 允许取本地镜像名（如 `quay.io/ascend/
 - **特性是否可用**：`knowledge-base/07-features-core.md` + `08-parallelism.md`。
 - 知识库为快照，引用命令时与目标镜像实际版本交叉核对（镜像内 `vllm-ascend` 版本以 `pip show` 为准）。
 
+正常自动部署必须写入 `enforce_official_profile=true`，并在渲染前调用
+`scripts/official_model_profile.py`/`deployment_profile.py` 将上述知识编译为机器可执行约束：
+
+- 优先精确匹配 41 个官方模型教程，合并教程中的必需环境变量和
+  `vllm serve` 参数。没有专用教程但命中支持矩阵时，先筛选“同模型族且
+  同任务类型”的官方教程，只继承这些教程一致的参数，记录
+  `parameter_source=family_consensus` 和全部候选教程；不得把某个近似模型的
+  特有参数直接套用。
+- 同族也没有教程时，生成 `parameter_source=knowledge_heuristic` 的保守档案：
+  硬件和特性来自官方支持矩阵，Embedding/Reranker 使用 pooling runner，
+  Reward Model 使用 reward task，其余使用通用 `vllm serve`；TP 继续以目标
+  权重的 `config.json` 和 `plan_topology.py` 计算，禁止仅按参数量猜测。
+- 按官方状态 fail-closed：`❌` 和 `🟡` 禁止自动部署；`🔵` 只有用户明确
+  接受实验性支持并写入 `allow_experimental=true` 才可继续。
+- 将模型支持的 A2/A3/310p、TP/DP/EP/PD 能力与请求交叉校验。SSH/本机
+  由只读预检识别实际 PCI Device ID；调度平台在强制模式下必须提供
+  `scheduler.ascend_generation`，并检查官方镜像的普通、`-a3`、`-310p`
+  后缀一致。
+- 按任务选择真实验收：生成模型严格校验确定性文本；Embedding 校验数值
+  向量；Reranker 校验至少两个可区分分数；Reward Model 校验数值
+  `reward_score`；多模态/ASR 必须提供 `validation_asset_url`，禁止用纯文本
+  健康检查冒充模型推理。
+- 每次知识库更新后运行
+  `python scripts/audit_official_model_coverage.py`。该审计必须保证支持矩阵中
+  每个非 `❌` 条目都能得到部署档案和任务验收契约；这只是静态覆盖证明，
+  不能替代目标机器上的版本预检、资源校验和首次真实 forward。
+
+`enforce_official_profile=false` 只用于旧请求兼容或用户明确选择的手工试验；
+此时产物必须保留 `official_profile_errors`，不得宣称获得官方兼容保证。
+
 ## 安全默认值
 
 
@@ -111,7 +134,13 @@ profile match 块的 `image_ref` 允许取本地镜像名（如 `quay.io/ascend/
 - TP/DP/EP：读取 `config.json` 自动规划；MoE 开 EP，Dense 关 EP；默认 TP 不超过 KV heads。
 - 非 PD 多机：每节点一个 DP rank，运行 NPU 可小于申请 NPU。
 - 多机执行后端：默认且优先使用 vLLM 原生 `mp`。只有用户在当前提示词中显式要求 Ray，才允许选择 `ray` 并写入 `ray_explicitly_requested=true`。知识库示例、模型教程、已安装 Ray、现有 Ray 集群或 profile 均不能代替用户授权。若目标版本不支持所需原生 MP 拓扑，停止并报告版本/参数缺口；不得静默或自动回退 Ray。
-- PD：用户只输入几 P 几 D。先在本 Skill 的 `profiles/` 和当前项目 `adaptations/` 中查找同模型架构、权重量化、镜像、vLLM-Ascend 版本、平台资源规格及 xPyD 均匹配，并且有真实推理通过证据的配置。命中时必须复用完整拓扑和关键运行参数，不能只继承模型参数后重新计算 TP/DP。没有精确命中时，每个 P/D 默认是单节点 `independent_instances`，调用 `scripts/plan_pd_topology.py --config CONFIG --prefill-count P --decode-count D --allocation-npu-per-node N --vllm-ascend-version VERSION` 自动计算其余全部参数。版本从镜像检查，连接器按兼容矩阵选择，`use_ascend_direct=true`，prefix caching 关闭。
+- PD：用户只输入几 P 几 D。配置来源按以下顺序解析并记录 provenance：
+  1. 当前模型教程中的官方 PD 启动指导；
+  2. `knowledge-base/09-pd-disaggregation.md` 的官方通用指导；
+  3. 本 Skill 的 `profiles/` 和当前项目 `adaptations/` 中，同模型架构、权重量化、镜像、vLLM-Ascend 版本、平台资源规格及 xPyD 均匹配并有真实推理通过证据的配置；
+  4. 同族模型的官方 PD 配置，只继承架构相关参数并重新校验当前模型；
+  5. 基于上述知识的保守推断。
+  精确命中时必须复用完整拓扑和 P/D 各自的关键运行参数，不能只继承模型参数后重新计算 TP/DP；实验脚本与官方知识冲突时不得覆盖官方约束，必须报告冲突。没有精确命中时，每个 P/D 默认是单节点 `independent_instances`，调用 `scripts/plan_pd_topology.py --config CONFIG --prefill-count P --decode-count D --allocation-npu-per-node N --vllm-ascend-version VERSION` 自动计算其余全部参数。版本从镜像检查，连接器按兼容矩阵选择，`use_ascend_direct=true`，prefix caching 关闭。
 - 性能优化：推测解码/MTP、动态 EPLB、图模式和特定预取策略只有在同模型制品、同镜像、同拓扑的真实推理证据中通过时才可默认启用；通用计算或候选 profile 默认采用保守值。失败证据必须保留且优先于未验证模板，禁止为了追求吞吐把已知失败优化重新带入部署。
 - 网络与服务：安全端口自动探测；Proxy 共置首个 Prefill；共享挂载、HCCL 网卡和运行时地址通过预检验证。探测失败或有多个冲突候选时才询问。
 - 用户明确提供的值始终覆盖默认值；性能最优 P:D 比例仍需工作负载和 SLO。
@@ -164,8 +193,8 @@ python scripts/plan_topology.py CONFIG.json --node-count N --runtime-cap-per-nod
    做精确兼容校验，其中包括权重绝对路径和 `config.json` SHA-256。任何模型架构、镜像、版本、模型制品、资源规格或 xPyD 不匹配都
    视为未命中并回退通用计算；禁止“近似套用”。配置摘要必须注明计划来源是
    `validated_profile` 还是 `generic_calculation`。
-4. 展示最终配置：申请资源、实际运行资源、TP/DP/EP、多机执行后端、PD 角色与作用域、版本、连接器/Direct、节点、镜像、挂载、网络、全部端口和命令摘要；末尾询问“是否执行部署？”。多机默认显示 `distributed_executor_backend=mp`；只有当前提示词显式要求 Ray 时才可显示 `ray`，并注明其授权来源。
-5. 只有用户明确确认后才生成部署文件并执行 Shell 语法检查和平台 dry-run。`target=local` 渲染本机角色脚本和 `deploy-baremetal.sh`；`target=ssh` 必须调用 `scripts/render_ssh_artifacts.py` 生成 `deploy-ssh.sh`、`remote-node.sh`、冻结校验器和语义验收器，两个 Shell 均执行 `bash -n`。`target=scheduler` 仅支持 Kubernetes/CCE/ACK，调用 `scripts/render_kubernetes_artifacts.py` 渲染 `kubernetes.yaml` 与 `deploy-kubernetes.sh`。全部 YAML 做安全解析校验。
+4. 展示最终配置：申请资源、实际运行资源、TP/DP/EP、多机执行后端、PD 角色与作用域、版本、连接器/Direct、节点、镜像、挂载、网络、全部端口和命令摘要；随后用 `AskUserQuestion` 交互选择“执行部署 / 暂不执行”。多机默认显示 `distributed_executor_backend=mp`；只有当前提示词显式要求 Ray 时才可显示 `ray`，并注明其授权来源。
+5. 只有用户明确确认后才生成部署文件并执行 Shell 语法检查和平台 dry-run。`target=local` 调用 `scripts/render_local_artifacts.py` 生成 `deploy-local.sh` + `local-node.sh`；`target=ssh` 调用 `scripts/render_ssh_artifacts.py` 生成 `deploy-ssh.sh` + `remote-node.sh`；`target=scheduler` 仅支持 Kubernetes/CCE/ACK，调用 `scripts/render_kubernetes_artifacts.py`。本机/SSH 产物包含冻结校验、只读 Ascend 预检和语义验收器；预检必须通过 `npu-smi` 识别所选物理设备的 `Ascend*` 型号，并记录板卡 Product Name、Board ID、PCI Device ID、Subsystem Device ID 和 Chip Count。按华为 PCI Device ID 将 `0xD802` 识别为 A2、`0xD803` 识别为 A3，无法识别代际时禁止启动。当前可执行 renderer 支持单机及非 PD 原生 MP 多机；PD 规划/profile 能力不能表述成可下发能力，SSH/Kubernetes 的 PD renderer 与真实 E2E 补齐前必须明确拒绝。
    冻结前运行 `python scripts/validate_frozen_artifact.py DEPLOY_DIR --write`，
    提交前再不带 `--write` 检查精确文件集合和哈希；不能只用
    `sha256sum -c`，因为它不会发现额外的旧日志或编译缓存。
@@ -184,7 +213,8 @@ deploy-request.json          # 部署请求（非敏感字段）
 deploy-plan.json             # 部署计划摘要
 deploy-config.yaml           # 【必出】配置 yaml（TP/DP/EP/端口/超时/image_source/model_path 可读视图）
 run/                         # 角色启动脚本（preflight_check.sh / run_role.sh / run_prefill_*.sh / run_decode_*.sh / run_proxy_*.sh / start_*.sh）
-deploy-baremetal.sh          # 【target=local】本机一键部署
+deploy-local.sh              # 【target=local】本机一键部署
+local-node.sh                # 【target=local】按 deployment ID 管理本机进程/容器
 deploy-ssh.sh                # 【target=ssh】SSH 编排、host-key 验证、全节点预检和验收
 remote-node.sh               # 【target=ssh】按 deployment ID/PID 或容器名管理单节点 rank
 kubernetes.yaml              # 【platform=kubernetes/cce/ack】标准 K8s Service + StatefulSet
@@ -227,7 +257,7 @@ plog 和协调退出留出诊断窗口，避免二者相等触发 watchdog 告�
 - `/v1/chat/completions` 或 `/v1/completions` 返回 HTTP 200 和非空内容；
 - 至少一个答案唯一、可机器断言的确定性提示通过语义校验；
 - 返回 endpoint、日志和停止方法；
-- 已交付目标对应的一键产物：本机为 `deploy-baremetal.sh`，SSH 为 `deploy-ssh.sh` + `remote-node.sh`，Kubernetes/CCE/ACK 为 `kubernetes.yaml` + `deploy-kubernetes.sh`。`*.sh` 跑过 `bash -n`，冻结文件集合与哈希验证通过；
+- 已交付目标对应的一键产物：本机为 `deploy-local.sh` + `local-node.sh`，SSH 为 `deploy-ssh.sh` + `remote-node.sh`，Kubernetes/CCE/ACK 为 `kubernetes.yaml` + `deploy-kubernetes.sh`。`*.sh` 跑过 `bash -n`，冻结文件集合与哈希验证通过；
 - 失败任务已停止，平台无本次遗留资源；
 - 请求文件和日志不含凭据。
 

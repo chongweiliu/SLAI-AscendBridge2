@@ -9,9 +9,15 @@ REMOTE_DIR={{ remote_dir_shell }}
 REMOTE_SCRIPT="$REMOTE_DIR/remote-node.sh"
 NODE_COUNT={{ node_count }}
 MULTI_NODE={{ "true" if multi_node else "false" }}
+PD_MODE={{ "true" if pd_mode else "false" }}
 SERVICE_PORT={{ service_port }}
 READY_TIMEOUT_SECONDS={{ ready_timeout_seconds }}
+REMOTE_API_PORT={{ proxy_port if pd_mode else service_port }}
+PROXY_NODE_INDEX={{ proxy_node_index }}
+NODE_GROUP_MASTER_INDICES=({{ node_group_master_indices_array }})
 INFERENCE_PAYLOAD={{ inference_payload_shell }}
+INFERENCE_ENDPOINT={{ inference_endpoint_shell }}
+VALIDATOR_ARGS=({{ validator_args_array }})
 NODE_HOSTS=({{ node_hosts_array }})
 NODE_USERS=({{ node_users_array }})
 NODE_PORTS=({{ node_ports_array }})
@@ -198,7 +204,9 @@ upload_artifacts() {
     scp_options "$index"
     "$SCP_BIN" "${SCP_OPTIONS[@]}" \
       "$DEPLOY_DIR/remote-node.sh" \
-      "${NODE_USERS[$index]}@${NODE_HOSTS[$index]}:$REMOTE_DIR/remote-node.sh"
+      "$DEPLOY_DIR/inspect_ascend_environment.py" \
+      "$DEPLOY_DIR/pd_proxy_server.py" \
+      "${NODE_USERS[$index]}@${NODE_HOSTS[$index]}:$REMOTE_DIR/"
   done
 }
 
@@ -251,24 +259,29 @@ stop_all() {
 }
 
 start_all() {
-  local index
+  local index master_index
   # A lost SSH response can occur after the remote process has started.
   # Mark cleanup necessary before issuing the first mutating command.
   STARTED=1
   for ((index = NODE_COUNT - 1; index >= 1; index--)); do
+    master_index="${NODE_GROUP_MASTER_INDICES[$index]}"
     remote_command "$index" start "$index" \
-      "${NETWORK_IPS[0]}" "${NETWORK_IPS[$index]}" "${NETWORK_INTERFACES[$index]}"
+      "${NETWORK_IPS[$master_index]}" "${NETWORK_IPS[$index]}" "${NETWORK_INTERFACES[$index]}"
   done
+  master_index="${NODE_GROUP_MASTER_INDICES[0]}"
   remote_command 0 start 0 \
-    "${NETWORK_IPS[0]}" "${NETWORK_IPS[0]}" "${NETWORK_INTERFACES[0]}"
+    "${NETWORK_IPS[$master_index]}" "${NETWORK_IPS[0]}" "${NETWORK_INTERFACES[0]}"
+  if [ "$PD_MODE" = "true" ]; then
+    remote_command "$PROXY_NODE_INDEX" start-proxy "${NETWORK_IPS[@]}"
+  fi
 }
 
 start_port_forward() {
   local local_port="$1"
   ssh_options 0
   "$SSH_BIN" "${SSH_OPTIONS[@]}" -N \
-    -L "127.0.0.1:${local_port}:127.0.0.1:${SERVICE_PORT}" \
-    "${NODE_USERS[0]}@${NODE_HOSTS[0]}" \
+    -L "127.0.0.1:${local_port}:127.0.0.1:${REMOTE_API_PORT}" \
+    "${NODE_USERS[$PROXY_NODE_INDEX]}@${NODE_HOSTS[$PROXY_NODE_INDEX]}" \
     >"$RUNTIME_DIR/port-forward.log" 2>&1 &
   PORT_FORWARD_PID=$!
 }
@@ -305,7 +318,9 @@ PY
   }
   local ready=0 deadline=$((SECONDS + READY_TIMEOUT_SECONDS))
   while ((SECONDS < deadline)); do
-    if curl -sf "http://127.0.0.1:${local_port}/v1/models" >/dev/null 2>&1; then
+    health_path="/v1/models"
+    [ "$PD_MODE" != "true" ] || health_path="/healthcheck"
+    if curl -sf "http://127.0.0.1:${local_port}${health_path}" >/dev/null 2>&1; then
       ready=1
       break
     fi
@@ -318,11 +333,11 @@ PY
     return 1
   }
   local response="$RUNTIME_DIR/inference-response.json"
-  curl -sf "http://127.0.0.1:${local_port}/v1/chat/completions" \
+  curl -sf "http://127.0.0.1:${local_port}${INFERENCE_ENDPOINT}" \
     -H "Content-Type: application/json" \
     -d "$INFERENCE_PAYLOAD" >"$response"
   python3 "$DEPLOY_DIR/validate_inference_result.py" \
-    "$response" --expected-regex '\s*4\s*'
+    "$response" "${VALIDATOR_ARGS[@]}"
 }
 
 do_start() {

@@ -160,12 +160,58 @@ class SSHDeploymentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unique non-negative integers"):
             self.render_fixture(request)
 
-    def test_pd_ray_and_unshared_model_are_rejected(self) -> None:
+    def test_pd_bundle_renders_role_commands_and_proxy(self) -> None:
         request = request_fixture()
         request["multi_node"]["pd_disaggregation"] = True
-        with self.assertRaisesRegex(ValueError, "does not support PD"):
-            self.render_fixture(request)
+        request["multi_node"]["pd"] = {
+            "prefill_instance_count": 1,
+            "decode_instance_count": 1,
+            "prefill_node_count": 1,
+            "decode_node_count": 1,
+            "prefill_runtime_npu_per_node": 8,
+            "decode_runtime_npu_per_node": 8,
+            "prefill_parallel_scope": "independent_instances",
+            "decode_parallel_scope": "independent_instances",
+            "prefill_tensor_parallel_size": 8,
+            "prefill_data_parallel_size": 1,
+            "decode_tensor_parallel_size": 8,
+            "decode_data_parallel_size": 1,
+            "prefill_expert_parallel": True,
+            "decode_expert_parallel": True,
+            "vllm_ascend_version": "0.23.0",
+            "connector": "MooncakeConnectorV1",
+            "use_ascend_direct": True,
+            "kv_port_base": 36000,
+            "proxy_placement": "prefill-1",
+            "proxy_port": 9000,
+            "prefill_service_port_base": 7100,
+            "decode_service_port_base": 7200,
+            "prefix_caching": False,
+            "configuration_source": "official_pd_guide",
+            "prefill_extra_vllm_args": ["--max-num-seqs", "4"],
+            "decode_extra_vllm_args": ["--max-num-seqs", "32"],
+        }
+        output = self.render_fixture(request)
+        remote_text = (output / "remote-node.sh").read_text(encoding="utf-8")
+        deploy_text = (output / "deploy-ssh.sh").read_text(encoding="utf-8")
+        self.assertIn("PD_MODE=true", remote_text)
+        self.assertIn("NODE_ROLES=(prefill decode)", remote_text)
+        self.assertIn("MooncakeConnectorV1", remote_text)
+        self.assertIn("--kv-transfer-config", remote_text)
+        self.assertIn("pd_proxy_server.py", deploy_text)
+        self.assertIn("start-proxy", deploy_text)
+        self.assertIn("NODE_ROLE_ARGS_B64=", remote_text)
+        canonical = json.loads((output / "deploy-request.json").read_text())
+        self.assertEqual(
+            canonical["resolved_pd_runtime"]["configuration_source"],
+            "official_pd_guide",
+        )
+        self.assertNotIn("does not support PD", remote_text)
+        subprocess.run(["bash", "-n", str(output / "remote-node.sh")], check=True)
+        subprocess.run(["bash", "-n", str(output / "deploy-ssh.sh")], check=True)
 
+    def test_ray_and_unshared_model_are_rejected(self) -> None:
+        request = request_fixture()
         request = request_fixture()
         request["multi_node"]["distributed_executor_backend"] = "ray"
         request["multi_node"]["ray_explicitly_requested"] = True

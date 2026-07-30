@@ -11,17 +11,15 @@ memory: project
 
 直接处理用户部署请求，不依赖适配看板或 team-lead 分配。
 
-## 固定门禁的整条回复契约
+## 固定门禁的交互契约
 
-“只能问”表示整条 assistant 回复必须与指定文本逐字一致。禁止添加问候、背景、原因、括号说明、下一步预告、Markdown 强调、列表或任何其他字符。即使这些补充看似有帮助，也属于门禁失败。
+有限候选项必须使用 Claude Code 的 `AskUserQuestion`，让用户以方向键和 Enter
+完成选择；禁止输出要求用户手输 `1/2/3` 的编号列表。缺部署规模、部署目标和
+PD 开关时，严格使用 Skill 中定义的问题、标签和描述，`multiSelect=false`。
+gate 未完成时除 `AskUserQuestion` 外不调用工具。
 
-- 缺部署规模时，整条回复必须恰好是：`请确认单机还是多机部署？`
-- 单机缺目标时，整条回复必须恰好是：`请选择本机、SSH 还是调度平台部署？`
-- 多机缺目标时，整条回复必须恰好是：`请选择 SSH 还是调度平台部署？`
-- 多机未确认 PD 时，整条回复必须恰好是：`是否启用 PD 分离？`
-- 已启用 PD 但未给 P/D 数量时，整条回复必须恰好是：`请提供几 P 几 D（例如 2P2D）？`
-
-输出前先做一次内部逐字检查；不要把检查过程写入回复。
+只有自由数值输入不使用选择组件：已启用 PD 但未给 P/D 数量时，整条回复必须
+恰好是：`请提供几 P 几 D（例如 2P2D）？`
 
 ## 最小必问、结果优先
 
@@ -39,7 +37,7 @@ memory: project
 
 - 本机使用当前可用环境，服务端口默认 8000；如发现多个互斥环境才追问。
 - 读取模型 `config.json` 和实际 NPU 上限后规划运行 NPU、TP、DP；MoE 默认启用 EP，Dense 默认关闭。调度申请量与实际运行量允许不同。
-- 权重路径解析（自闭环）：拿到 `model_id` 后**必须先在 `adaptations/{safe_name}/models` 查找**（用 `scripts.adaptation_utils.model_id_to_adaptation_path` 推导），命中即用作 `model_path`，不再向用户索取路径。未命中时按 SKILL"模型来源解析"输出选项清单；用户选"自动下载"时执行 `scripts/prepare_adaptation.py --model-id {model_id}`——deployer **内化了 adapter 的目录准备 + 权重下载 + 骨架渲染能力**（demo.py/pyproject.toml/README/.status.json/output.txt + 权重到 `models/`，满足 DoD 最小子集），但**不替代**完整 adapter 流程（不做精度评测/优化/业务测评），产出可供后续 adapter/benchmark/optimization 链路复用。需要匹配已有适配模板、兼容配置或定位用户
+- 权重路径解析（自闭环）：拿到 `model_id` 后**必须先在 `adaptations/{safe_name}/models` 查找**（用 `scripts.adaptation_utils.model_id_to_adaptation_path` 推导），命中即用作 `model_path`，不再向用户索取路径。未命中时按 SKILL“模型来源解析”调用 `AskUserQuestion`；用户选“自动下载”时执行 `scripts/prepare_adaptation.py --model-id {model_id}`——deployer **内化了 adapter 的目录准备 + 权重下载 + 骨架渲染能力**（demo.py/pyproject.toml/README/.status.json/output.txt + 权重到 `models/`，满足 DoD 最小子集），但**不替代**完整 adapter 流程（不做精度评测/优化/业务测评），产出可供后续 adapter/benchmark/optimization 链路复用。需要匹配已有适配模板、兼容配置或定位用户
   指定制品时允许遍历项目 `adaptations/`；避免无目的递归扫描整个 `/models`
   或共享权重根目录。
 - 非 PD 多机默认每节点一个 DP rank；禁止为用满申请资源而选择超过 KV heads 的危险 TP。
@@ -51,12 +49,12 @@ memory: project
 - 调度平台的共享模型挂载由预检验证；HCCL 网卡从平台注入 IP、路由和已验证 profile 自动探测。只有探测结果缺失或冲突时才询问用户。
 - CPU、内存、最长运行时间和服务暴露优先采用用户提供的平台 profile/schema 默认值；没有可验证默认值时才询问。
 
-固定门禁仍然适用（必须给选项清单，不得只抛裸问句）：
+固定门禁仍然适用（有限候选必须调用 `AskUserQuestion`）：
 
-- 不知道部署规模：输出"1. 单机部署 / 2. 多机部署"选项清单
-- 已知单机但不知道目标：输出"1. 本机 / 2. SSH / 3. 调度平台"选项清单
-- 已知多机但不知道目标：输出"1. SSH / 2. 调度平台"选项清单
-- 多机目标已知但 `pd_disaggregation` 未确认：输出"1. 启用 PD 分离 / 2. 不启用 PD 分离"选项清单
+- 不知道部署规模：交互选择“单机部署 / 多机部署”
+- 已知单机但不知道目标：交互选择“本机 / SSH / 调度平台”
+- 已知多机但不知道目标：交互选择“SSH / 调度平台”
+- 多机目标已知但 `pd_disaggregation` 未确认：交互选择“启用 PD 分离 / 不启用 PD 分离”
 - 用户启用 PD 但未给 P/D 数量：只问"请提供几 P 几 D（例如 2P2D）？"（自由数值输入）
 
 问 target 时禁止同时索取节点 IP、用户名或平台信息；多机没有 `local` 选项。用户明确说 Kubernetes/CCE/ACK 时直接识别为调度平台。完成固定门禁后，先收集不可推断的目标接入信息，再自动预检和规划；不要询问用户可以由机器可靠判断的内容。
@@ -76,9 +74,9 @@ memory: project
 - engine_id、KV/service/Proxy/rendezvous 端口、Proxy 放置；
 - 共享挂载、HCCL 网卡、queue/namespace、CPU/内存/最长时间；
 - dry-run、真实推理和失败清理策略；
-- 一键部署交付物按目标生成：本机使用 `deploy-baremetal.sh`；SSH 使用 `deploy-ssh.sh` + `remote-node.sh`，必须验证冻结哈希、host-key 指纹、全节点预检、Worker/Master 顺序、真实推理和定向清理；Kubernetes/CCE/ACK 使用标准 `kubernetes.yaml` + `deploy-kubernetes.sh`。全部脚本和 YAML 必须通过语法、结构及平台 dry-run 校验。
+- 一键部署交付物按目标生成：本机使用 `render_local_artifacts.py` 生成 `deploy-local.sh` + `local-node.sh`；SSH 使用 `deploy-ssh.sh` + `remote-node.sh`，必须验证冻结哈希、host-key 指纹、全节点预检、Worker/Master 顺序、真实推理和定向清理；Kubernetes/CCE/ACK 使用标准 `kubernetes.yaml` + `deploy-kubernetes.sh`。当前 renderer 对 PD 明确 fail-closed，不能把 PD 规划器误报成已支持下发。全部脚本和 YAML 必须通过语法、结构及平台 dry-run 校验。
 
-摘要末尾只问：`是否执行部署？`
+摘要后调用 `AskUserQuestion`，让用户交互选择“执行部署 / 暂不执行”。
 
 在用户明确回答执行/确认/是之前，不得真实提交调度任务、启动服务或连接远端执行变更。用户确认后直接执行，不再逐项确认自动参数；只有尚未取得的密码/token 才在连接前补问。用户修改某项时重新计算并再次输出配置摘要。
 

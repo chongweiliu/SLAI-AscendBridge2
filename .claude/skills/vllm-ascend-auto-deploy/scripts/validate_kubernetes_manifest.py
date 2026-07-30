@@ -41,12 +41,127 @@ def _container(statefulset: dict) -> dict:
     return containers[0]
 
 
+def _validate_pd_documents(
+    documents: list[dict], request: dict, errors: list[str]
+) -> list[str]:
+    multi = request["multi_node"]
+    pd = multi["pd"]
+    statefulsets = _by_kind(documents, "StatefulSet")
+    deployments = _by_kind(documents, "Deployment")
+    services = _by_kind(documents, "Service")
+    configmaps = _by_kind(documents, "ConfigMap")
+    expected_groups = pd["prefill_instance_count"] + pd["decode_instance_count"]
+    if len(statefulsets) != expected_groups:
+        errors.append(
+            f"PD manifest must contain {expected_groups} role StatefulSet(s)"
+        )
+    if len(deployments) != 1 or len(configmaps) != 1:
+        errors.append("PD manifest must contain one proxy Deployment and one ConfigMap")
+    if len(services) != expected_groups * 2 + 1:
+        errors.append(
+            "PD manifest must contain headless/API services per role plus proxy service"
+        )
+
+    replicas = 0
+    roles: list[str] = []
+    for statefulset in statefulsets:
+        metadata = statefulset.get("metadata", {})
+        role = (
+            metadata.get("labels", {}).get("slai.openai.com/pd-role")
+        )
+        if role not in {"prefill", "decode"}:
+            errors.append("every PD StatefulSet must declare prefill or decode role")
+        else:
+            roles.append(role)
+        spec = statefulset.get("spec", {})
+        count = spec.get("replicas")
+        if not isinstance(count, int) or isinstance(count, bool) or count < 1:
+            errors.append("PD StatefulSet replicas must be a positive integer")
+        else:
+            replicas += count
+        if spec.get("podManagementPolicy") != "Parallel":
+            errors.append("PD StatefulSet podManagementPolicy must be Parallel")
+        try:
+            container = _container(statefulset)
+        except ValueError as error:
+            errors.append(str(error))
+            continue
+        command = "\n".join(str(item) for item in container.get("args", []))
+        for required in (
+            "--distributed-executor-backend",
+            "mp",
+            "--kv-transfer-config",
+            "--no-enable-prefix-caching",
+        ):
+            if required not in command:
+                errors.append(f"PD role command is missing {required}")
+        expected_kv_role = "kv_producer" if role == "prefill" else "kv_consumer"
+        if expected_kv_role not in command:
+            errors.append(f"PD {role} command is missing {expected_kv_role}")
+        if " ray" in command or "--distributed-executor-backend ray" in command:
+            errors.append("PD Kubernetes deployment must not select Ray")
+        mounts = container.get("volumeMounts", [])
+        if not any(item.get("name") == "model" for item in mounts):
+            errors.append("PD role container must mount the model PVC")
+        resources = container.get("resources", {})
+        requests = resources.get("requests", {})
+        limits = resources.get("limits", {})
+        npu_keys = [
+            key
+            for key in set(requests) | set(limits)
+            if key not in {"cpu", "memory", "ephemeral-storage"}
+        ]
+        if len(npu_keys) != 1 or requests.get(npu_keys[0]) != limits.get(npu_keys[0]):
+            errors.append("PD role must request and limit one equal NPU resource")
+
+    if replicas != multi["node_count"]:
+        errors.append("PD StatefulSet replicas must total multi_node.node_count")
+    if roles.count("prefill") != pd["prefill_instance_count"]:
+        errors.append("PD prefill StatefulSet count does not match request")
+    if roles.count("decode") != pd["decode_instance_count"]:
+        errors.append("PD decode StatefulSet count does not match request")
+    if deployments:
+        proxy_containers = (
+            deployments[0]
+            .get("spec", {})
+            .get("template", {})
+            .get("spec", {})
+            .get("containers", [])
+        )
+        if len(proxy_containers) != 1:
+            errors.append("PD proxy Deployment must contain one container")
+        else:
+            command = " ".join(
+                str(item) for item in proxy_containers[0].get("command", [])
+            )
+            for required in (
+                "pd_proxy_server.py",
+                "--prefiller-hosts",
+                "--decoder-hosts",
+            ):
+                if required not in command:
+                    errors.append(f"PD proxy command is missing {required}")
+    if configmaps and "pd_proxy_server.py" not in configmaps[0].get("data", {}):
+        errors.append("PD proxy ConfigMap must contain pd_proxy_server.py")
+    namespace = request.get("scheduler", {}).get("namespace")
+    for document in documents:
+        if document.get("metadata", {}).get("namespace") != namespace:
+            errors.append("PD manifest object namespace does not match request")
+    return errors
+
+
 def validate(documents: list[dict], request: dict | None = None) -> list[str]:
     errors: list[str] = []
     forbidden = {"Secret", "ClusterRole", "ClusterRoleBinding"}
     for document in documents:
         if document.get("kind") in forbidden:
             errors.append(f"forbidden Kubernetes kind: {document.get('kind')}")
+    if (
+        request is not None
+        and request.get("deployment_mode") == "multi_node"
+        and request.get("multi_node", {}).get("pd_disaggregation") is True
+    ):
+        return _validate_pd_documents(documents, request, errors)
 
     statefulsets = _by_kind(documents, "StatefulSet")
     services = _by_kind(documents, "Service")

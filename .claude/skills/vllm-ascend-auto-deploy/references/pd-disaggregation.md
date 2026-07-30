@@ -11,13 +11,16 @@
 
 其余参数不得作为固定问题，必须自动计算：
 
-1. 先做 profile-first 选择：检查 Skill `profiles/` 和项目 `adaptations/`
-   中的真实推理成功证据。只有模型架构、权重路径与配置指纹、量化、镜像、vLLM-Ascend 版本、
+1. 先读取当前模型教程中的官方 PD 指导，再读取
+   `knowledge-base/09-pd-disaggregation.md` 的官方通用约束；随后检查 Skill
+   `profiles/` 和项目 `adaptations/` 中的真实推理成功证据。只有模型架构、
+   权重路径与配置指纹、量化、镜像、vLLM-Ascend 版本、
    平台资源规格和 xPyD 全部一致才可命中；命中后复用完整的 P/D TP、DP、
    作用域、本地 rank 布局、关键模型长度、连接器和超时参数，并运行
    `--validated-profile` 模式再次校验。任何一项不匹配都回退通用计算，
-   不得近似套用。配置摘要将来源标为 `validated_profile`；未命中时标为
-   `generic_calculation`。
+   不得近似套用。实验脚本与官方知识冲突时以官方约束为准并报告冲突。
+   配置摘要必须区分 `official_model_guide`、`official_pd_guide`、
+   `validated_profile`、`family_fallback` 或 `knowledge_inference`。
 2. 未命中 profile 时读取模型 `config.json`，用安全 TP 规则确定两侧运行 NPU 和 TP；每实例
    DP 默认为 1。MoE 开启 EP，Dense 关闭 EP。
 3. 默认两侧均为 `independent_instances`，避免没有成功证据时引入跨节点

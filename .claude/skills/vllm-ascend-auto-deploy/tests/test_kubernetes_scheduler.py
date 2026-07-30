@@ -152,11 +152,77 @@ class KubernetesSchedulerTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "require distributed_executor_backend=mp"):
             self.render_fixture(request)
 
-    def test_pd_is_rejected(self) -> None:
+    def test_pd_renders_role_workloads_mooncake_and_proxy(self) -> None:
         request = request_fixture()
         request["multi_node"]["pd_disaggregation"] = True
-        with self.assertRaisesRegex(ValueError, "does not support PD"):
-            self.render_fixture(request)
+        request["multi_node"]["pd"] = {
+            "prefill_instance_count": 1,
+            "decode_instance_count": 1,
+            "prefill_node_count": 1,
+            "decode_node_count": 1,
+            "prefill_runtime_npu_per_node": 8,
+            "decode_runtime_npu_per_node": 8,
+            "prefill_parallel_scope": "independent_instances",
+            "decode_parallel_scope": "independent_instances",
+            "prefill_tensor_parallel_size": 8,
+            "prefill_data_parallel_size": 1,
+            "decode_tensor_parallel_size": 8,
+            "decode_data_parallel_size": 1,
+            "prefill_expert_parallel": True,
+            "decode_expert_parallel": True,
+            "vllm_ascend_version": "0.23.0",
+            "connector": "MooncakeConnectorV1",
+            "use_ascend_direct": True,
+            "kv_port_base": 36000,
+            "proxy_placement": "prefill-1",
+            "proxy_port": 9000,
+            "prefill_service_port_base": 7100,
+            "decode_service_port_base": 7200,
+            "prefix_caching": False,
+            "configuration_source": "official_pd_guide",
+            "prefill_extra_vllm_args": ["--max-num-seqs", "4"],
+            "decode_extra_vllm_args": ["--max-num-seqs", "32"],
+            "decode_env": {"VLLM_ASCEND_ENABLE_MLAPO": "1"},
+        }
+        output, documents = self.render_fixture(request)
+        statefulsets = [item for item in documents if item["kind"] == "StatefulSet"]
+        deployments = [item for item in documents if item["kind"] == "Deployment"]
+        configmaps = [item for item in documents if item["kind"] == "ConfigMap"]
+        self.assertEqual(len(statefulsets), 2)
+        self.assertEqual(len(deployments), 1)
+        self.assertEqual(len(configmaps), 1)
+        commands = "\n".join(
+            item["spec"]["template"]["spec"]["containers"][0]["args"][0]
+            for item in statefulsets
+        )
+        self.assertIn("MooncakeConnectorV1", commands)
+        self.assertIn("kv_producer", commands)
+        self.assertIn("kv_consumer", commands)
+        prefill_command = next(
+            item for item in statefulsets
+            if item["metadata"]["labels"]["slai.openai.com/pd-role"] == "prefill"
+        )["spec"]["template"]["spec"]["containers"][0]["args"][0]
+        decode_container = next(
+            item for item in statefulsets
+            if item["metadata"]["labels"]["slai.openai.com/pd-role"] == "decode"
+        )["spec"]["template"]["spec"]["containers"][0]
+        self.assertIn("--max-num-seqs 4", prefill_command)
+        self.assertIn("--max-num-seqs 32", decode_container["args"][0])
+        self.assertIn(
+            "VLLM_ASCEND_ENABLE_MLAPO",
+            [item["name"] for item in decode_container["env"]],
+        )
+        proxy_command = deployments[0]["spec"]["template"]["spec"]["containers"][0][
+            "command"
+        ]
+        self.assertIn("--prefiller-hosts", proxy_command)
+        self.assertIn("--decoder-hosts", proxy_command)
+        canonical = json.loads((output / "deploy-request.json").read_text())
+        self.assertEqual(
+            canonical["resolved_pd_runtime"]["configuration_source"],
+            "official_pd_guide",
+        )
+        subprocess.run(["bash", "-n", str(output / "deploy-kubernetes.sh")], check=True)
 
     def test_invalid_local_dp_topology_is_rejected(self) -> None:
         request = request_fixture()
@@ -164,6 +230,30 @@ class KubernetesSchedulerTests(unittest.TestCase):
         request["multi_node"]["runtime_npu_per_node"] = 12
         request["multi_node"]["allocation_npu_per_node"] = 12
         with self.assertRaisesRegex(ValueError, "divisible by node_count"):
+            self.render_fixture(request)
+
+    def test_single_node_underallocation_is_rejected(self) -> None:
+        request = request_fixture()
+        request["deployment_mode"] = "single_node"
+        request.pop("multi_node")
+        request["runtime"] = {
+            "tensor_parallel_size": 8,
+            "data_parallel_size": 1,
+            "runtime_npu_per_node": 8,
+            "allocation_npu_per_node": 4,
+        }
+        with self.assertRaisesRegex(ValueError, "cannot be smaller"):
+            self.render_fixture(request)
+
+    def test_managed_extra_argument_and_port_collision_are_rejected(self) -> None:
+        request = request_fixture()
+        request["scheduler"]["extra_vllm_args"] = ["--port=9999"]
+        with self.assertRaisesRegex(ValueError, "managed flag"):
+            self.render_fixture(request)
+
+        request = request_fixture()
+        request["multi_node"]["master_port"] = request["port"]
+        with self.assertRaisesRegex(ValueError, "must be different"):
             self.render_fixture(request)
 
     def test_credential_environment_is_rejected(self) -> None:
@@ -179,6 +269,23 @@ class KubernetesSchedulerTests(unittest.TestCase):
         self.assertEqual(errors, [])
         output, _ = self.render_fixture(request)
         self.assertTrue((output / "kubernetes.yaml").is_file())
+
+    def test_enforced_profile_requires_generation_and_matching_official_image(self) -> None:
+        request = request_fixture()
+        request["enforce_official_profile"] = True
+        request["allow_experimental"] = True
+        request["scheduler"]["image"] = "quay.io/ascend/vllm-ascend:0.23.0-a3"
+        with self.assertRaisesRegex(ValueError, "ascend_generation is required"):
+            self.render_fixture(request)
+
+        request["scheduler"]["ascend_generation"] = "A2"
+        with self.assertRaisesRegex(ValueError, "image variant does not match A2"):
+            self.render_fixture(request)
+
+        request["scheduler"]["ascend_generation"] = "A3"
+        output, _ = self.render_fixture(request)
+        canonical = json.loads((output / "deploy-request.json").read_text())
+        self.assertEqual(canonical["resolved_official_profile"]["tutorial_name"], "GLM5.2")
 
     def test_shell_sensitive_model_name_is_safely_quoted(self) -> None:
         request = request_fixture()

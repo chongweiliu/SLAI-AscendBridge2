@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Deployment-scoped local lifecycle for vLLM-Ascend.
+
+set -euo pipefail
+
+DEPLOY_DIR={{ deploy_dir_shell }}
+SERVICE_PORT={{ service_port }}
+INFERENCE_PAYLOAD={{ inference_payload_shell }}
+INFERENCE_ENDPOINT={{ inference_endpoint_shell }}
+VALIDATOR_ARGS=({{ validator_args_array }})
+
+cd "$DEPLOY_DIR"
+
+do_stop() {
+  bash local-node.sh stop 0 || true
+}
+
+do_start() {
+  python validate_frozen_artifact.py "$DEPLOY_DIR"
+  bash local-node.sh preflight 0
+  network="$(bash local-node.sh network "" auto "")"
+  local_ip="${network%%|*}"
+  interface="${network#*|}"
+  bash local-node.sh start 0 "$local_ip" "$local_ip" "$interface"
+  for attempt in $(seq 1 180); do
+    if curl --fail --silent --show-error \
+      "http://127.0.0.1:${SERVICE_PORT}/v1/models" >/dev/null 2>&1; then
+      break
+    fi
+    if [ "$attempt" -eq 180 ]; then
+      bash local-node.sh logs 0 || true
+      do_stop
+      echo "ERROR: local service readiness timed out" >&2
+      return 1
+    fi
+    sleep 10
+  done
+  response="$(mktemp)"
+  trap 'rm -f "$response"' RETURN
+  curl --fail --silent --show-error \
+    -H 'Content-Type: application/json' \
+    --data "$INFERENCE_PAYLOAD" \
+    "http://127.0.0.1:${SERVICE_PORT}${INFERENCE_ENDPOINT}" >"$response"
+  python validate_inference_result.py "$response" "${VALIDATOR_ARGS[@]}"
+  python validate_frozen_artifact.py "$DEPLOY_DIR"
+  echo "endpoint=http://127.0.0.1:${SERVICE_PORT}"
+}
+
+case "${1:-start}" in
+  start) do_start ;;
+  stop) do_stop ;;
+  status) bash local-node.sh status 0 ;;
+  logs) bash local-node.sh logs 0 ;;
+  *) echo "usage: $0 start|stop|status|logs" >&2; exit 2 ;;
+esac

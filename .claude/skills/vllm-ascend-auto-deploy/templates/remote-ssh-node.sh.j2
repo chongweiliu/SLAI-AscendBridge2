@@ -18,8 +18,24 @@ NODE_DEVICE_MAP=({{ node_device_map_array }})
 RUNTIME_KIND={{ runtime_kind_shell }}
 VLLM_BIN={{ vllm_bin_shell }}
 IMAGE={{ image_shell }}
+ALLOWED_GENERATIONS={{ allowed_generations_shell }}
 MULTI_NODE={{ "true" if multi_node else "false" }}
+PD_MODE={{ "true" if pd_mode | default(false) else "false" }}
 EXPERT_PARALLEL={{ "true" if expert_parallel else "false" }}
+PROXY_PORT={{ proxy_port | default(service_port) }}
+NODE_ROLES=({{ node_roles_array | default("") }})
+NODE_GROUP_RANKS=({{ node_group_ranks_array | default("") }})
+NODE_GROUP_COUNTS=({{ node_group_counts_array | default("") }})
+NODE_GROUP_MASTER_INDICES=({{ node_group_master_indices_array | default("") }})
+NODE_TP=({{ node_tp_array | default("") }})
+NODE_DP=({{ node_dp_array | default("") }})
+NODE_LOCAL_DP=({{ node_local_dp_array | default("") }})
+NODE_EXPERT_PARALLEL=({{ node_expert_parallel_array | default("") }})
+NODE_SERVICE_PORTS=({{ node_service_ports_array | default("") }})
+NODE_KV_PORTS=({{ node_kv_ports_array | default("") }})
+NODE_KV_CONFIGS=({{ node_kv_configs_array | default("") }})
+NODE_ROLE_ARGS_B64=({{ node_role_args_b64_array | default("") }})
+NODE_ROLE_ENV_B64=({{ node_role_env_b64_array | default("") }})
 INHERIT_PID1_ENVIRONMENT={{ "true" if inherit_pid1_environment else "false" }}
 SOURCE_USER_BASHRC={{ "true" if source_user_bashrc else "false" }}
 EXTRA_ARGS=({{ extra_args_array }})
@@ -264,8 +280,25 @@ do_preflight() {
   local rank="$1"
   check_model
   check_npu_devices "$rank"
-  check_port_free "$SERVICE_PORT"
-  if [ "$MULTI_NODE" = "true" ] && [ "$rank" -eq 0 ]; then
+  local inspect_args=(
+    python3 "$REMOTE_DIR/inspect_ascend_environment.py"
+    --model-path "$MODEL_PATH"
+    --device-ids "${NODE_DEVICE_MAP[$rank]}"
+    --allowed-generations "$ALLOWED_GENERATIONS"
+    --image-ref "$IMAGE"
+  )
+  [ "$MULTI_NODE" != "true" ] || inspect_args+=(--multi-node)
+  "${inspect_args[@]}"
+  if [ "$PD_MODE" = "true" ]; then
+    check_port_free "${NODE_SERVICE_PORTS[$rank]}"
+    check_port_free "${NODE_KV_PORTS[$rank]}"
+    if [ "$rank" -eq 0 ]; then
+      check_port_free "$PROXY_PORT"
+    fi
+  else
+    check_port_free "$SERVICE_PORT"
+  fi
+  if [ "$PD_MODE" != "true" ] && [ "$MULTI_NODE" = "true" ] && [ "$rank" -eq 0 ]; then
     check_port_free "$MASTER_PORT"
   fi
   if is_running "$rank"; then
@@ -297,6 +330,40 @@ do_preflight() {
 
 build_launch_args() {
   local rank="$1" master_address="$2"
+  if [ "$PD_MODE" = "true" ]; then
+    local group_rank="${NODE_GROUP_RANKS[$rank]}"
+    local role_extra_args=() role_arg
+    while IFS= read -r -d '' role_arg; do
+      role_extra_args+=("$role_arg")
+    done < <(printf '%s' "${NODE_ROLE_ARGS_B64[$rank]}" | base64 --decode)
+    LAUNCH_ARGS=(
+      vllm serve "$MODEL_PATH"
+      --host 0.0.0.0
+      --port "${NODE_SERVICE_PORTS[$rank]}"
+      --served-model-name "$MODEL_NAME"
+      --distributed-executor-backend mp
+      --tensor-parallel-size "${NODE_TP[$rank]}"
+      --no-enable-prefix-caching
+      --kv-transfer-config "${NODE_KV_CONFIGS[$rank]}"
+    )
+    if [ "${NODE_EXPERT_PARALLEL[$rank]}" = "true" ]; then
+      LAUNCH_ARGS+=(--enable-expert-parallel)
+    fi
+    LAUNCH_ARGS+=("${EXTRA_ARGS[@]}" "${role_extra_args[@]}")
+    if [ "${NODE_DP[$rank]}" -gt 1 ]; then
+      LAUNCH_ARGS+=(
+        --data-parallel-size "${NODE_DP[$rank]}"
+        --data-parallel-size-local "${NODE_LOCAL_DP[$rank]}"
+        --data-parallel-start-rank "$((group_rank * NODE_LOCAL_DP[$rank]))"
+        --data-parallel-address "$master_address"
+        --data-parallel-rpc-port "$MASTER_PORT"
+      )
+      if [ "$group_rank" -ne 0 ]; then
+        LAUNCH_ARGS+=(--headless)
+      fi
+    fi
+    return
+  fi
   LAUNCH_ARGS=(
     vllm serve "$MODEL_PATH"
     --host 0.0.0.0
@@ -342,6 +409,12 @@ build_env_args() {
   for index in "${!ENV_NAMES[@]}"; do
     ENV_ARGS+=("${ENV_NAMES[$index]}=${ENV_VALUES[$index]}")
   done
+  if [ "$PD_MODE" = "true" ]; then
+    local role_env_item
+    while IFS= read -r -d '' role_env_item; do
+      ENV_ARGS+=("$role_env_item")
+    done < <(printf '%s' "${NODE_ROLE_ENV_B64[$rank]}" | base64 --decode)
+  fi
 }
 
 start_host() {
@@ -372,6 +445,7 @@ start_container() {
     --label "slai.deployment.id=$DEPLOYMENT_ID"
     --network host --ipc host --shm-size 16g
     -v "$MODEL_PATH:$MODEL_PATH:ro"
+    -v "$REMOTE_DIR:$REMOTE_DIR:ro"
   )
   local device
   for device in /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc; do
@@ -404,6 +478,128 @@ start_container() {
   fi
 }
 
+proxy_pid_file() {
+  printf '%s/state/pd-proxy.pid' "$REMOTE_DIR"
+}
+
+proxy_running() {
+  local pid_file pid
+  pid_file="$(proxy_pid_file)"
+  [ -f "$pid_file" ] || return 1
+  read -r pid <"$pid_file"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null && process_owned "$pid"
+}
+
+do_start_proxy() {
+  [ "$PD_MODE" = "true" ] || {
+    echo "ERROR: proxy is only available for PD deployments" >&2
+    return 1
+  }
+  [ "$#" -eq "$NODE_COUNT" ] || {
+    echo "ERROR: proxy requires one runtime IP per node" >&2
+    return 1
+  }
+  proxy_running && {
+    echo "ERROR: PD proxy is already running" >&2
+    return 1
+  }
+  local runtime_ips=("$@") prefiller_hosts=() prefiller_ports=()
+  local decoder_hosts=() decoder_ports=() index
+  for ((index = 0; index < NODE_COUNT; index++)); do
+    if [ "${NODE_GROUP_RANKS[$index]}" -ne 0 ]; then
+      continue
+    fi
+    if [ "${NODE_ROLES[$index]}" = "prefill" ]; then
+      prefiller_hosts+=("${runtime_ips[$index]}")
+      prefiller_ports+=("${NODE_SERVICE_PORTS[$index]}")
+    else
+      decoder_hosts+=("${runtime_ips[$index]}")
+      decoder_ports+=("${NODE_SERVICE_PORTS[$index]}")
+    fi
+  done
+{% raw %}
+  [ "${#prefiller_hosts[@]}" -gt 0 ] && [ "${#decoder_hosts[@]}" -gt 0 ] || {
+{% endraw %}
+    echo "ERROR: proxy requires at least one P and one D endpoint" >&2
+    return 1
+  }
+  command -v curl >/dev/null 2>&1 || {
+    echo "ERROR: curl is required for PD backend readiness checks" >&2
+    return 1
+  }
+  if [ "$RUNTIME_KIND" = "container" ]; then
+    docker exec "$(container_name_for 0)" \
+      python3 -c 'import fastapi, httpx, uvicorn' || {
+        echo "ERROR: PD proxy dependencies are missing from the runtime image" >&2
+        return 1
+      }
+  else
+    python3 -c 'import fastapi, httpx, uvicorn' || {
+      echo "ERROR: PD proxy requires fastapi, httpx, and uvicorn" >&2
+      return 1
+    }
+  fi
+  local endpoint_host endpoint_port probe
+  for index in "${!prefiller_hosts[@]}"; do
+    endpoint_host="${prefiller_hosts[$index]}"
+    endpoint_port="${prefiller_ports[$index]}"
+    for probe in $(seq 1 360); do
+      curl --noproxy '*' -fsS --connect-timeout 5 --max-time 10 \
+        "http://$endpoint_host:$endpoint_port/v1/models" >/dev/null 2>&1 && break
+      sleep 10
+    done
+    curl --noproxy '*' -fsS --connect-timeout 5 --max-time 10 \
+      "http://$endpoint_host:$endpoint_port/v1/models" >/dev/null 2>&1 || {
+      echo "ERROR: prefill backend did not become ready: $endpoint_host:$endpoint_port" >&2
+      return 1
+    }
+  done
+  for index in "${!decoder_hosts[@]}"; do
+    endpoint_host="${decoder_hosts[$index]}"
+    endpoint_port="${decoder_ports[$index]}"
+    for probe in $(seq 1 360); do
+      curl --noproxy '*' -fsS --connect-timeout 5 --max-time 10 \
+        "http://$endpoint_host:$endpoint_port/v1/models" >/dev/null 2>&1 && break
+      sleep 10
+    done
+    curl --noproxy '*' -fsS --connect-timeout 5 --max-time 10 \
+      "http://$endpoint_host:$endpoint_port/v1/models" >/dev/null 2>&1 || {
+      echo "ERROR: decode backend did not become ready: $endpoint_host:$endpoint_port" >&2
+      return 1
+    }
+  done
+  local proxy_args=(
+    python3 "$REMOTE_DIR/pd_proxy_server.py"
+    --host 0.0.0.0 --port "$PROXY_PORT"
+    --prefiller-hosts "${prefiller_hosts[@]}"
+    --prefiller-ports "${prefiller_ports[@]}"
+    --decoder-hosts "${decoder_hosts[@]}"
+    --decoder-ports "${decoder_ports[@]}"
+  )
+  local pid_file
+  pid_file="$(proxy_pid_file)"
+  if [ "$RUNTIME_KIND" = "container" ]; then
+    docker exec -d -e "SLAI_DEPLOYMENT_ID=$DEPLOYMENT_ID" \
+      "$(container_name_for 0)" "${proxy_args[@]}"
+    echo "PD proxy started inside rank-0 container"
+    return
+  fi
+  (
+    cd "$REMOTE_DIR"
+    nohup setsid env "SLAI_DEPLOYMENT_ID=$DEPLOYMENT_ID" "${proxy_args[@]}" \
+      >"$REMOTE_DIR/logs/pd-proxy.log" 2>&1 </dev/null &
+    printf '%s\n' "$!" >"$pid_file"
+  )
+  sleep 3
+  proxy_running || {
+    tail -n 100 "$REMOTE_DIR/logs/pd-proxy.log" >&2 || true
+    rm -f "$pid_file"
+    return 1
+  }
+  echo "PD proxy started"
+}
+
 do_start() {
   local rank="$1" master_address="$2" local_ip="$3" interface="$4"
   is_running "$rank" && {
@@ -422,6 +618,21 @@ do_start() {
 
 do_stop() {
   local rank="$1"
+  if [ "$PD_MODE" = "true" ] && [ "$rank" -eq 0 ] && [ "$RUNTIME_KIND" != "container" ]; then
+    local proxy_pid_path proxy_pid
+    proxy_pid_path="$(proxy_pid_file)"
+    if [ -f "$proxy_pid_path" ]; then
+      read -r proxy_pid <"$proxy_pid_path"
+      if [[ "$proxy_pid" =~ ^[0-9]+$ ]] && kill -0 "$proxy_pid" 2>/dev/null; then
+        process_owned "$proxy_pid" || {
+          echo "ERROR: refusing to stop proxy PID not owned by this deployment" >&2
+          return 1
+        }
+        kill -- "-$proxy_pid" 2>/dev/null || kill "$proxy_pid" 2>/dev/null || true
+      fi
+      rm -f "$proxy_pid_path"
+    fi
+  fi
   if [ "$RUNTIME_KIND" = "container" ]; then
     local name
     name="$(container_name_for "$rank")"
@@ -430,7 +641,8 @@ do_stop() {
         echo "ERROR: refusing to remove container not owned by this deployment" >&2
         return 1
       }
-      docker rm -f "$name" >/dev/null
+      docker stop --time 30 "$name" >/dev/null || true
+      docker rm "$name" >/dev/null
     fi
   else
     local pid_file pid
@@ -478,6 +690,7 @@ case "${1:-}" in
   preflight) do_preflight "${2:?rank required}" ;;
   network) detect_network "${2:-}" "${3:-auto}" "${4:-}" ;;
   start) do_start "${2:?rank required}" "${3:?master address required}" "${4:?local IP required}" "${5:?interface required}" ;;
+  start-proxy) shift; do_start_proxy "$@" ;;
   stop) do_stop "${2:?rank required}" ;;
   status) do_status "${2:?rank required}" ;;
   logs) do_logs "${2:?rank required}" ;;

@@ -54,11 +54,13 @@ if str(_PROJECT_ROOT) not in sys.path:
 if str(_PROJECT_ROOT / "adaptation" / "scripts") not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT / "adaptation" / "scripts"))
 
-from scripts.adaptation_utils import model_id_to_safe_name, model_id_to_adaptation_path  # noqa: E402
+from resolve_model_artifact import resolve as resolve_model_artifact  # noqa: E402
 from run_completed_adaptations import (  # noqa: E402
     download_model_snapshot,
     resolve_cache_dir,
 )
+
+from scripts.adaptation_utils import model_id_to_adaptation_path, model_id_to_safe_name  # noqa: E402
 
 DEMO_TEMPLATE = _PROJECT_ROOT / ".claude" / "skills" / "ascend-adaptation" / "templates" / "demo.py.j2"
 
@@ -174,25 +176,37 @@ def now_iso() -> str:
     return datetime.now().isoformat()
 
 
-def read_model_type(cache_dir: Path, model_id: str) -> str:
+def read_model_type(model_root: Path) -> str:
     """从已下载的 HF cache 读 config.json 取 model_type / architectures，读不到返回 unknown。"""
-    model_cache_name = f"models--{model_id.replace('/', '--')}"
-    snapshots = cache_dir / model_cache_name / "snapshots"
-    if not snapshots.exists():
+    cfg = model_root / "config.json"
+    if not cfg.is_file():
         return "unknown"
-    for snap in snapshots.iterdir():
-        cfg = snap / "config.json"
-        if cfg.exists():
-            try:
-                data = json.loads(cfg.read_text(encoding="utf-8"))
-                mt = data.get("model_type") or "unknown"
-                archs = data.get("architectures") or []
-                if archs:
-                    return f"{mt} ({archs[0]})"
-                return mt
-            except Exception:
-                return "unknown"
-    return "unknown"
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+        mt = data.get("model_type") or "unknown"
+        archs = data.get("architectures") or []
+        return f"{mt} ({archs[0]})" if archs else mt
+    except (OSError, json.JSONDecodeError):
+        return "unknown"
+
+
+def materialize_snapshot(snapshot_path: Path, model_root: Path) -> None:
+    """Expose a HF cache snapshot as the stable adaptation models/ root."""
+    snapshot_path = snapshot_path.resolve()
+    model_root = model_root.resolve()
+    if not snapshot_path.is_dir():
+        raise ValueError(f"snapshot_download returned a missing directory: {snapshot_path}")
+    if snapshot_path == model_root:
+        return
+    if model_root not in snapshot_path.parents:
+        raise ValueError(f"snapshot is outside the adaptation cache: {snapshot_path}")
+    for source in snapshot_path.iterdir():
+        target = model_root / source.name
+        if target.exists() or target.is_symlink():
+            if target.resolve() == source.resolve():
+                continue
+            raise ValueError(f"refusing to overwrite existing model artifact: {target}")
+        target.symlink_to(os.path.relpath(source, target.parent), target_is_directory=source.is_dir())
 
 
 def render_demo(model_id: str) -> str:
@@ -213,7 +227,7 @@ def run(cmd: list[str], cwd: Path, env: dict | None = None, timeout: int = 3600)
         return 1, f"EXC: {e}"
 
 
-def register_to_board(model_id: str, adaptation_path: str) -> None:
+def register_to_board(model_id: str, adaptation_path: str, status: str) -> None:
     try:
         from board_ops import register_model  # type: ignore
 
@@ -221,8 +235,10 @@ def register_to_board(model_id: str, adaptation_path: str) -> None:
             model_id=model_id,
             source="huggingface",
             url=f"https://huggingface.co/{model_id}",
-            adaptation_status="completed",
-            adaptation_notes="prepared by vllm-deployer self-loop",
+            adaptation_status=status,
+            adaptation_notes=(
+                "prepared by vllm-deployer self-loop; deployment artifact gate passed"
+            ),
         )
         print(f"  -> board.db 已登记 {model_id} (adaptation_path={adaptation_path})")
     except SystemExit as e:
@@ -237,6 +253,7 @@ def main() -> int:
     ap.add_argument("--model-id", required=True, help="HuggingFace model id, 如 org/name")
     ap.add_argument("--project-root", default=str(_PROJECT_ROOT), help="项目根（默认自动检测）")
     ap.add_argument("--max-workers", type=int, default=8, help="snapshot_download 并行数")
+    ap.add_argument("--revision", help="固定 HuggingFace revision/commit，生产部署建议填写")
     ap.add_argument("--skip-download", action="store_true", help="跳过权重下载（权重已在 models/）")
     ap.add_argument("--skip-sync", action="store_true", help="跳过 uv sync（环境已存在）")
     ap.add_argument("--skip-dry-run", action="store_true", help="跳过 demo.py dry-run（无加速器环境）")
@@ -263,21 +280,31 @@ def main() -> int:
     cache_dir = resolve_cache_dir(project_root, work_dir)
     print(f"[prepare] cache_dir={cache_dir}")
 
-    # 3. 下载权重
+    preparation_errors: list[str] = []
+
+    # 3. 下载权重并把 HF snapshot 暴露为稳定的 models/ 根目录
     if not args.skip_download:
         os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
         print(f"[prepare] 下载权重 -> {cache_dir} (HF_ENDPOINT={os.environ.get('HF_ENDPOINT')})")
         try:
-            download_model_snapshot(model_id, cache_dir, args.max_workers)
-            print("[prepare] 权重下载完成")
+            snapshot = Path(
+                download_model_snapshot(
+                    model_id,
+                    cache_dir,
+                    args.max_workers,
+                    revision=args.revision,
+                )
+            )
+            materialize_snapshot(snapshot, cache_dir)
+            print(f"[prepare] 权重下载完成 snapshot={snapshot}")
         except Exception as e:  # noqa: BLE001
             print(f"[prepare] 权重下载失败: {e}")
-            # 继续生成骨架；vLLM 部署会在预检阶段再次校验权重
+            preparation_errors.append(f"weight download failed: {e}")
     else:
         print("[prepare] --skip-download，跳过权重下载")
 
     # 4. 读 model_type（用于 README）
-    model_type = read_model_type(cache_dir, model_id)
+    model_type = read_model_type(cache_dir)
     print(f"[prepare] model_type={model_type}")
 
     # 5. 渲染 demo.py
@@ -326,6 +353,7 @@ def main() -> int:
         if rc != 0:
             status["stages"]["environment"]["status"] = "failed"
             status["stages"]["environment"]["notes"] = f"uv sync 失败 exit={rc}\n{out[-2000:]}"
+            preparation_errors.append(f"uv sync failed with exit={rc}")
         else:
             status["stages"]["environment"]["status"] = "completed"
             status["stages"]["environment"]["notes"] = "uv sync --extra ascend 完成"
@@ -352,29 +380,42 @@ def main() -> int:
             "output": dry_out[-4000:],
             "error": "" if success else f"exit={rc}",
         }
+        if not success:
+            preparation_errors.append(f"demo dry-run failed with exit={rc}")
     else:
         status["stages"]["dry_run"] = {"status": "skipped", "timestamp": now_iso(), "notes": "--skip-dry-run"}
 
-    # 11. final_result
-    final_status = "completed" if status["stages"]["dry_run"]["status"] == "completed" else "skipped"
+    # 11. 部署制品 gate：状态字段不能替代 config + 权重的实际检查
+    artifact = None
+    try:
+        artifact = resolve_model_artifact(work_dir)
+    except (OSError, ValueError) as error:
+        preparation_errors.append(str(error))
+
+    # 12. final_result
+    final_status = "completed" if not preparation_errors else "failed"
     status["final_result"] = {
         "status": final_status,
         "timestamp": now_iso(),
-        "notes": "vllm-deployer 自闭环准备；权重与骨架就绪，dry-run "
-        + ("通过" if final_status == "completed" else "未通过（可能无加速器，权重仍可用作 vLLM model_path）"),
+        "notes": (
+            "vllm-deployer 自闭环准备通过；config 与权重门禁通过"
+            if final_status == "completed"
+            else "；".join(preparation_errors)
+        ),
+        "artifact": artifact,
     }
     status["status"] = final_status
     status["updated_at"] = now_iso()
     (work_dir / ".status.json").write_text(json.dumps(status, indent=2, ensure_ascii=False), encoding="utf-8")
 
-    # 12. 登记 board.db（不阻断）
+    # 13. 登记 board.db。自动准备不冒充完整 adapter completed。
     if not args.no_register:
-        register_to_board(model_id, adaptation_path_rel)
+        register_to_board(model_id, adaptation_path_rel, "pending")
 
     print(f"[prepare] 完成: {work_dir}")
     print(f"[prepare] model_path (for vLLM) = {adaptation_path_rel}/models")
     print(f"[prepare] final_status = {final_status}")
-    return 0
+    return 0 if final_status == "completed" else 1
 
 
 if __name__ == "__main__":

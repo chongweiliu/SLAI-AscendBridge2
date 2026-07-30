@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import copy
 import hashlib
 import json
@@ -13,24 +14,14 @@ import shutil
 import sys
 from pathlib import Path
 
+from deployment_profile import prepare_profile, validator_arguments
+from deployment_safety import validate_extra_vllm_args
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
+from pd_runtime import compile_pd_runtime, kv_config_json, validate_pd_extra_args
 from validate_deploy_request import validate as validate_request
 from validate_frozen_artifact import digest
 
 SECRET_MARKERS = ("password", "passwd", "token", "secret", "private_key", "access_key")
-FIXED_VLLM_FLAGS = (
-    "--host",
-    "--port",
-    "--served-model-name",
-    "--distributed-executor-backend",
-    "--tensor-parallel-size",
-    "--data-parallel-size",
-    "--data-parallel-size-local",
-    "--data-parallel-start-rank",
-    "--data-parallel-address",
-    "--data-parallel-rpc-port",
-    "--headless",
-)
 SAFE_HOST = re.compile(r"^[A-Za-z0-9_.-]+$")
 SAFE_USER = re.compile(r"^[A-Za-z0-9_.-]+$")
 SAFE_INTERFACE = re.compile(r"^[A-Za-z0-9_.:-]+$")
@@ -73,8 +64,36 @@ def _safe_env(value: object) -> dict[str, str]:
 def _runtime(request: dict) -> dict:
     if request["deployment_mode"] == "multi_node":
         multi = request["multi_node"]
+        if multi.get("pd_disaggregation") is True:
+            pd_runtime = compile_pd_runtime(request)
+            groups = pd_runtime["groups"]
+            node_groups = [
+                group
+                for group in groups
+                for _ in range(group["node_count"])
+            ]
+            return {
+                "node_count": multi["node_count"],
+                "tp": groups[0]["tp"],
+                "dp": groups[0]["dp"],
+                "local_dp": groups[0]["local_dp"],
+                "runtime_npu": max(group["runtime_npu"] for group in groups),
+                "master_port": _positive_int(
+                    multi.get("master_port"), "multi_node.master_port"
+                ),
+                "expert_parallel": any(
+                    group["expert_parallel"] for group in groups
+                ),
+                "network_interface": str(multi.get("network_interface", "auto")),
+                "multi_node": True,
+                "pd": True,
+                "pd_runtime": pd_runtime,
+                "node_runtime_npu": [
+                    group["runtime_npu"] for group in node_groups
+                ],
+            }
         if multi.get("pd_disaggregation") is not False:
-            raise ValueError("SSH v1 renderer does not support PD disaggregation")
+            raise ValueError("multi_node.pd_disaggregation must be boolean")
         if multi.get("distributed_executor_backend") != "mp":
             raise ValueError("SSH v1 renderer requires distributed_executor_backend=mp")
         if multi.get("model_path_shared") is not True:
@@ -111,6 +130,7 @@ def _runtime(request: dict) -> dict:
             "expert_parallel": multi.get("expert_parallel") is True,
             "network_interface": str(multi.get("network_interface", "auto")),
             "multi_node": True,
+            "pd": False,
         }
 
     runtime = request.get("runtime")
@@ -135,6 +155,7 @@ def _runtime(request: dict) -> dict:
         "expert_parallel": runtime.get("expert_parallel") is True,
         "network_interface": "auto",
         "multi_node": False,
+        "pd": False,
     }
 
 
@@ -177,10 +198,15 @@ def _nodes(request: dict, runtime: dict) -> list[dict]:
         )
         if network_interface != "auto" and SAFE_INTERFACE.fullmatch(network_interface) is None:
             raise ValueError(f"nodes[{index}].network_interface is invalid")
-        device_ids = node.get("device_ids", list(range(runtime["runtime_npu"])))
+        expected_runtime_npu = (
+            runtime["node_runtime_npu"][index]
+            if runtime.get("pd")
+            else runtime["runtime_npu"]
+        )
+        device_ids = node.get("device_ids", list(range(expected_runtime_npu)))
         if (
             not isinstance(device_ids, list)
-            or len(device_ids) != runtime["runtime_npu"]
+            or len(device_ids) != expected_runtime_npu
             or not all(
                 isinstance(item, int) and not isinstance(item, bool) and item >= 0
                 for item in device_ids
@@ -189,7 +215,7 @@ def _nodes(request: dict, runtime: dict) -> list[dict]:
         ):
             raise ValueError(
                 f"nodes[{index}].device_ids must contain exactly "
-                f"{runtime['runtime_npu']} unique non-negative integers"
+                f"{expected_runtime_npu} unique non-negative integers"
             )
         result.append(
             {
@@ -222,12 +248,13 @@ def _shell_array(items: list[object]) -> str:
     return " ".join(shlex.quote(str(item)) for item in items)
 
 
+def _nul_base64(items: list[object]) -> str:
+    payload = b"".join(str(item).encode("utf-8") + b"\0" for item in items)
+    return base64.b64encode(payload).decode("ascii")
+
+
 def render(request_path: Path, output_dir: Path) -> dict:
     request = json.loads(request_path.read_text(encoding="utf-8"))
-    if request.get("deployment_mode") == "multi_node":
-        multi = request.get("multi_node")
-        if isinstance(multi, dict) and multi.get("pd_disaggregation") is True:
-            raise ValueError("SSH v1 renderer does not support PD disaggregation")
     errors = validate_request(request)
     if errors:
         raise ValueError("invalid deploy request: " + "; ".join(errors))
@@ -237,7 +264,11 @@ def render(request_path: Path, output_dir: Path) -> dict:
         raise ValueError("SSH model_path must be an absolute path present on every node")
 
     runtime = _runtime(request)
-    if runtime["multi_node"] and runtime["master_port"] == int(request["port"]):
+    if (
+        runtime["multi_node"]
+        and not runtime["pd"]
+        and runtime["master_port"] == int(request["port"])
+    ):
         raise ValueError("service port and multi-node master port must be different")
     nodes = _nodes(request, runtime)
     ssh_config = request.get("ssh", {})
@@ -271,16 +302,41 @@ def render(request_path: Path, output_dir: Path) -> dict:
     ):
         raise ValueError("ssh.ready_timeout_seconds must be an integer from 1 to 86400")
     extra_args = ssh_config.get("extra_vllm_args", [])
-    if not isinstance(extra_args, list) or not all(
-        isinstance(item, str) and item for item in extra_args
-    ):
-        raise ValueError("ssh.extra_vllm_args must be a list of strings")
-    for item in extra_args:
-        if item.lower().startswith(FIXED_VLLM_FLAGS) or "ray" in item.lower():
-            raise ValueError(f"ssh.extra_vllm_args conflicts with managed flags: {item}")
+    argument_errors = validate_extra_vllm_args(
+        extra_args, "ssh.extra_vllm_args"
+    )
+    if argument_errors:
+        raise ValueError("; ".join(argument_errors))
     user_env = _safe_env(ssh_config.get("env"))
+    profile_tp = runtime["tp"]
+    profile_dp = runtime["dp"]
+    profile_ep = runtime["expert_parallel"]
+    if runtime["pd"]:
+        profile_group = runtime["pd_runtime"]["prefill_groups"][0]
+        profile_tp = profile_group["tp"]
+        profile_dp = profile_group["dp"]
+        profile_ep = profile_group["expert_parallel"]
+    prepared = prepare_profile(
+        request,
+        tp=profile_tp,
+        dp=profile_dp,
+        ep=profile_ep,
+        pd=runtime["pd"],
+        extra_args=extra_args,
+        user_env=user_env,
+    )
+    extra_args = prepared["extra_args"]
+    user_env = prepared["env"]
+    if runtime["pd"]:
+        validate_pd_extra_args(extra_args, "resolved PD common arguments")
 
     canonical = copy.deepcopy(request)
+    canonical["resolved_official_profile"] = prepared["profile"]
+    canonical["official_profile_errors"] = prepared["profile_errors"]
+    canonical["official_profile_warnings"] = prepared["profile_warnings"]
+    canonical["inference_contract"] = prepared["contract"]
+    if runtime["pd"]:
+        canonical["resolved_pd_runtime"] = runtime["pd_runtime"]
     request_hash = hashlib.sha256(
         json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()[:12]
@@ -302,6 +358,35 @@ def render(request_path: Path, output_dir: Path) -> dict:
         autoescape=False,
         keep_trailing_newline=True,
     )
+    pd_groups = runtime.get("pd_runtime", {}).get("groups", [])
+    pd_config = request.get("multi_node", {}).get("pd", {})
+    role_args: dict[str, list[str]] = {}
+    role_env: dict[str, dict[str, str]] = {}
+    for role in ("prefill", "decode"):
+        args_value = pd_config.get(f"{role}_extra_vllm_args", [])
+        role_argument_errors = validate_extra_vllm_args(
+            args_value, f"multi_node.pd.{role}_extra_vllm_args"
+        )
+        if role_argument_errors:
+            raise ValueError("; ".join(role_argument_errors))
+        role_args[role] = [str(item) for item in args_value]
+        validate_pd_extra_args(
+            role_args[role], f"multi_node.pd.{role}_extra_vllm_args"
+        )
+        role_env[role] = _safe_env(pd_config.get(f"{role}_env"))
+    node_pd_groups = [
+        group for group in pd_groups for _ in range(group["node_count"])
+    ]
+    group_ranks = [
+        rank
+        for group in pd_groups
+        for rank in range(group["node_count"])
+    ]
+    group_master_indices = [
+        group["node_start"]
+        for group in pd_groups
+        for _ in range(group["node_count"])
+    ]
     common = {
         "deployment_id_shell": shlex.quote(deployment_id),
         "remote_dir_shell": shlex.quote(remote_dir),
@@ -319,9 +404,63 @@ def render(request_path: Path, output_dir: Path) -> dict:
         ),
         "expert_parallel": runtime["expert_parallel"],
         "multi_node": runtime["multi_node"],
+        "pd_mode": runtime["pd"],
+        "node_roles_array": _shell_array(
+            [group["role"] for group in node_pd_groups]
+        ),
+        "node_group_ranks_array": _shell_array(group_ranks),
+        "node_group_counts_array": _shell_array(
+            [group["node_count"] for group in node_pd_groups]
+        ),
+        "node_group_master_indices_array": _shell_array(group_master_indices),
+        "node_tp_array": _shell_array(
+            [group["tp"] for group in node_pd_groups]
+        ),
+        "node_dp_array": _shell_array(
+            [group["dp"] for group in node_pd_groups]
+        ),
+        "node_local_dp_array": _shell_array(
+            [group["local_dp"] for group in node_pd_groups]
+        ),
+        "node_expert_parallel_array": _shell_array(
+            ["true" if group["expert_parallel"] else "false" for group in node_pd_groups]
+        ),
+        "node_service_ports_array": _shell_array(
+            [group["service_port"] for group in node_pd_groups]
+        ),
+        "node_kv_ports_array": _shell_array(
+            [group["kv_port"] for group in node_pd_groups]
+        ),
+        "node_kv_configs_array": _shell_array(
+            [kv_config_json(group) for group in node_pd_groups]
+        ),
+        "node_role_args_b64_array": _shell_array(
+            [_nul_base64(role_args[group["role"]]) for group in node_pd_groups]
+        ),
+        "node_role_env_b64_array": _shell_array(
+            [
+                _nul_base64(
+                    [
+                        f"{key}={value}"
+                        for key, value in sorted(
+                            role_env[group["role"]].items()
+                        )
+                    ]
+                )
+                for group in node_pd_groups
+            ]
+        ),
+        "proxy_port": (
+            runtime["pd_runtime"]["proxy_port"]
+            if runtime["pd"]
+            else int(request["port"])
+        ),
         "runtime_kind_shell": shlex.quote(runtime_kind),
         "vllm_bin_shell": shlex.quote(vllm_bin),
         "image_shell": shlex.quote(image),
+        "allowed_generations_shell": shlex.quote(
+            ",".join(prepared["profile"]["supported_hardware"])
+        ),
         "inherit_pid1_environment": inherit_pid1_environment,
         "source_user_bashrc": source_user_bashrc,
         "extra_args_array": _shell_array(extra_args),
@@ -335,14 +474,9 @@ def render(request_path: Path, output_dir: Path) -> dict:
     )
     remote_script.chmod(0o755)
 
+    contract = prepared["contract"]
     inference_payload = json.dumps(
-        {
-            "model": request["model_name"],
-            "messages": [{"role": "user", "content": "Reply with exactly: 4"}],
-            "temperature": 0,
-            "max_tokens": 128,
-            "chat_template_kwargs": {"enable_thinking": False},
-        },
+        contract["payload"],
         ensure_ascii=False,
         separators=(",", ":"),
     )
@@ -368,16 +502,33 @@ def render(request_path: Path, output_dir: Path) -> dict:
             ),
             node_count=runtime["node_count"],
             multi_node=runtime["multi_node"],
+            pd_mode=runtime["pd"],
+            node_group_master_indices_array=_shell_array(
+                group_master_indices if runtime["pd"] else [0] * runtime["node_count"]
+            ),
+            proxy_node_index=0,
+            proxy_port=(
+                runtime["pd_runtime"]["proxy_port"]
+                if runtime["pd"]
+                else int(request["port"])
+            ),
             service_port=int(request["port"]),
             inference_payload_shell=shlex.quote(inference_payload),
             ready_timeout_seconds=ready_timeout_seconds,
+            inference_endpoint_shell=shlex.quote(contract["endpoint"]),
+            validator_args_array=_shell_array(validator_arguments(contract)),
         ),
         encoding="utf-8",
     )
     deploy_script.chmod(0o755)
 
     script_dir = Path(__file__).resolve().parent
-    for name in ("validate_frozen_artifact.py", "validate_inference_result.py"):
+    for name in (
+        "inspect_ascend_environment.py",
+        "validate_frozen_artifact.py",
+        "validate_inference_result.py",
+        "pd_proxy_server.py",
+    ):
         target = output_dir / name
         shutil.copy2(script_dir / name, target)
         target.chmod(0o755)
@@ -390,6 +541,8 @@ def render(request_path: Path, output_dir: Path) -> dict:
         "remote_script": str(remote_script),
         "request": str(request_output),
         "hash_manifest": str(hash_manifest),
+        "official_profile": prepared["profile"],
+        "inference_contract": contract,
     }
 
 
