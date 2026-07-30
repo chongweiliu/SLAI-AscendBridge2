@@ -59,7 +59,7 @@ memory: project
 - 多机目标已知但 `pd_disaggregation` 未确认：输出"1. 启用 PD 分离 / 2. 不启用 PD 分离"选项清单
 - 用户启用 PD 但未给 P/D 数量：只问"请提供几 P 几 D（例如 2P2D）？"（自由数值输入）
 
-问 target 时禁止同时索取节点 IP、用户名或平台信息；多机没有 `local` 选项。用户明确说 KTP/Slurm/Kubernetes 时直接识别为调度平台。完成固定门禁后，先收集不可推断的目标接入信息，再自动预检和规划；不要询问用户可以由机器可靠判断的内容。
+问 target 时禁止同时索取节点 IP、用户名或平台信息；多机没有 `local` 选项。用户明确说 Kubernetes/CCE/ACK 时直接识别为调度平台。完成固定门禁后，先收集不可推断的目标接入信息，再自动预检和规划；不要询问用户可以由机器可靠判断的内容。
 
 只有以下情况追加问题：认证/访问缺失；平台资源契约缺失；预检发现多个候选且无法安全选择；用户要求性能最优但未给输入/输出长度、并发和 TTFT/TPOT；自动计划违反硬约束。追加问题必须说明具体阻塞，最多三个，不重复已经确认的信息。
 
@@ -76,13 +76,13 @@ memory: project
 - engine_id、KV/service/Proxy/rendezvous 端口、Proxy 放置；
 - 共享挂载、HCCL 网卡、queue/namespace、CPU/内存/最长时间；
 - dry-run、真实推理和失败清理策略；
-- 一键部署交付物按目标生成：本机使用 `deploy-baremetal.sh`；SSH 使用 `deploy-ssh.sh` + `remote-node.sh`，必须验证冻结哈希、host-key 指纹、全节点预检、Worker/Master 顺序、真实推理和定向清理；Kubernetes/CCE/ACK 使用标准 `kubernetes.yaml` + `deploy-kubernetes.sh`。KTP 仅为内部测试适配，不得计入正式发布能力。全部脚本和 YAML 必须通过语法、结构及平台 dry-run 校验。
+- 一键部署交付物按目标生成：本机使用 `deploy-baremetal.sh`；SSH 使用 `deploy-ssh.sh` + `remote-node.sh`，必须验证冻结哈希、host-key 指纹、全节点预检、Worker/Master 顺序、真实推理和定向清理；Kubernetes/CCE/ACK 使用标准 `kubernetes.yaml` + `deploy-kubernetes.sh`。全部脚本和 YAML 必须通过语法、结构及平台 dry-run 校验。
 
 摘要末尾只问：`是否执行部署？`
 
 在用户明确回答执行/确认/是之前，不得真实提交调度任务、启动服务或连接远端执行变更。用户确认后直接执行，不再逐项确认自动参数；只有尚未取得的密码/token 才在连接前补问。用户修改某项时重新计算并再次输出配置摘要。
 
-把调度申请 NPU 数与实际运行 NPU 数分开。读取模型配置规划 TP；默认禁止 TP 超过 `num_key_value_heads`，除非存在同模型、同镜像、同后端的真实推理成功证据。多机 KTP 使用整节点申请不代表全部 NPU 必须加入 TP。
+把调度申请 NPU 数与实际运行 NPU 数分开。读取模型配置规划 TP；默认禁止 TP 超过 `num_key_value_heads`，除非存在同模型、同镜像、同后端的真实推理成功证据。
 
 生成严格 shell 入口时，把 `ip` 等镜像可能缺失的探测程序视为可选依赖：先检查命令存在性，容忍探测失败并使用已确认的网络接口回退值。`vllm` 使用预检确认的绝对路径或安全 PATH 回退，不允许可选探测在模型启动前造成无解释的 127。
 

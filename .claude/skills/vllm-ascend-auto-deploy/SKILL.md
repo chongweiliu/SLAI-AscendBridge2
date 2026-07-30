@@ -1,6 +1,6 @@
 ---
 name: vllm-ascend-auto-deploy
-description: 交互式部署 vLLM-Ascend 推理服务。用户要求“帮我部署某模型，权重位于某路径”，或要在本机、SSH 服务器、KTP/其他调度平台上进行单机、多机或 Prefill/Decode 分离部署时使用。负责逐步收集缺失信息、按模型配置规划安全并行拓扑、生成无凭据部署包、预检和提交，并用 OpenAI 兼容 API 完成真实推理验收。
+description: 交互式部署 vLLM-Ascend 推理服务。用户要求“帮我部署某模型，权重位于某路径”，或要在本机、SSH 服务器、Kubernetes、CCE 或 ACK 上进行单机、多机或 Prefill/Decode 分离部署时使用。负责逐步收集缺失信息、按模型配置规划安全并行拓扑、生成无凭据部署包、预检和提交，并用 OpenAI 兼容 API 完成真实推理验收。
 ---
 
 # vLLM-Ascend 自动部署
@@ -27,7 +27,7 @@ description: 交互式部署 vLLM-Ascend 推理服务。用户要求“帮我部
   请选择部署目标：
   1. 本机（在当前机器直接启动）
   2. SSH（通过 SSH 部署到指定远程服务器）
-  3. 调度平台（提交到 KTP/Slurm/Kubernetes 等调度系统）
+  3. 调度平台（提交到 Kubernetes/CCE/ACK）
   ```
 
 - 多机缺目标时只能输出：
@@ -35,7 +35,7 @@ description: 交互式部署 vLLM-Ascend 推理服务。用户要求“帮我部
   ```text
   请选择部署目标：
   1. SSH（通过 SSH 部署到多台远程服务器）
-  2. 调度平台（提交到 KTP/Slurm/Kubernetes 等调度系统）
+  2. 调度平台（提交到 Kubernetes/CCE/ACK）
   ```
 
 - 多机未确认 PD 时只能输出：
@@ -60,7 +60,7 @@ description: 交互式部署 vLLM-Ascend 推理服务。用户要求“帮我部
 6. 接入信息足够后自动读取模型配置、预检环境并规划所有运行参数。只有预检歧义或硬约束冲突时才补问。
 7. 输出完整配置摘要，末尾只问 `是否执行部署？`。用户确认前禁止真实提交、启动服务或在 SSH 目标执行变更；确认后不再逐项确认自动参数。
 
-一次最多问三个同批次问题。`multi_node + local` 无效，禁止创造“当前机 + SSH 其他节点”等第四种 target。用户明确说 KTP/Slurm/Kubernetes 时可视为 `target=scheduler` 和对应 `platform` 已知。调度平台其余信息必须由用户在当前对话提供或明确确认；旧任务、CLI context 和环境只能在授权接入后做只读核验，不能替用户选择。
+一次最多问三个同批次问题。`multi_node + local` 无效，禁止创造“当前机 + SSH 其他节点”等第四种 target。用户明确说 Kubernetes/CCE/ACK 时可视为 `target=scheduler` 和对应 `platform` 已知。调度平台其余信息必须由用户在当前对话提供或明确确认；旧任务、CLI context 和环境只能在授权接入后做只读核验，不能替用户选择。
 
 ## 模型来源解析（自闭环）
 
@@ -87,7 +87,7 @@ description: 交互式部署 vLLM-Ascend 推理服务。用户要求“帮我部
 
 项目根 `images/` 目录承载离线镜像 tar，命名 `vllm-ascend-<version>-<variant>.tar`（附 `.sha256`）。`image_ref` 默认**先查 `images/` 下是否有匹配版本+变体的 tar**：
 
-- 命中 → 配置摘要标注 `image_source = local_tar`、`image_local_tar = images/<file>.tar`；裸机/SSH 节点部署前先 `docker load -i <project_root>/images/<file>.tar`；KTP/scheduler 提示操作员将该 tar push 到平台 registry（或 manifest 仍写 image 名，依赖平台已预置同名镜像）。
+- 命中 → 配置摘要标注 `image_source = local_tar`、`image_local_tar = images/<file>.tar`；裸机/SSH 节点部署前先 `docker load -i <project_root>/images/<file>.tar`；Kubernetes/CCE/ACK 提示操作员将该 tar push 到平台 registry（或 manifest 仍写 image 名，依赖平台已预置同名镜像）。
 - 未命中 → `image_source = remote_registry`，`image_ref` 取远端 registry 全限定名，按原流程预检版本。
 
 profile match 块的 `image_ref` 允许取本地镜像名（如 `quay.io/ascend/vllm-ascend:v0.23.0rc1-a3`）；`plan_pd_topology.py` 的字符串精确相等校验语义不变，只需保证 match 块 `image_ref`/`model_path`/`config_sha256` 三字段同源（均来自自闭环目录或均来自外部值）。
@@ -165,12 +165,7 @@ python scripts/plan_topology.py CONFIG.json --node-count N --runtime-cap-per-nod
    视为未命中并回退通用计算；禁止“近似套用”。配置摘要必须注明计划来源是
    `validated_profile` 还是 `generic_calculation`。
 4. 展示最终配置：申请资源、实际运行资源、TP/DP/EP、多机执行后端、PD 角色与作用域、版本、连接器/Direct、节点、镜像、挂载、网络、全部端口和命令摘要；末尾询问“是否执行部署？”。多机默认显示 `distributed_executor_backend=mp`；只有当前提示词显式要求 Ray 时才可显示 `ray`，并注明其授权来源。
-5. 只有用户明确确认后才生成部署文件并执行 Shell 语法检查和平台 dry-run。`target=local` 渲染本机角色脚本和 `deploy-baremetal.sh`；`target=ssh` 必须调用 `scripts/render_ssh_artifacts.py` 生成 `deploy-ssh.sh`、`remote-node.sh`、冻结校验器和语义验收器，两个 Shell 均执行 `bash -n`。`target=scheduler` 按平台分流：内部 KTP 测试可渲染 `ktp-<topology>.yaml` 与 `deploy-ktp.sh`；Kubernetes/CCE/ACK 调用 `scripts/render_kubernetes_artifacts.py` 渲染 `kubernetes.yaml` 与 `deploy-kubernetes.sh`。KTP 产物不得进入正式对外发布分支。全部 YAML 做安全解析校验。KTP 固定 world 的多机
-   ACJob 在 dry-run 前还必须执行
-   `python scripts/validate_ktp_manifest.py job.yaml --require-gang`，确保
-   `min_available` 覆盖全部 replicas 且各 task 的 `min_member=replicas`。
-   KTP dry-run/真实提交显式传 `--min-available TOTAL_REPLICAS`，并用验证器的
-   `--dry-run-output` 检查 CLI 实际渲染值，防止配置被 CLI 默认值静默覆盖。
+5. 只有用户明确确认后才生成部署文件并执行 Shell 语法检查和平台 dry-run。`target=local` 渲染本机角色脚本和 `deploy-baremetal.sh`；`target=ssh` 必须调用 `scripts/render_ssh_artifacts.py` 生成 `deploy-ssh.sh`、`remote-node.sh`、冻结校验器和语义验收器，两个 Shell 均执行 `bash -n`。`target=scheduler` 仅支持 Kubernetes/CCE/ACK，调用 `scripts/render_kubernetes_artifacts.py` 渲染 `kubernetes.yaml` 与 `deploy-kubernetes.sh`。全部 YAML 做安全解析校验。
    冻结前运行 `python scripts/validate_frozen_artifact.py DEPLOY_DIR --write`，
    提交前再不带 `--write` 检查精确文件集合和哈希；不能只用
    `sha256sum -c`，因为它不会发现额外的旧日志或编译缓存。
@@ -192,8 +187,6 @@ run/                         # 角色启动脚本（preflight_check.sh / run_rol
 deploy-baremetal.sh          # 【target=local】本机一键部署
 deploy-ssh.sh                # 【target=ssh】SSH 编排、host-key 验证、全节点预检和验收
 remote-node.sh               # 【target=ssh】按 deployment ID/PID 或容器名管理单节点 rank
-ktp-<topology>.yaml          # 【platform=ktp】KTP manifest
-deploy-ktp.sh                # 【platform=ktp】KTP 一键部署
 kubernetes.yaml              # 【platform=kubernetes/cce/ack】标准 K8s Service + StatefulSet
 deploy-kubernetes.sh         # 【platform=kubernetes/cce/ack】dry-run -> apply -> rollout -> 语义断言
 logs/
@@ -234,7 +227,7 @@ plog 和协调退出留出诊断窗口，避免二者相等触发 watchdog 告�
 - `/v1/chat/completions` 或 `/v1/completions` 返回 HTTP 200 和非空内容；
 - 至少一个答案唯一、可机器断言的确定性提示通过语义校验；
 - 返回 endpoint、日志和停止方法；
-- 已交付目标对应的一键产物：本机为 `deploy-baremetal.sh`，SSH 为 `deploy-ssh.sh` + `remote-node.sh`，Kubernetes/CCE/ACK 为 `kubernetes.yaml` + `deploy-kubernetes.sh`；内部 KTP 产物不计入正式交付。`*.sh` 跑过 `bash -n`，冻结文件集合与哈希验证通过；
+- 已交付目标对应的一键产物：本机为 `deploy-baremetal.sh`，SSH 为 `deploy-ssh.sh` + `remote-node.sh`，Kubernetes/CCE/ACK 为 `kubernetes.yaml` + `deploy-kubernetes.sh`。`*.sh` 跑过 `bash -n`，冻结文件集合与哈希验证通过；
 - 失败任务已停止，平台无本次遗留资源；
 - 请求文件和日志不含凭据。
 

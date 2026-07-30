@@ -50,7 +50,7 @@ docker images | grep vllm-ascend                              # 确认
 
 - 命中 → 配置摘要标 `image_source=local_tar`、`image_local_tar=images/<file>.tar`，裸机一键脚本 `deploy-baremetal.sh` 自动 `docker load`。
 - 未命中 → 取远端 registry 全限定名，`image_source=remote_registry`。
-- KTP/scheduler：manifest 的 `image:` 仍写镜像名；若平台 registry 未预置，操作员需先将本 tar `docker load` 后 `docker tag` + `docker push` 到平台 registry。
+- Kubernetes/CCE/ACK：manifest 的 `image:` 仍写镜像名；若平台 registry 未预置，操作员需先将本 tar `docker load` 后 `docker tag` + `docker push` 到平台 registry。
 
 ## 新增镜像
 

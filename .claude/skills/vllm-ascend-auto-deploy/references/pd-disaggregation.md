@@ -31,7 +31,7 @@
 5. 自动分配 engine_id、KV port、DP rank、service port、Proxy 后端和节点槽位；
    KV 端口必须避开设备保留段并在提交前检查占用。
 6. Proxy 默认与 Prefill-1 共置。共享模型路径、HCCL 网卡和运行时 IP 通过
-   本机/SSH/KTP 预检自动发现并验证；只有发现缺失或多个冲突候选时才追问。
+   本机/SSH/Kubernetes 预检自动发现并验证；只有发现缺失或多个冲突候选时才追问。
 
 调用：
 
@@ -79,9 +79,9 @@ SSH 部署还需要每个 P/D 节点的 IP、用户名、SSH 端口和会话内�
 
 非 direct 是稳定性回退，不代表语义质量自动通过。若严格提示要求固定答案，必须断言解析后的文本；同时直接请求 Prefill 做对照。Prefill 单体和 PD 都产生同类异常文本时，将问题归到模型/量化/镜像运行配置，而不是 KV 传输。
 
-## KTP/A3 网络
+## Kubernetes/A3 网络
 
-优先使用平台已验证的 host network 模式。已知 LuoSS/KTP A3 组合可采用 `host_network: true`、`HCCL_IF_IP=$XDL_IP`、`HCCL_SOCKET_IFNAME=bond0`；不要机械设置 `GLOO_SOCKET_IFNAME` 或 `TP_SOCKET_IFNAME`，显式绑定错误接口可能使 Gloo 失败。必须按当前平台网卡实测确认，Proxy 与 KV 地址必须是其他角色可达的运行时 IP。
+优先使用平台已验证的 host network 模式。不要机械设置 `GLOO_SOCKET_IFNAME` 或 `TP_SOCKET_IFNAME`，显式绑定错误接口可能使 Gloo 失败。必须按当前平台网卡实测确认 `HCCL_IF_IP`、`HCCL_SOCKET_IFNAME`，Proxy 与 KV 地址必须是其他角色可达的运行时 IP。
 
 P/D 的 DP group 必须来自同一启动代次。调度器若分批重启或换节点，旧 rank 不得继续等待新 rank 加入已经初始化的 communicator。使用 `stable_cluster_supervisor.py` 在加载权重前形成稳定代次；session/IP 变化时立即终止 P、D、Proxy 的整个本地进程组，共享存储或心跳短暂不可用时只在有限宽限期内重试。将状态目录按 job 冻结目录唯一化，禁止复用上一次任务的共享 IP/心跳目录；保留 `events/rank-*.jsonl` 以追溯容器重启前的原因。
 

@@ -116,9 +116,15 @@ class KubernetesSchedulerTests(unittest.TestCase):
             check=True,
         )
 
-    def test_kubernetes_request_does_not_require_ktp_fields(self) -> None:
+    def test_kubernetes_request_is_valid(self) -> None:
         errors = validate_request(request_fixture())
         self.assertEqual(errors, [])
+
+    def test_non_kubernetes_scheduler_is_rejected(self) -> None:
+        request = request_fixture()
+        request["scheduler"]["platform"] = "unsupported-job-platform"
+        errors = validate_request(request)
+        self.assertTrue(any("scheduler platform must be one of" in item for item in errors))
 
     def test_renders_single_node_workload(self) -> None:
         request = request_fixture()

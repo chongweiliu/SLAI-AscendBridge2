@@ -250,16 +250,10 @@ def _validate_scheduler(scheduler: dict, errors: list[str]) -> None:
             )
         return
 
-    ktp_required = (
-        "queue",
-        "resource_scope",
-        "manifest_schema",
-        "job_type",
-        "allocation_granularity",
+    errors.append(
+        "scheduler platform must be one of "
+        f"{sorted(KUBERNETES_PLATFORMS)}"
     )
-    for field in ktp_required:
-        if scheduler.get(field) in (None, ""):
-            errors.append(f"scheduler missing {field}")
 
 
 def _validate_standard_multi(multi: dict, allocation: object, errors: list[str]) -> None:
