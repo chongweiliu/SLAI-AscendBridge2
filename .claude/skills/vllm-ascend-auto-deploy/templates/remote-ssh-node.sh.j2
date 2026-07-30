@@ -27,11 +27,15 @@ ENV_NAMES=({{ env_names_array }})
 ENV_VALUES=({{ env_values_array }})
 
 load_runtime_environment() {
+  local managed_master_port="$MASTER_PORT"
   if [ "$INHERIT_PID1_ENVIRONMENT" = "true" ] && [ -r /proc/1/environ ]; then
     local item
     while IFS= read -r -d '' item; do
       case "$item" in
-        HOME=*|USER=*|HOSTNAME=*|TERM=*) ;;
+        HOME=*|USER=*|HOSTNAME=*|TERM=*|\
+        RANK=*|LOCAL_RANK=*|WORLD_SIZE=*|LOCAL_WORLD_SIZE=*|\
+        MASTER_ADDR=*|MASTER_PORT=*|NODE_RANK=*|GROUP_RANK=*|\
+        ROLE_RANK=*|ROLE_NAME=*|ROLE_WORLD_SIZE=*|TORCHELASTIC_*=*) ;;
         *=*) export "$item" ;;
       esac
     done </proc/1/environ
@@ -42,6 +46,9 @@ load_runtime_environment() {
     source "$HOME/.bashrc"
     set -u
   fi
+  MASTER_PORT="$managed_master_port"
+  unset RANK LOCAL_RANK WORLD_SIZE LOCAL_WORLD_SIZE MASTER_ADDR \
+    NODE_RANK GROUP_RANK ROLE_RANK ROLE_NAME ROLE_WORLD_SIZE
 }
 
 load_runtime_environment
@@ -92,11 +99,79 @@ is_running() {
 
 detect_network() {
   local explicit_ip="${1:-}" explicit_interface="${2:-auto}" probe_host="${3:-}"
-  command -v ip >/dev/null 2>&1 || {
-    echo "ERROR: ip command is required for multi-node network detection" >&2
-    return 1
-  }
   local local_ip="" interface=""
+  if ! command -v ip >/dev/null 2>&1; then
+    command -v ifconfig >/dev/null 2>&1 || {
+      echo "ERROR: either ip or ifconfig is required for multi-node network detection" >&2
+      return 1
+    }
+    if [ "$explicit_interface" != "auto" ]; then
+      interface="$explicit_interface"
+      if [ -n "$explicit_ip" ]; then
+        local_ip="$explicit_ip"
+        ifconfig "$interface" 2>/dev/null | awk -v target="$local_ip" '
+          {
+            for (i = 1; i <= NF; i++) {
+              value = $i
+              sub(/^addr:/, "", value)
+              if (value == target) found = 1
+            }
+          }
+          END {exit(found ? 0 : 1)}
+        ' || {
+          echo "ERROR: network_address $local_ip is not assigned to $interface" >&2
+          return 1
+        }
+      else
+        local_ip="$(ifconfig "$interface" 2>/dev/null | awk '
+          /inet / {
+            for (i = 1; i <= NF; i++) {
+              value = $i
+              sub(/^addr:/, "", value)
+              if (value ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ &&
+                  value != "127.0.0.1") {
+                print value
+                exit
+              }
+            }
+          }
+        ')"
+        [ -n "$local_ip" ] || {
+          echo "ERROR: no IPv4 address found on $interface" >&2
+          return 1
+        }
+      fi
+      printf '%s|%s\n' "$local_ip" "$interface"
+      return 0
+    fi
+    if [ -n "$explicit_ip" ]; then
+      local_ip="$explicit_ip"
+      interface="$(ifconfig -a 2>/dev/null | awk -v target="$local_ip" '
+        /^[^[:space:]]/ {
+          interface = $1
+          sub(/:$/, "", interface)
+        }
+        {
+          for (i = 1; i <= NF; i++) {
+            value = $i
+            sub(/^addr:/, "", value)
+            if (value == target) {
+              print interface
+              exit
+            }
+          }
+        }
+      ')"
+      [ -n "$interface" ] || {
+        echo "ERROR: network_address $local_ip is not assigned on this node" >&2
+        return 1
+      }
+      printf '%s|%s\n' "$local_ip" "$interface"
+      return 0
+    fi
+    echo "ERROR: automatic network detection requires ip; set network_address or network_interface" >&2
+    return 1
+  fi
   if [ -n "$explicit_ip" ]; then
     local_ip="$explicit_ip"
     interface="$(ip -o -4 addr show | awk -v ip="$local_ip" '

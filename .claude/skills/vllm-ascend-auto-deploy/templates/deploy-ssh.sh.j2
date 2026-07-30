@@ -10,6 +10,7 @@ REMOTE_SCRIPT="$REMOTE_DIR/remote-node.sh"
 NODE_COUNT={{ node_count }}
 MULTI_NODE={{ "true" if multi_node else "false" }}
 SERVICE_PORT={{ service_port }}
+READY_TIMEOUT_SECONDS={{ ready_timeout_seconds }}
 INFERENCE_PAYLOAD={{ inference_payload_shell }}
 NODE_HOSTS=({{ node_hosts_array }})
 NODE_USERS=({{ node_users_array }})
@@ -110,8 +111,10 @@ open_password_connections() {
       -o StrictHostKeyChecking=yes \
       -o "UserKnownHostsFile=$KNOWN_HOSTS" \
       -o ConnectTimeout=15 \
+      -o ServerAliveInterval=30 \
+      -o ServerAliveCountMax=6 \
       -o ControlMaster=yes \
-      -o ControlPersist=600 \
+      -o ControlPersist=yes \
       -o "ControlPath=$RUNTIME_DIR/control-$index" \
       -Nf "${NODE_USERS[$index]}@${NODE_HOSTS[$index]}"
     CONTROL_OPENED+=(1)
@@ -300,8 +303,8 @@ PY
     echo "ERROR: SSH port-forward failed" >&2
     return 1
   }
-  local ready=0
-  for _ in $(seq 1 180); do
+  local ready=0 deadline=$((SECONDS + READY_TIMEOUT_SECONDS))
+  while ((SECONDS < deadline)); do
     if curl -sf "http://127.0.0.1:${local_port}/v1/models" >/dev/null 2>&1; then
       ready=1
       break

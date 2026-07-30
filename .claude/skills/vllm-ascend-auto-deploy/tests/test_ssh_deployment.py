@@ -137,6 +137,8 @@ class SSHDeploymentTests(unittest.TestCase):
         deploy_text = (output / "deploy-ssh.sh").read_text(encoding="utf-8")
         self.assertIn("open_password_connections", deploy_text)
         self.assertIn("ControlMaster=yes", deploy_text)
+        self.assertIn("ControlPersist=yes", deploy_text)
+        self.assertIn("ServerAliveInterval=30", deploy_text)
         self.assertIn("NumberOfPasswordPrompts=1", deploy_text)
         self.assertNotIn("credential-sentinel", deploy_text)
 
@@ -214,6 +216,12 @@ class SSHDeploymentTests(unittest.TestCase):
         self.assertIn("SOURCE_USER_BASHRC=true", remote_text)
         self.assertIn("while IFS= read -r -d '' item", remote_text)
         self.assertIn("source \"$HOME/.bashrc\"", remote_text)
+        self.assertIn("RANK=*|LOCAL_RANK=*|WORLD_SIZE=*", remote_text)
+        self.assertIn(
+            "unset RANK LOCAL_RANK WORLD_SIZE LOCAL_WORLD_SIZE",
+            remote_text,
+        )
+        self.assertIn('MASTER_PORT="$managed_master_port"', remote_text)
         self.assertIn('"enable_thinking":false', deploy_text)
         self.assertIn('"max_tokens":128', deploy_text)
 
@@ -224,6 +232,46 @@ class SSHDeploymentTests(unittest.TestCase):
             ValueError, "ssh.inherit_pid1_environment must be boolean"
         ):
             self.render_fixture(request)
+
+    def test_ready_timeout_is_configurable_and_bounded(self) -> None:
+        request = request_fixture()
+        request["ssh"]["ready_timeout_seconds"] = 7200
+        output = self.render_fixture(request)
+        deploy_text = (output / "deploy-ssh.sh").read_text(encoding="utf-8")
+        self.assertIn("READY_TIMEOUT_SECONDS=7200", deploy_text)
+
+        request["ssh"]["ready_timeout_seconds"] = True
+        with self.assertRaisesRegex(ValueError, "ready_timeout_seconds"):
+            self.render_fixture(request)
+
+    def test_explicit_network_works_with_ifconfig_without_ip(self) -> None:
+        output = self.render_fixture()
+        fake_bin = output.parent / "network-bin"
+        fake_bin.mkdir()
+        self._write_executable(
+            fake_bin / "ifconfig",
+            "#!/bin/bash\n"
+            "cat <<'EOF'\n"
+            "eth0: flags=4163<UP,BROADCAST,RUNNING,MULTICAST> mtu 1500\n"
+            "        inet 10.10.0.1 netmask 255.255.255.0 broadcast 10.10.0.255\n"
+            "EOF\n",
+        )
+        environment = os.environ.copy()
+        environment["PATH"] = f"{fake_bin}:/usr/bin:/bin"
+        result = subprocess.run(
+            [
+                "/bin/bash",
+                str(output / "remote-node.sh"),
+                "network",
+                "10.10.0.1",
+                "eth0",
+            ],
+            capture_output=True,
+            text=True,
+            env=environment,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stdout + result.stderr)
+        self.assertEqual(result.stdout.strip(), "10.10.0.1|eth0")
 
     def test_simulated_two_node_start_runs_worker_before_master(self) -> None:
         output = self.render_fixture()

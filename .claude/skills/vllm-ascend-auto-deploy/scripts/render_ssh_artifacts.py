@@ -263,6 +263,13 @@ def render(request_path: Path, output_dir: Path) -> dict:
     ):
         if not isinstance(value, bool):
             raise ValueError(f"ssh.{field} must be boolean")
+    ready_timeout_seconds = ssh_config.get("ready_timeout_seconds", 1800)
+    if (
+        not isinstance(ready_timeout_seconds, int)
+        or isinstance(ready_timeout_seconds, bool)
+        or not 1 <= ready_timeout_seconds <= 86400
+    ):
+        raise ValueError("ssh.ready_timeout_seconds must be an integer from 1 to 86400")
     extra_args = ssh_config.get("extra_vllm_args", [])
     if not isinstance(extra_args, list) or not all(
         isinstance(item, str) and item for item in extra_args
@@ -363,6 +370,7 @@ def render(request_path: Path, output_dir: Path) -> dict:
             multi_node=runtime["multi_node"],
             service_port=int(request["port"]),
             inference_payload_shell=shlex.quote(inference_payload),
+            ready_timeout_seconds=ready_timeout_seconds,
         ),
         encoding="utf-8",
     )
