@@ -1,0 +1,698 @@
+#!/usr/bin/env bash
+# Remote node lifecycle for a frozen SSH vLLM-Ascend deployment.
+
+set -euo pipefail
+
+DEPLOYMENT_ID={{ deployment_id_shell }}
+REMOTE_DIR={{ remote_dir_shell }}
+MODEL_NAME={{ model_name_shell }}
+MODEL_PATH={{ model_path_shell }}
+SERVICE_PORT={{ service_port }}
+MASTER_PORT={{ master_port }}
+NODE_COUNT={{ node_count }}
+TP={{ tp }}
+DP={{ dp }}
+LOCAL_DP={{ local_dp }}
+RUNTIME_NPU={{ runtime_npu }}
+NODE_DEVICE_MAP=({{ node_device_map_array }})
+RUNTIME_KIND={{ runtime_kind_shell }}
+VLLM_BIN={{ vllm_bin_shell }}
+IMAGE={{ image_shell }}
+ALLOWED_GENERATIONS={{ allowed_generations_shell }}
+MULTI_NODE={{ "true" if multi_node else "false" }}
+PD_MODE={{ "true" if pd_mode | default(false) else "false" }}
+EXPERT_PARALLEL={{ "true" if expert_parallel else "false" }}
+PROXY_PORT={{ proxy_port | default(service_port) }}
+NODE_ROLES=({{ node_roles_array | default("") }})
+NODE_GROUP_RANKS=({{ node_group_ranks_array | default("") }})
+NODE_GROUP_COUNTS=({{ node_group_counts_array | default("") }})
+NODE_GROUP_MASTER_INDICES=({{ node_group_master_indices_array | default("") }})
+NODE_TP=({{ node_tp_array | default("") }})
+NODE_DP=({{ node_dp_array | default("") }})
+NODE_LOCAL_DP=({{ node_local_dp_array | default("") }})
+NODE_EXPERT_PARALLEL=({{ node_expert_parallel_array | default("") }})
+NODE_SERVICE_PORTS=({{ node_service_ports_array | default("") }})
+NODE_KV_PORTS=({{ node_kv_ports_array | default("") }})
+NODE_KV_CONFIGS=({{ node_kv_configs_array | default("") }})
+NODE_ROLE_ARGS_B64=({{ node_role_args_b64_array | default("") }})
+NODE_ROLE_ENV_B64=({{ node_role_env_b64_array | default("") }})
+INHERIT_PID1_ENVIRONMENT={{ "true" if inherit_pid1_environment else "false" }}
+SOURCE_USER_BASHRC={{ "true" if source_user_bashrc else "false" }}
+EXTRA_ARGS=({{ extra_args_array }})
+ENV_NAMES=({{ env_names_array }})
+ENV_VALUES=({{ env_values_array }})
+
+load_runtime_environment() {
+  local managed_master_port="$MASTER_PORT"
+  if [ "$INHERIT_PID1_ENVIRONMENT" = "true" ] && [ -r /proc/1/environ ]; then
+    local item
+    while IFS= read -r -d '' item; do
+      case "$item" in
+        HOME=*|USER=*|HOSTNAME=*|TERM=*|\
+        RANK=*|LOCAL_RANK=*|WORLD_SIZE=*|LOCAL_WORLD_SIZE=*|\
+        MASTER_ADDR=*|MASTER_PORT=*|NODE_RANK=*|GROUP_RANK=*|\
+        ROLE_RANK=*|ROLE_NAME=*|ROLE_WORLD_SIZE=*|TORCHELASTIC_*=*) ;;
+        *=*) export "$item" ;;
+      esac
+    done </proc/1/environ
+  fi
+  if [ "$SOURCE_USER_BASHRC" = "true" ] && [ -r "$HOME/.bashrc" ]; then
+    set +u
+    # shellcheck disable=SC1090
+    source "$HOME/.bashrc"
+    set -u
+  fi
+  MASTER_PORT="$managed_master_port"
+  unset RANK LOCAL_RANK WORLD_SIZE LOCAL_WORLD_SIZE MASTER_ADDR \
+    NODE_RANK GROUP_RANK ROLE_RANK ROLE_NAME ROLE_WORLD_SIZE
+}
+
+load_runtime_environment
+
+mkdir -p "$REMOTE_DIR/logs" "$REMOTE_DIR/state"
+
+pid_file_for() {
+  printf '%s/state/rank-%s.pid' "$REMOTE_DIR" "$1"
+}
+
+log_file_for() {
+  printf '%s/logs/rank-%s.log' "$REMOTE_DIR" "$1"
+}
+
+container_name_for() {
+  printf 'slai-%s-rank-%s' "$DEPLOYMENT_ID" "$1"
+}
+
+process_owned() {
+  local pid="$1"
+  [ -r "/proc/$pid/environ" ] &&
+    tr '\0' '\n' <"/proc/$pid/environ" |
+      grep -Fx "SLAI_DEPLOYMENT_ID=$DEPLOYMENT_ID" >/dev/null
+}
+
+host_running() {
+  local rank="$1" pid_file pid
+  pid_file="$(pid_file_for "$rank")"
+  [ -f "$pid_file" ] || return 1
+  read -r pid <"$pid_file"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null && process_owned "$pid"
+}
+
+container_running() {
+  local name
+  name="$(container_name_for "$1")"
+  docker inspect -f '{% raw %}{{.State.Running}}{% endraw %}' "$name" 2>/dev/null | grep -Fxq true
+}
+
+is_running() {
+  if [ "$RUNTIME_KIND" = "container" ]; then
+    container_running "$1"
+  else
+    host_running "$1"
+  fi
+}
+
+detect_network() {
+  local explicit_ip="${1:-}" explicit_interface="${2:-auto}" probe_host="${3:-}"
+  local local_ip="" interface=""
+  if ! command -v ip >/dev/null 2>&1; then
+    command -v ifconfig >/dev/null 2>&1 || {
+      echo "ERROR: either ip or ifconfig is required for multi-node network detection" >&2
+      return 1
+    }
+    if [ "$explicit_interface" != "auto" ]; then
+      interface="$explicit_interface"
+      if [ -n "$explicit_ip" ]; then
+        local_ip="$explicit_ip"
+        ifconfig "$interface" 2>/dev/null | awk -v target="$local_ip" '
+          {
+            for (i = 1; i <= NF; i++) {
+              value = $i
+              sub(/^addr:/, "", value)
+              if (value == target) found = 1
+            }
+          }
+          END {exit(found ? 0 : 1)}
+        ' || {
+          echo "ERROR: network_address $local_ip is not assigned to $interface" >&2
+          return 1
+        }
+      else
+        local_ip="$(ifconfig "$interface" 2>/dev/null | awk '
+          /inet / {
+            for (i = 1; i <= NF; i++) {
+              value = $i
+              sub(/^addr:/, "", value)
+              if (value ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ &&
+                  value != "127.0.0.1") {
+                print value
+                exit
+              }
+            }
+          }
+        ')"
+        [ -n "$local_ip" ] || {
+          echo "ERROR: no IPv4 address found on $interface" >&2
+          return 1
+        }
+      fi
+      printf '%s|%s\n' "$local_ip" "$interface"
+      return 0
+    fi
+    if [ -n "$explicit_ip" ]; then
+      local_ip="$explicit_ip"
+      interface="$(ifconfig -a 2>/dev/null | awk -v target="$local_ip" '
+        /^[^[:space:]]/ {
+          interface = $1
+          sub(/:$/, "", interface)
+        }
+        {
+          for (i = 1; i <= NF; i++) {
+            value = $i
+            sub(/^addr:/, "", value)
+            if (value == target) {
+              print interface
+              exit
+            }
+          }
+        }
+      ')"
+      [ -n "$interface" ] || {
+        echo "ERROR: network_address $local_ip is not assigned on this node" >&2
+        return 1
+      }
+      printf '%s|%s\n' "$local_ip" "$interface"
+      return 0
+    fi
+    echo "ERROR: automatic network detection requires ip; set network_address or network_interface" >&2
+    return 1
+  fi
+  if [ -n "$explicit_ip" ]; then
+    local_ip="$explicit_ip"
+    interface="$(ip -o -4 addr show | awk -v ip="$local_ip" '
+      $4 ~ ("^" ip "/") {print $2; exit}
+    ')"
+    [ -n "$interface" ] || {
+      echo "ERROR: network_address $local_ip is not assigned on this node" >&2
+      return 1
+    }
+  elif [ "$explicit_interface" != "auto" ]; then
+    interface="$explicit_interface"
+    local_ip="$(ip -o -4 addr show dev "$interface" | awk '
+      $3 == "inet" {split($4, value, "/"); print value[1]; exit}
+    ')"
+    [ -n "$local_ip" ] || {
+      echo "ERROR: no IPv4 address found on $interface" >&2
+      return 1
+    }
+  else
+    if [ -n "$probe_host" ]; then
+      local_ip="$(ip -o route get "$probe_host" | awk '
+        {for (i=1; i<=NF; i++) if ($i == "src") {print $(i+1); exit}}
+      ')"
+    else
+      interface="$(ip -o route show default | awk '{print $5; exit}')"
+      [ -n "$interface" ] || {
+        echo "ERROR: no default network route is available" >&2
+        return 1
+      }
+      local_ip="$(ip -o -4 addr show dev "$interface" | awk '
+        $3 == "inet" {split($4, value, "/"); print value[1]; exit}
+      ')"
+    fi
+    [ -n "$local_ip" ] || {
+      echo "ERROR: cannot determine the local communication address" >&2
+      return 1
+    }
+    if [ -z "$interface" ]; then
+      interface="$(ip -o -4 addr show | awk -v ip="$local_ip" '
+        $4 ~ ("^" ip "/") {print $2; exit}
+      ')"
+    fi
+    [ -n "$interface" ] || {
+      echo "ERROR: cannot map $local_ip to a network interface" >&2
+      return 1
+    }
+  fi
+  printf '%s|%s\n' "$local_ip" "$interface"
+}
+
+check_model() {
+  [ -r "$MODEL_PATH/config.json" ] || {
+    echo "ERROR: model config is not readable: $MODEL_PATH/config.json" >&2
+    return 1
+  }
+  find "$MODEL_PATH" -maxdepth 2 -type f \
+    \( -name '*.safetensors' -o -name '*.bin' -o -name '*.pt' \) \
+    -print -quit | grep -q . || {
+      echo "ERROR: no model weight file found under $MODEL_PATH" >&2
+      return 1
+    }
+}
+
+check_npu_devices() {
+  local rank="$1"
+  [ -e /dev/davinci_manager ] || {
+    echo "ERROR: /dev/davinci_manager is unavailable" >&2
+    return 1
+  }
+  local device_ids=()
+  IFS=',' read -r -a device_ids <<<"${NODE_DEVICE_MAP[$rank]}"
+  local device_id
+  for device_id in "${device_ids[@]}"; do
+    [ -e "/dev/davinci$device_id" ] || {
+      echo "ERROR: /dev/davinci$device_id is unavailable" >&2
+      return 1
+    }
+  done
+}
+
+check_port_free() {
+  local port="$1"
+  if (echo >/dev/tcp/127.0.0.1/"$port") >/dev/null 2>&1; then
+    echo "ERROR: TCP port is already in use: $port" >&2
+    return 1
+  fi
+}
+
+do_preflight() {
+  local rank="$1"
+  check_model
+  check_npu_devices "$rank"
+  local inspect_args=(
+    python3 "$REMOTE_DIR/inspect_ascend_environment.py"
+    --model-path "$MODEL_PATH"
+    --device-ids "${NODE_DEVICE_MAP[$rank]}"
+    --allowed-generations "$ALLOWED_GENERATIONS"
+    --image-ref "$IMAGE"
+  )
+  [ "$MULTI_NODE" != "true" ] || inspect_args+=(--multi-node)
+  "${inspect_args[@]}"
+  if [ "$PD_MODE" = "true" ]; then
+    check_port_free "${NODE_SERVICE_PORTS[$rank]}"
+    check_port_free "${NODE_KV_PORTS[$rank]}"
+    if [ "$rank" -eq 0 ]; then
+      check_port_free "$PROXY_PORT"
+    fi
+  else
+    check_port_free "$SERVICE_PORT"
+  fi
+  if [ "$PD_MODE" != "true" ] && [ "$MULTI_NODE" = "true" ] && [ "$rank" -eq 0 ]; then
+    check_port_free "$MASTER_PORT"
+  fi
+  if is_running "$rank"; then
+    echo "ERROR: deployment rank $rank is already running" >&2
+    return 1
+  fi
+  if [ "$RUNTIME_KIND" = "container" ]; then
+    command -v docker >/dev/null 2>&1 || {
+      echo "ERROR: docker is unavailable" >&2
+      return 1
+    }
+    docker image inspect "$IMAGE" >/dev/null 2>&1 || {
+      echo "ERROR: image is not present locally: $IMAGE" >&2
+      return 1
+    }
+  elif [[ "$VLLM_BIN" == */* ]]; then
+    [ -x "$VLLM_BIN" ] || {
+      echo "ERROR: vLLM executable is unavailable: $VLLM_BIN" >&2
+      return 1
+    }
+  else
+    command -v "$VLLM_BIN" >/dev/null 2>&1 || {
+      echo "ERROR: vLLM executable is unavailable: $VLLM_BIN" >&2
+      return 1
+    }
+  fi
+  echo "preflight ok: rank=$rank"
+}
+
+build_launch_args() {
+  local rank="$1" master_address="$2"
+  if [ "$PD_MODE" = "true" ]; then
+    local group_rank="${NODE_GROUP_RANKS[$rank]}"
+    local role_extra_args=() role_arg
+    while IFS= read -r -d '' role_arg; do
+      role_extra_args+=("$role_arg")
+    done < <(printf '%s' "${NODE_ROLE_ARGS_B64[$rank]}" | base64 --decode)
+    LAUNCH_ARGS=(
+      vllm serve "$MODEL_PATH"
+      --host 0.0.0.0
+      --port "${NODE_SERVICE_PORTS[$rank]}"
+      --served-model-name "$MODEL_NAME"
+      --distributed-executor-backend mp
+      --tensor-parallel-size "${NODE_TP[$rank]}"
+      --no-enable-prefix-caching
+      --kv-transfer-config "${NODE_KV_CONFIGS[$rank]}"
+    )
+    if [ "${NODE_EXPERT_PARALLEL[$rank]}" = "true" ]; then
+      LAUNCH_ARGS+=(--enable-expert-parallel)
+    fi
+    LAUNCH_ARGS+=("${EXTRA_ARGS[@]}" "${role_extra_args[@]}")
+    if [ "${NODE_DP[$rank]}" -gt 1 ]; then
+      LAUNCH_ARGS+=(
+        --data-parallel-size "${NODE_DP[$rank]}"
+        --data-parallel-size-local "${NODE_LOCAL_DP[$rank]}"
+        --data-parallel-start-rank "$((group_rank * NODE_LOCAL_DP[$rank]))"
+        --data-parallel-address "$master_address"
+        --data-parallel-rpc-port "$MASTER_PORT"
+      )
+      if [ "$group_rank" -ne 0 ]; then
+        LAUNCH_ARGS+=(--headless)
+      fi
+    fi
+    return
+  fi
+  LAUNCH_ARGS=(
+    vllm serve "$MODEL_PATH"
+    --host 0.0.0.0
+    --port "$SERVICE_PORT"
+    --served-model-name "$MODEL_NAME"
+    --distributed-executor-backend mp
+    --tensor-parallel-size "$TP"
+  )
+  if [ "$EXPERT_PARALLEL" = "true" ]; then
+    LAUNCH_ARGS+=(--enable-expert-parallel)
+  fi
+  LAUNCH_ARGS+=("${EXTRA_ARGS[@]}")
+  if [ "$MULTI_NODE" = "true" ]; then
+    LAUNCH_ARGS+=(
+      --data-parallel-size "$DP"
+      --data-parallel-size-local "$LOCAL_DP"
+      --data-parallel-start-rank "$((rank * LOCAL_DP))"
+      --data-parallel-address "$master_address"
+      --data-parallel-rpc-port "$MASTER_PORT"
+    )
+    if [ "$rank" -ne 0 ]; then
+      LAUNCH_ARGS+=(--headless)
+    fi
+  fi
+}
+
+build_env_args() {
+  local rank="$1" local_ip="$2" interface="$3"
+  ENV_ARGS=(
+    "SLAI_DEPLOYMENT_ID=$DEPLOYMENT_ID"
+    "ASCEND_RT_VISIBLE_DEVICES=${NODE_DEVICE_MAP[$rank]}"
+    "VLLM_HOST_IP=$local_ip"
+    "HCCL_IF_IP=$local_ip"
+  )
+  if [ -n "$interface" ] && [ "$interface" != "lo" ]; then
+    ENV_ARGS+=(
+      "GLOO_SOCKET_IFNAME=$interface"
+      "TP_SOCKET_IFNAME=$interface"
+      "HCCL_SOCKET_IFNAME=$interface"
+    )
+  fi
+  local index
+  for index in "${!ENV_NAMES[@]}"; do
+    ENV_ARGS+=("${ENV_NAMES[$index]}=${ENV_VALUES[$index]}")
+  done
+  if [ "$PD_MODE" = "true" ]; then
+    local role_env_item
+    while IFS= read -r -d '' role_env_item; do
+      ENV_ARGS+=("$role_env_item")
+    done < <(printf '%s' "${NODE_ROLE_ENV_B64[$rank]}" | base64 --decode)
+  fi
+}
+
+start_host() {
+  local rank="$1" log_file pid_file pid
+  log_file="$(log_file_for "$rank")"
+  pid_file="$(pid_file_for "$rank")"
+  LAUNCH_ARGS[0]="$VLLM_BIN"
+  (
+    cd "$REMOTE_DIR"
+    nohup setsid env "${ENV_ARGS[@]}" "${LAUNCH_ARGS[@]}" \
+      >"$log_file" 2>&1 </dev/null &
+    printf '%s\n' "$!" >"$pid_file"
+  )
+  read -r pid <"$pid_file"
+  sleep 3
+  if ! kill -0 "$pid" 2>/dev/null || ! process_owned "$pid"; then
+    tail -n 100 "$log_file" >&2 || true
+    rm -f "$pid_file"
+    return 1
+  fi
+}
+
+start_container() {
+  local rank="$1" name
+  name="$(container_name_for "$rank")"
+  local docker_args=(
+    run -d --name "$name"
+    --label "slai.deployment.id=$DEPLOYMENT_ID"
+    --network host --ipc host --shm-size 16g
+    -v "$MODEL_PATH:$MODEL_PATH:ro"
+    -v "$REMOTE_DIR:$REMOTE_DIR:ro"
+  )
+  local device
+  for device in /dev/davinci_manager /dev/devmm_svm /dev/hisi_hdc; do
+    [ ! -e "$device" ] || docker_args+=(--device "$device")
+  done
+  local device_ids=()
+  IFS=',' read -r -a device_ids <<<"${NODE_DEVICE_MAP[$rank]}"
+  local device_id
+  for device_id in "${device_ids[@]}"; do
+    docker_args+=(--device "/dev/davinci$device_id")
+  done
+  local driver_path
+  for driver_path in \
+    /usr/local/Ascend/driver \
+    /usr/local/dcmi \
+    /usr/local/bin/npu-smi \
+    /etc/ascend_install.info; do
+    [ ! -e "$driver_path" ] || docker_args+=(-v "$driver_path:$driver_path:ro")
+  done
+  local item
+  for item in "${ENV_ARGS[@]}"; do
+    docker_args+=(-e "$item")
+  done
+  docker "${docker_args[@]}" "$IMAGE" "${LAUNCH_ARGS[@]}"
+  sleep 3
+  if ! container_running "$rank"; then
+    docker logs "$name" --tail 100 >&2 || true
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    return 1
+  fi
+}
+
+proxy_pid_file() {
+  printf '%s/state/pd-proxy.pid' "$REMOTE_DIR"
+}
+
+proxy_running() {
+  local pid_file pid
+  pid_file="$(proxy_pid_file)"
+  [ -f "$pid_file" ] || return 1
+  read -r pid <"$pid_file"
+  [[ "$pid" =~ ^[0-9]+$ ]] || return 1
+  kill -0 "$pid" 2>/dev/null && process_owned "$pid"
+}
+
+do_start_proxy() {
+  [ "$PD_MODE" = "true" ] || {
+    echo "ERROR: proxy is only available for PD deployments" >&2
+    return 1
+  }
+  [ "$#" -eq "$NODE_COUNT" ] || {
+    echo "ERROR: proxy requires one runtime IP per node" >&2
+    return 1
+  }
+  proxy_running && {
+    echo "ERROR: PD proxy is already running" >&2
+    return 1
+  }
+  local runtime_ips=("$@") prefiller_hosts=() prefiller_ports=()
+  local decoder_hosts=() decoder_ports=() index
+  for ((index = 0; index < NODE_COUNT; index++)); do
+    if [ "${NODE_GROUP_RANKS[$index]}" -ne 0 ]; then
+      continue
+    fi
+    if [ "${NODE_ROLES[$index]}" = "prefill" ]; then
+      prefiller_hosts+=("${runtime_ips[$index]}")
+      prefiller_ports+=("${NODE_SERVICE_PORTS[$index]}")
+    else
+      decoder_hosts+=("${runtime_ips[$index]}")
+      decoder_ports+=("${NODE_SERVICE_PORTS[$index]}")
+    fi
+  done
+{% raw %}
+  [ "${#prefiller_hosts[@]}" -gt 0 ] && [ "${#decoder_hosts[@]}" -gt 0 ] || {
+{% endraw %}
+    echo "ERROR: proxy requires at least one P and one D endpoint" >&2
+    return 1
+  }
+  command -v curl >/dev/null 2>&1 || {
+    echo "ERROR: curl is required for PD backend readiness checks" >&2
+    return 1
+  }
+  if [ "$RUNTIME_KIND" = "container" ]; then
+    docker exec "$(container_name_for 0)" \
+      python3 -c 'import fastapi, httpx, uvicorn' || {
+        echo "ERROR: PD proxy dependencies are missing from the runtime image" >&2
+        return 1
+      }
+  else
+    python3 -c 'import fastapi, httpx, uvicorn' || {
+      echo "ERROR: PD proxy requires fastapi, httpx, and uvicorn" >&2
+      return 1
+    }
+  fi
+  local endpoint_host endpoint_port probe
+  for index in "${!prefiller_hosts[@]}"; do
+    endpoint_host="${prefiller_hosts[$index]}"
+    endpoint_port="${prefiller_ports[$index]}"
+    for probe in $(seq 1 360); do
+      curl --noproxy '*' -fsS --connect-timeout 5 --max-time 10 \
+        "http://$endpoint_host:$endpoint_port/v1/models" >/dev/null 2>&1 && break
+      sleep 10
+    done
+    curl --noproxy '*' -fsS --connect-timeout 5 --max-time 10 \
+      "http://$endpoint_host:$endpoint_port/v1/models" >/dev/null 2>&1 || {
+      echo "ERROR: prefill backend did not become ready: $endpoint_host:$endpoint_port" >&2
+      return 1
+    }
+  done
+  for index in "${!decoder_hosts[@]}"; do
+    endpoint_host="${decoder_hosts[$index]}"
+    endpoint_port="${decoder_ports[$index]}"
+    for probe in $(seq 1 360); do
+      curl --noproxy '*' -fsS --connect-timeout 5 --max-time 10 \
+        "http://$endpoint_host:$endpoint_port/v1/models" >/dev/null 2>&1 && break
+      sleep 10
+    done
+    curl --noproxy '*' -fsS --connect-timeout 5 --max-time 10 \
+      "http://$endpoint_host:$endpoint_port/v1/models" >/dev/null 2>&1 || {
+      echo "ERROR: decode backend did not become ready: $endpoint_host:$endpoint_port" >&2
+      return 1
+    }
+  done
+  local proxy_args=(
+    python3 "$REMOTE_DIR/pd_proxy_server.py"
+    --host 0.0.0.0 --port "$PROXY_PORT"
+    --prefiller-hosts "${prefiller_hosts[@]}"
+    --prefiller-ports "${prefiller_ports[@]}"
+    --decoder-hosts "${decoder_hosts[@]}"
+    --decoder-ports "${decoder_ports[@]}"
+  )
+  local pid_file
+  pid_file="$(proxy_pid_file)"
+  if [ "$RUNTIME_KIND" = "container" ]; then
+    docker exec -d -e "SLAI_DEPLOYMENT_ID=$DEPLOYMENT_ID" \
+      "$(container_name_for 0)" "${proxy_args[@]}"
+    echo "PD proxy started inside rank-0 container"
+    return
+  fi
+  (
+    cd "$REMOTE_DIR"
+    nohup setsid env "SLAI_DEPLOYMENT_ID=$DEPLOYMENT_ID" "${proxy_args[@]}" \
+      >"$REMOTE_DIR/logs/pd-proxy.log" 2>&1 </dev/null &
+    printf '%s\n' "$!" >"$pid_file"
+  )
+  sleep 3
+  proxy_running || {
+    tail -n 100 "$REMOTE_DIR/logs/pd-proxy.log" >&2 || true
+    rm -f "$pid_file"
+    return 1
+  }
+  echo "PD proxy started"
+}
+
+do_start() {
+  local rank="$1" master_address="$2" local_ip="$3" interface="$4"
+  is_running "$rank" && {
+    echo "ERROR: rank $rank is already running" >&2
+    return 1
+  }
+  build_launch_args "$rank" "$master_address"
+  build_env_args "$rank" "$local_ip" "$interface"
+  if [ "$RUNTIME_KIND" = "container" ]; then
+    start_container "$rank"
+  else
+    start_host "$rank"
+  fi
+  echo "started rank=$rank"
+}
+
+do_stop() {
+  local rank="$1"
+  if [ "$PD_MODE" = "true" ] && [ "$rank" -eq 0 ] && [ "$RUNTIME_KIND" != "container" ]; then
+    local proxy_pid_path proxy_pid
+    proxy_pid_path="$(proxy_pid_file)"
+    if [ -f "$proxy_pid_path" ]; then
+      read -r proxy_pid <"$proxy_pid_path"
+      if [[ "$proxy_pid" =~ ^[0-9]+$ ]] && kill -0 "$proxy_pid" 2>/dev/null; then
+        process_owned "$proxy_pid" || {
+          echo "ERROR: refusing to stop proxy PID not owned by this deployment" >&2
+          return 1
+        }
+        kill -- "-$proxy_pid" 2>/dev/null || kill "$proxy_pid" 2>/dev/null || true
+      fi
+      rm -f "$proxy_pid_path"
+    fi
+  fi
+  if [ "$RUNTIME_KIND" = "container" ]; then
+    local name
+    name="$(container_name_for "$rank")"
+    if docker inspect "$name" >/dev/null 2>&1; then
+      [ "$(docker inspect -f '{% raw %}{{index .Config.Labels "slai.deployment.id"}}{% endraw %}' "$name")" = "$DEPLOYMENT_ID" ] || {
+        echo "ERROR: refusing to remove container not owned by this deployment" >&2
+        return 1
+      }
+      docker stop --time 30 "$name" >/dev/null || true
+      docker rm "$name" >/dev/null
+    fi
+  else
+    local pid_file pid
+    pid_file="$(pid_file_for "$rank")"
+    if [ -f "$pid_file" ]; then
+      read -r pid <"$pid_file"
+      if [[ "$pid" =~ ^[0-9]+$ ]] && kill -0 "$pid" 2>/dev/null; then
+        process_owned "$pid" || {
+          echo "ERROR: refusing to stop PID not owned by this deployment" >&2
+          return 1
+        }
+        kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+        for _ in $(seq 1 30); do
+          kill -0 "$pid" 2>/dev/null || break
+          sleep 1
+        done
+        kill -0 "$pid" 2>/dev/null && kill -KILL -- "-$pid" 2>/dev/null || true
+      fi
+      rm -f "$pid_file"
+    fi
+  fi
+  echo "stopped rank=$rank"
+}
+
+do_status() {
+  local rank="$1"
+  if is_running "$rank"; then
+    echo "running rank=$rank"
+    return 0
+  fi
+  echo "stopped rank=$rank"
+  return 1
+}
+
+do_logs() {
+  local rank="$1"
+  if [ "$RUNTIME_KIND" = "container" ]; then
+    docker logs "$(container_name_for "$rank")" --tail "${TAIL_LINES:-200}"
+  else
+    tail -n "${TAIL_LINES:-200}" "$(log_file_for "$rank")"
+  fi
+}
+
+case "${1:-}" in
+  preflight) do_preflight "${2:?rank required}" ;;
+  network) detect_network "${2:-}" "${3:-auto}" "${4:-}" ;;
+  start) do_start "${2:?rank required}" "${3:?master address required}" "${4:?local IP required}" "${5:?interface required}" ;;
+  start-proxy) shift; do_start_proxy "$@" ;;
+  stop) do_stop "${2:?rank required}" ;;
+  status) do_status "${2:?rank required}" ;;
+  logs) do_logs "${2:?rank required}" ;;
+  *) echo "usage: $0 preflight|network|start|stop|status|logs ..." >&2; exit 2 ;;
+esac

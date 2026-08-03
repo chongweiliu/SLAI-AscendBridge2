@@ -91,3 +91,9 @@ trace_*.json.tmp
 !.agents
 !AGENTS.md
 !CLAUDE.md
+
+# vllm-ascend 离线镜像 tar（自闭环镜像目录，tar 不入库，README 入库）
+images/*.tar
+images/*.tar.sha256
+!images/README.md
+!images/fetch-image.sh

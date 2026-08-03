@@ -107,7 +107,14 @@ def cleanup_model_cache(cache_dir: Path, model_id: str) -> None:
         shutil.rmtree(lock_dir)
 
 
-def download_model_snapshot(model_id: str, cache_dir: Path, max_workers: int, snapshot_download_fn=None, cleanup_fn=None):
+def download_model_snapshot(
+    model_id: str,
+    cache_dir: Path,
+    max_workers: int,
+    snapshot_download_fn=None,
+    cleanup_fn=None,
+    revision: str | None = None,
+):
     if snapshot_download_fn is None:
         from huggingface_hub import snapshot_download
 
@@ -115,13 +122,20 @@ def download_model_snapshot(model_id: str, cache_dir: Path, max_workers: int, sn
     if cleanup_fn is None:
         cleanup_fn = cleanup_model_cache
     try:
-        return snapshot_download_fn(repo_id=model_id, cache_dir=str(cache_dir), max_workers=max_workers)
+        kwargs = {
+            "repo_id": model_id,
+            "cache_dir": str(cache_dir),
+            "max_workers": max_workers,
+        }
+        if revision:
+            kwargs["revision"] = revision
+        return snapshot_download_fn(**kwargs)
     except Exception as exc:
         if not is_http_416_error(exc):
             raise
         print(f"  -> 检测到 416，清理损坏缓存后重试一次: {cache_dir}")
         cleanup_fn(cache_dir, model_id)
-        return snapshot_download_fn(repo_id=model_id, cache_dir=str(cache_dir), max_workers=max_workers)
+        return snapshot_download_fn(**kwargs)
 
 
 def main() -> int:

@@ -1,0 +1,65 @@
+# vLLM-Ascend 部署配置（deploy-config.yaml）
+# 由 vllm-ascend-auto-deploy Skill 按 deploy-request.json 渲染。供人读与一键脚本消费。
+# jinja2 变量：{{ var }} 由部署拓扑填充。
+
+model_name: "{{ model_name }}"
+model_id: "{{ model_id }}"
+model_path: "{{ model_path }}"          # 自闭环时为 adaptations/{safe_name}/models；外部路径时为绝对路径
+model_path_source: "{{ model_path_source }}"   # adaptation_local | external_absolute
+
+image_ref: "{{ image_ref }}"
+image_source: "{{ image_source }}"      # local_tar | remote_registry
+image_local_tar: "{{ image_local_tar }}"  # image_source=local_tar 时指向 images/<file>.tar，否则空
+
+deployment_mode: "{{ deployment_mode }}"   # single_node | multi_node
+target: "{{ target }}"                     # local | ssh | scheduler
+port: {{ port }}
+
+runtime:
+  runtime_kind: "{{ runtime_kind }}"      # container | venv
+  distributed_executor_backend: "{{ distributed_executor_backend | default('mp') }}"  # multi_node 默认 mp；ray 仅限用户显式要求
+  ray_explicitly_requested: {{ ray_explicitly_requested | default(false) | lower }}
+  tensor_parallel_size: {{ tensor_parallel_size }}
+  data_parallel_size: {{ data_parallel_size }}
+  expert_parallel: {{ expert_parallel | lower }}
+  parallel_scope: "{{ parallel_scope }}"   # global_group | independent_instances
+  use_ascend_direct: {{ use_ascend_direct | lower }}
+  connector: "{{ connector }}"
+  prefix_caching: {{ prefix_caching | lower }}
+
+{% if pd_disaggregation %}
+pd:
+  prefill:
+    node_count: {{ prefill_node_count }}
+    runtime_npu_per_node: {{ prefill_runtime_npu_per_node }}
+    tensor_parallel_size: {{ prefill_tensor_parallel_size }}
+    data_parallel_size: {{ prefill_data_parallel_size }}
+    parallel_scope: "{{ prefill_parallel_scope }}"
+    service_port_base: {{ prefill_service_port_base }}
+  decode:
+    node_count: {{ decode_node_count }}
+    runtime_npu_per_node: {{ decode_runtime_npu_per_node }}
+    tensor_parallel_size: {{ decode_tensor_parallel_size }}
+    data_parallel_size: {{ decode_data_parallel_size }}
+    parallel_scope: "{{ decode_parallel_scope }}"
+    service_port_base: {{ decode_service_port_base }}
+    local_data_parallel_ranks_per_node: {{ decode_local_dp_ranks_per_node | default(0) }}
+  kv_port_base: {{ kv_port_base }}
+  proxy_placement: "{{ proxy_placement }}"
+  proxy_port: {{ proxy_port }}
+{% endif %}
+
+timeouts:
+  distributed_timeout_seconds: {{ distributed_timeout_seconds }}
+  hccl_connect_timeout_seconds: {{ hccl_connect_timeout_seconds }}
+  hccl_exec_timeout_seconds: {{ hccl_exec_timeout_seconds }}
+
+env:
+  TASK_QUEUE_ENABLE: "{{ task_queue_enable }}"
+  ASCEND_RT_VISIBLE_DEVICES: "{{ ascend_rt_visible_devices }}"
+  HF_ENDPOINT: "{{ hf_endpoint }}"
+
+artifacts:
+  deploy_dir: "{{ deploy_dir }}"
+  config_sha256: "{{ config_sha256 }}"
+  start_script: "run/{{ start_script }}"
