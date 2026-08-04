@@ -452,7 +452,7 @@ IS_SANDBOX=1 claude --dangerously-skip-permissions --agent team-lead
 #### 本机单机部署示例
 
 ```text
-请调用 vllm-ascend-deployer，使用 vLLM-Ascend 在本机部署 Qwen/Qwen3-30B-A3B，采用单机部署。
+请调用 vllm-ascend-deployer，使用 vLLM-Ascend 在本机部署 Qwen/Qwen3-30B-A3B，权重位于adaptations。采用单机部署。
 优先使用 adaptations/ 中已有的模型权重。
 ```
 
