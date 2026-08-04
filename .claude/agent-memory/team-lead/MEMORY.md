@@ -229,8 +229,6 @@ agent 自行硬编码（如 `--id "npu-optimizer-1"`）而非从 team config 读
 
 ---
 
-
-
 ## ⚠️ 每次 session 必须：team-lead 也要注册心跳
 
 **新 session 开始时**，team-lead **必须**立即执行心跳注册（否则 board_ops list_agents 看不到自己）：
@@ -379,3 +377,11 @@ cat ~/.claude/teams/{team_name}/config.json | python3 -c \
 **分配任务前的 inbox 存在性验证是强制要求**，详见”board_ops 心跳 ≠ agent 存活”章节。
 
 **批次记录**见 `batch_records.md`。
+
+## 记忆文件索引
+
+- [ascend-cannbot-pipeline workflow](ascend_cannbot_pipeline_workflow.md) — 通用 cannbot 全流程 workflow 脚本（9 阶段），含 codex 验证模式与踩坑（custom-repo 绕过 manager、CUDA 扩展降 CppExtension、防 smoke run 覆盖 canonical metrics）。
+- [cannbot 协同适配方法论](cannbot_adaptation_methodology.md) — 通用层 vs 2D-to-3D 专属层、三段式算子优先级、触发路径、嵌套 spawn 心跳盲区、Reviewer synthetic test 盲区、.contiguous() 规则、board_ops 状态机限制、stream 一致性等教训。
+- [cannbot MIX 模式陷阱](cannbot_mix_mode_pitfall.md) — `__mix__(1,2)` 融合 Cube+Vector kernel 的 AIC 驱动问题，优先非融合双 kernel。
+- [cannbot dav-2201 硬件可用](cannbot_dav2201_viable.md) — 本机 dav-2201（Atlas A2/A3）在 cannbot Ascend C 支持矩阵内（arch22，--npu-arch=dav-2201），推翻旧"Ascend910 不支持"记忆。
+

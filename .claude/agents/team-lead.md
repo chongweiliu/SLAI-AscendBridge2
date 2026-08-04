@@ -73,6 +73,7 @@ Team-Lead 本身由用户直接启动或作为主 agent 运行。当需要启动
 | `"benchmark-runner"` | 执行模型评测 | 全部工具 |
 | `"npu-optimizer"` | NPU 性能优化 | 全部工具 |
 | `business benchmark` 角色入口 | 执行第四阶段真实业务测评 | 全部工具 |
+| `"cannbot-adapter"` | NPU 算子缺口补齐（cannbot Ascend C 算子生成集成） | 全部工具 |
 
 #### `team_name`（团队名称）
 
@@ -300,7 +301,28 @@ Task(
 
 **注意**：第四阶段建议统一使用 `business-benchmark-{N}` 命名。其任务分配入口是 `assign_business_benchmark_task`。
 
-### 0.10 关键概念对比
+### 0.10 启动 CANNBot-Adapter 示例
+
+```json
+Task(
+  subagent_type: "cannbot-adapter",
+  team_name: "adaptation-team",
+  name: "cannbot-adapter-1",
+  description: "NPU 算子缺口补齐",
+  prompt: "",
+  model: "sonnet"
+)
+```
+
+**注意**：cannbot-adapter.md 内容会自动加载，prompt 可以为空。CANNBot-Adapter **不走** `assign_*_task` 分配（adaptation_owner 仍是原 adapter），由 team-lead 通过 SendMessage 直接派发 `action=fix_operator_gap` 任务。
+
+**算子缺口协调流程**：
+1. adapter 适配中遇 CUDA-only 算子缺口（`not supported on NPU backend` / CPU 回退 / aten 算子缺失 / CUDA 扩展包不可装）→ SendMessage 报告 team-lead：`result=blocked_by_operator_gap` + `gap_description` + `caller=adapter-N`
+2. team-lead 派给 cannbot-adapter：`action=fix_operator_gap` + `model_id` + `adaptation_path` + `gap_description` + `caller=adapter-N`
+3. cannbot-adapter 走三段式（torch_npu 原生 → GitCode CANN 社区/Ascend 社区 → cannbot 4 角色），完成后回报：`result=operator_gap_fixed` + `operators` + `notes`
+4. team-lead 通知原 adapter 继续：`action=resume_after_gap` + `gap_fix_notes`
+
+### 0.11 关键概念对比
 
 | 概念 | 说明 |
 |------|------|
@@ -1428,6 +1450,7 @@ SendMessage 支持以下类型：
 | benchmark-runner-1 | `benchmark-runner-1` |
 | npu-optimizer-1 | `npu-optimizer-1` |
 | business-benchmark-1 | `business-benchmark-1` |
+| cannbot-adapter-1 | `cannbot-adapter-1` |
 
 ### 6.3 通信规则已内置
 

@@ -1,0 +1,45 @@
+name: Bug-Report|缺陷反馈
+description: 当您发现了一个缺陷，需要向社区反馈时，请使用此模板。
+title: "[Bug-Report|缺陷反馈]: "
+labels: ["bug-report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢您提交 issues ！请填写如下模板，提供尽可能多的信息，以便我们能更快、更好地解决。
+  - type: textarea
+    attributes:
+      label:
+      description: 请描述您的缺陷详细信息
+      value: |
+        ####  一、问题描述 （必填）
+        <!-- 可粘贴错误日志或描述截图 -->
+
+
+
+        ####  二、环境信息 （可选）
+        <!--
+        • 大模型名称和版本：如 GLM-5.0
+        • Code Agent名称和版本：如 OpenCode-1.3.0
+        • 昇腾硬件型号：
+        • CANN版本:
+        • 操作系统：
+        • 其他相关软件版本：
+         -->
+
+
+
+        ####  三、重现步骤 （可选）
+        <!-- 提供尽可能多的信息描述如何重现该缺陷 -->
+
+
+
+        ####  四、预期结果 （可选）
+        <!-- 描述预期的行为应该是什么样子的 -->
+
+
+
+        💡 备注（选填）
+
+    validations:
+      required: true

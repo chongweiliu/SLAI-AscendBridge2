@@ -3,7 +3,7 @@
 ## 2026-03-18: 自定义模型库源码版本控制与 CI 打包
 
 ### 问题现象
-- 4 个 adaptation 含克隆的第三方仓库源码（LTX-2、MiVOLO、TRELLIS、IBM Materials）
+- 4 个 adaptation 含克隆的第三方仓库源码（LTX-2、MiVOLO、IBM Materials 等）
 - 嵌套的 `.git/` 目录导致 git 将其识别为 submodule，报 `modified content` 警告
 - `.gitignore` 整个排除这些目录后，CI checkout 后目录为空，`package_adaptations.py` 打包的 zip 不含源码
 - 用户下载 zip 后无法运行（缺少 editable install 依赖的源码）
@@ -58,10 +58,8 @@ dirs[:] = [d for d in dirs if d != ".git"]
 |-----------|---------|---------|------|
 | lightricks_ltx_2_3 | LTX-2/ | github.com/Lightricks/LTX-2 | ~11MB |
 | iitolstykh_mivolo_v2 | mivolo_src/ | github.com/WildChlamydia/MiVOLO | ~4MB |
-| microsoft_trellis_image_large | trellis_src/ | github.com/microsoft/TRELLIS | ~42MB |
 | ibm_research_materials_pos_egnn | ibm_materials/ | github.com/IBM/materials | ~8MB (.py/.txt/.md，数据文件被 .gitignore 排除) |
 
 ### 注意事项
 - **`ibm_materials`** 的 `models/` 子目录含 ~977MB 数据文件（.csv/.npy），已被全局 `*.csv` 和 `*.npy` 规则排除，提交安全
-- **`trellis_src`** 的 `.git` 目录已在本地删除（原来就是下载的拷贝，非 git clone）
 - 新增自定义模型库时，需在 `.gitignore` 中添加 `**/{dir_name}/.git` 规则，并在 CI `CUSTOM_REPOS` 列表中添加条目

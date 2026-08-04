@@ -203,12 +203,51 @@ check_nodejs() {
     fi
 
     log_info "Installing Node.js..."
-    curl -fsSL https://deb.nodesource.com/setup_${NODE_INSTALL_VERSION}.x | bash - 2>/dev/null || {
-        curl -fsSL https://mirrors.tuna.tsinghua.edu.cn/nodesource/deb_${NODE_INSTALL_VERSION}.x/setup_${NODE_INSTALL_VERSION}.x | bash - 2>/dev/null
-    }
-    apt-get install -y nodejs 2>/dev/null || yum install -y nodejs 2>/dev/null
-    log_success "Node.js installed: $(node -v)"
-    log_success "npm version: $(npm -v)"
+    ORIG_PWD=$(pwd)
+    # 检测系统类型 + 包管理器（兼容 Debian/openEuler/centos/rhel/fedora/anolis/kylin/suse 等）
+    if [ -f /etc/os-release ]; then
+        . /etc/os-release
+    fi
+    SYS_IDS="${ID:-} ${ID_LIKE:-}"
+    if command -v dnf &>/dev/null; then PM="dnf install -y"
+    elif command -v yum &>/dev/null; then PM="yum install -y"
+    elif command -v apt-get &>/dev/null; then PM="apt-get install -y"
+    else PM=""; fi
+
+    case "$SYS_IDS" in
+        *openEuler*|*centos*|*rhel*|*fedora*|*anolis*|*kylin*|*suse*|*sles*)
+            # 非 Debian 系，从 nodejs.org 装 tar 包（不依赖 nodesource deb setup）
+            ARCH=$(uname -m)
+            case "$ARCH" in
+                aarch64) NODE_ARCH="linux-arm64" ;;
+                x86_64)  NODE_ARCH="linux-x64" ;;
+                *) log_error "Unsupported arch: $ARCH"; exit 1 ;;
+            esac
+            NODE_FULL_VER="v${NODE_INSTALL_VERSION}.14.0"
+            NODE_TAR="node-${NODE_FULL_VER}-${NODE_ARCH}.tar.xz"
+            log_info "Downloading Node.js ${NODE_FULL_VER} (${NODE_ARCH}) from nodejs.org..."
+            curl -fsSL "https://nodejs.org/dist/${NODE_FULL_VER}/${NODE_TAR}" -o "/tmp/${NODE_TAR}" || {
+                log_error "Failed to download Node.js from nodejs.org"; exit 1
+            }
+            # tar 解压 .tar.xz 需要 xz，minimal 系统可能没装
+            command -v xz >/dev/null 2>&1 || { [ -n "$PM" ] && $PM xz 2>/dev/null; }
+            cd /tmp && tar -xf "${NODE_TAR}" && cp -r "node-${NODE_FULL_VER}-${NODE_ARCH}/"* /usr/local/ && rm -rf "node-${NODE_FULL_VER}-${NODE_ARCH}" "${NODE_TAR}"
+            cd "$ORIG_PWD"
+            # 确保 /usr/local/bin 在 PATH（装到 /usr/local/，当前 shell 可能未 reload）
+            export PATH="/usr/local/bin:$PATH"
+            # 持久化到 ~/.bashrc（新 shell 能找到 /usr/local/bin 下的 node/npm/claude）
+            grep -q '/usr/local/bin' ~/.bashrc 2>/dev/null || echo 'export PATH="/usr/local/bin:$PATH"' >> ~/.bashrc
+            ;;
+        *)
+            # Debian 系，用 nodesource
+            curl -fsSL https://deb.nodesource.com/setup_${NODE_INSTALL_VERSION}.x | bash - 2>/dev/null || {
+                curl -fsSL https://mirrors.tuna.tsinghua.edu.cn/nodesource/deb_${NODE_INSTALL_VERSION}.x/setup_${NODE_INSTALL_VERSION}.x | bash - 2>/dev/null
+            }
+            ${PM:-apt-get install -y} nodejs 2>/dev/null
+            ;;
+    esac
+    log_success "Node.js installed: $(node -v 2>/dev/null || echo '/usr/local/bin/node')"
+    log_success "npm version: $(npm -v 2>/dev/null || echo '/usr/local/bin/npm')"
 }
 
 # ========================
@@ -264,6 +303,7 @@ configure_claude() {
         fs.writeFileSync(filePath, JSON.stringify({
             ...content,
             env: {
+                ...content.env,
                 ANTHROPIC_AUTH_TOKEN: "'"$API_KEY"'",
                 ANTHROPIC_BASE_URL: "'"$PROVIDER_URL"'",
                 ANTHROPIC_MODEL: "'"$MODEL"'",
@@ -271,12 +311,27 @@ configure_claude() {
                 ANTHROPIC_DEFAULT_SONNET_MODEL: "'"$MODEL"'",
                 ANTHROPIC_DEFAULT_OPUS_MODEL: "'"$MODEL"'",
                 API_TIMEOUT_MS: "'"$API_TIMEOUT_MS"'",
-                CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: 1
+                CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: 1,
+                CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: 1
+            },
+            enabledPlugins: {
+                ...content.enabledPlugins,
+                "ops-direct-invoke-skills@cannbot": true,
+                "infra-skills@cannbot": true,
+                "ops-direct-invoke@cannbot": true
+            },
+            extraKnownMarketplaces: {
+                ...content.extraKnownMarketplaces,
+                "cannbot": {
+                    "source": { "source": "git", "url": "https://gitcode.com/cann/skills.git" }
+                }
             }
         }, null, 2), "utf-8");
     ' || { log_error "Failed to write settings.json"; exit 1; }
 
     log_success "Claude Code configured successfully"
+    log_info "cannbot 插件（ops-direct-invoke + skills + infra）已写入 settings，首次启动 claude 时自动从 gitcode.com/cann/skills 拉取安装"
+    log_info "Agent Teams 已启用（CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1），cannbot 协同适配需要 team 模式"
 }
 
 # ========================

@@ -1,0 +1,7 @@
+[Device] npu:0 (npu_0) | mode=pretrained | dataset=papila
+[Model] ViT-B/16 encoder, dtype=fp32
+[Data] 98 images
+[Run] outputs shape=(98, 768), latency=6.0824s
+[Save] outputs_papila_pretrained_npu_0.pt | benchmark_metrics_papila_pretrained_npu_0.json
+[Metric] {"num_samples": 98, "latency_s": 6.082407, "peak_memory_mb": 486.5269, "device": "npu_0", "dtype": "fp32", "mode": "pretrained", "dataset": "papila", "output_type": "embedding_768d", "model": "VisionFM-ViT-B/16-fundus-encoder", "weights": "VFM_Fundus_weights.pth"}
+[Success] benchmark 完成

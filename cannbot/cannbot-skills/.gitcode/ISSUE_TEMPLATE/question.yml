@@ -1,0 +1,17 @@
+name: Question|问题咨询
+description: 如果您需要咨询或者讨论问题，请使用此模板。
+title: "[Question|问题咨询]: "
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢您提交 issues ！请填写如下模板，提供尽可能多的信息，以便能更快、更好地解决。
+
+  - type: textarea
+    attributes:
+      label: 问题描述
+      description: 请描述您的咨询详细信息
+      
+    validations:
+      required: true
