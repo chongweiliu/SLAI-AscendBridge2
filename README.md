@@ -1,6 +1,8 @@
-# SLAI-AscendBridge2
+# SLAI-AscendBridge2.1
 
-`SLAI-AscendBridge2` 是一款面向华为昇腾 NPU 的自动化智能体编排与单模型适配框架，用于将 PyTorch 模型迁移到 Ascend。它支持从模型发现、环境治理、代码适配、精度评测到 NPU 性能优化的闭环流程；如果需要，也可以继续扩展到第四阶段 `business_benchmark`。
+`SLAI-AscendBridge2` 是一款面向华为昇腾 NPU 的自动化智能体编排、单模型适配与推理部署框架，用于将 PyTorch 模型迁移到 Ascend。它支持从模型发现、环境治理、代码适配、精度评测到 NPU 性能优化的闭环流程；如果需要，也可以继续扩展到第四阶段 `business_benchmark`。
+
+当前版本为 **v2.1**。在 v2.0 模型适配、评测和优化能力的基础上，v2.1 新增了 **vLLM-Ascend 自动部署**能力，可通过专用 Agent 完成本机、SSH 或 Kubernetes/CCE/ACK 调度平台上的推理服务部署与真实请求验收。
 
 这个仓库是**框架仓**，负责脚本、检查器、调度骨架、dashboard、`.claude` 下的 agents / skills / agent-memory，以及 prompt 模板，不默认携带公开 adaptation 集合。模型级 adaptation 建议放在独立仓库 `SLAI-AscendBridge2-Adaptations`，或按你的内部目录结构单独维护。
 
@@ -8,6 +10,49 @@
 
 - `.agents -> .claude`
 - `AGENTS.md -> CLAUDE.md`
+
+## v2.1 新增功能
+
+v2.1 新增 `vllm-ascend-deployer` Agent 和 `vllm-ascend-auto-deploy` Skill，把模型与部署需求转换为经过预检和真实推理验收的 vLLM-Ascend 服务。
+
+- 支持本机和 SSH 单机部署，以及 SSH 多机部署
+- 支持 Kubernetes、CCE、ACK 等调度平台
+- 支持普通多机推理和 PD（Prefill/Decode）分离部署
+- 优先复用 `adaptations/` 中已有模型制品；未找到时可选择外部权重路径或自动下载准备
+- 根据模型 `config.json`、可用 NPU 和官方模型配置自动规划 TP、DP、EP 等并行参数
+- 自动检查 Ascend 硬件、模型权重、镜像/运行环境、端口、网络和资源约束
+- 自动生成本机、SSH 或 Kubernetes 部署脚本与 YAML，并执行语法检查和 dry-run
+- 服务启动后通过 OpenAI 兼容 API 发起真实推理请求；只有健康检查和语义验收均通过才报告部署成功
+- 实际启动或提交前先展示完整配置摘要，并等待用户明确确认
+
+### 快速启动
+
+部署前需要准备与目标 Ascend 硬件及 vLLM-Ascend 版本匹配的容器镜像。可以直接使用目标环境能够访问的远端镜像，也可以提前下载到项目的 `images/` 目录：
+
+```bash
+# 示例：下载 v0.23.0rc1 A3 镜像并生成完整性校验文件
+bash images/fetch-image.sh v0.23.0rc1 a3
+```
+
+镜像文件不纳入 Git。部署 Agent 会优先查找 `images/vllm-ascend-<version>-<variant>.tar`；本机和 SSH 部署可自动加载匹配的本地 tar，未找到时使用远端镜像地址。Kubernetes/CCE/ACK 部署需要确保各节点可拉取配置中的镜像，必要时先将镜像推送到平台可访问的镜像仓库。
+
+镜像准备完成后，进入仓库根目录，沿用项目现有的 `team-lead` 启动方式：
+
+```bash
+cd /path/to/SLAI-AscendBridge2
+IS_SANDBOX=1 claude --dangerously-skip-permissions --agent team-lead
+```
+
+启动后让 `team-lead` 调用 vLLM-Ascend 部署 Agent，并用自然语言描述模型和部署需求，例如：
+
+```text
+请调用 vllm-ascend-deployer，使用 vLLM-Ascend 在本机部署 Qwen/Qwen3-30B-A3B，采用单机部署。
+优先使用 adaptations/ 中已有的模型权重。
+```
+
+Agent 会引导选择单机或多机、本机或远程部署，并自动解析模型权重、检查 Ascend 环境、规划并行拓扑。完成配置预览后，只有在用户明确确认执行时才会启动服务；部署完成后会返回服务地址、日志位置、停止命令和真实推理验收结果。
+
+更多 SSH、Kubernetes/CCE/ACK 和 PD 分离示例见下方“vLLM-Ascend 自动部署”章节。
 
 ## 仓库定位
 
@@ -24,8 +69,9 @@
 SLAI-AscendBridge2/
 ├── .claude/
 │   ├── agent-memory/                  # 智能体阶段记忆与规则沉淀
-│   ├── agents/                        # 智能体定义
-│   └── skills/                        # 技能库
+│   ├── agents/                        # 智能体定义，包含 vllm-ascend-deployer
+│   └── skills/
+│       └── vllm-ascend-auto-deploy/   # vLLM-Ascend 自动部署技能、知识库、脚本和模板
 ├── .agents -> .claude                 # 兼容部分 agent 工具的目录入口
 ├── AGENTS.md -> CLAUDE.md             # 兼容 AGENTS.md 约定
 ├── adaptation/
@@ -169,11 +215,12 @@ export TASK_QUEUE_ENABLE=1
 
 ## 使用指南
 
-下面分三种典型使用方式：
+下面分四种典型使用方式：
 
 1. `Claude` 自动批量编排
 2. `Claude` 单模型连贯适配
 3. `Codex / Cursor` 单模型连贯适配
+4. `vLLM-Ascend` 自动部署
 
 ### 1. Claude 自动批量编排
 
@@ -386,6 +433,97 @@ Done when:
 - 一个侧边 agent 负责只读排查或 checker 结果分析
 
 不要让多个 agent 同时改同一个 adaptation 目录。
+
+---
+
+### 4. vLLM-Ascend 自动部署
+
+适用场景：
+
+- 已有模型，希望快速启动 vLLM-Ascend 推理服务
+- 需要部署到本机、SSH 服务器或 Kubernetes/CCE/ACK 调度平台
+- 需要自动规划单机、多机或 PD（Prefill/Decode）分离拓扑
+- 希望自动完成部署前检查、部署文件生成和真实推理验收
+
+#### 部署前准备镜像
+
+请根据目标机器的 Ascend 代际选择对应的 vLLM-Ascend 镜像变体，并确保镜像版本支持待部署模型。项目提供 `images/fetch-image.sh`，用于把远端镜像保存成可复用的离线 tar：
+
+```bash
+# 用法：bash images/fetch-image.sh <version> <variant>
+bash images/fetch-image.sh v0.23.0rc1 a3
+```
+
+脚本优先使用 `crane` 下载，失败时回退到 `docker pull` + `docker save`，生成以下文件：
+
+```text
+images/vllm-ascend-v0.23.0rc1-a3.tar
+images/vllm-ascend-v0.23.0rc1-a3.tar.sha256
+```
+
+本机或 SSH 部署时，Agent 会优先使用并加载匹配的本地 tar；如果 `images/` 中没有匹配文件，则使用预检确认的远端 registry 镜像。对于 Kubernetes/CCE/ACK，需要提前保证平台节点能够拉取该镜像；如果平台无法访问公共 registry，请先把镜像推送到平台私有镜像仓库。
+
+更完整的镜像命名、下载、校验和手动加载方式见 [`images/README.md`](images/README.md)。
+
+#### 通过 team-lead 启动部署
+
+在仓库根目录沿用项目已有的 `team-lead` 启动命令：
+
+```bash
+cd /path/to/SLAI-AscendBridge2
+IS_SANDBOX=1 claude --dangerously-skip-permissions --agent team-lead
+```
+
+然后明确要求 `team-lead` 调用 `vllm-ascend-deployer`，并用自然语言描述模型和部署目标。部署 Agent 会按需询问无法安全推断的信息，自动完成权重解析、环境预检和并行拓扑规划，并在实际部署前展示完整配置供确认。
+
+#### 本机单机部署示例
+
+```text
+请调用 vllm-ascend-deployer，使用 vLLM-Ascend 在本机部署 Qwen/Qwen3-30B-A3B，采用单机部署。
+优先使用 adaptations/ 中已有的模型权重。
+```
+
+#### SSH 多机部署示例
+
+```text
+请调用 vllm-ascend-deployer，使用 vLLM-Ascend 部署 Qwen/Qwen3-235B-A22B。
+采用多机 SSH 部署，不启用 PD 分离。
+```
+
+Agent 会继续收集目标主机、用户名和认证方式。密码、Token 和私钥不会写入部署 JSON、脚本、日志或 Git。
+
+#### Kubernetes/CCE/ACK PD 分离部署示例
+
+```text
+请调用 vllm-ascend-deployer，在 Kubernetes 调度平台部署 DeepSeek-R1，采用多机部署并启用 PD 分离，配置为 2P2D。
+模型权重已挂载到 /mnt/models/DeepSeek-R1。
+```
+
+对于调度平台，Agent 会按需确认 context、namespace、节点与 NPU 资源、镜像和模型挂载等必要信息，并生成标准 Kubernetes YAML 和一键部署脚本。
+
+#### 自动部署流程
+
+```text
+描述模型和部署需求
+-> 选择单机/多机及部署目标
+-> 解析或准备模型权重
+-> 检查 Ascend 环境与部署约束
+-> 自动规划 TP/DP/EP 或 PD 拓扑
+-> 展示完整配置摘要
+-> 用户确认执行
+-> 生成部署文件并启动服务
+-> 通过 OpenAI 兼容 API 完成真实推理验收
+```
+
+部署成功后，Agent 会返回：
+
+- 服务 endpoint
+- 本地进程 PID、远程进程信息或调度任务 ID
+- 日志位置
+- 停止和清理命令
+- 本次生成的一键部署脚本或 YAML 路径
+
+部署失败时只清理本次创建的进程或调度资源，并保留必要的诊断信息。
 
 ---
 
