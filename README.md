@@ -1,4 +1,4 @@
-# SLAI-AscendBridge2
+# SLAI-AscendBridge2.1
 
 `SLAI-AscendBridge2` 是一款面向华为昇腾 NPU 的自动化智能体编排、单模型适配与推理部署框架，用于将 PyTorch 模型迁移到 Ascend。它支持从模型发现、环境治理、代码适配、精度评测到 NPU 性能优化的闭环流程；如果需要，也可以继续扩展到第四阶段 `business_benchmark`。
 
