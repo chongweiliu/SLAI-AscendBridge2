@@ -1,0 +1,13 @@
+{
+  "model_id": "ABILab-CUHK/VisionFM",
+  "status": "completed",
+  "stages": {
+    "dry_run": {"device": "npu:0", "npu_detected": true, "passed": true},
+    "feature_run": {"device": "npu:0", "weights": "VFM_Fundus_weights.pth", "output_dim": 768, "passed": true},
+    "classify_run": {"device": "npu:0", "weights": "checkpoint_papila.pth", "task": "PAPILA glaucoma 3-class", "passed": true},
+    "parity_check": {"official_vs_adaptation": "bit-level identical", "max_logit_diff": 0.0, "passed": true},
+    "eval_papila": {"test_set": 98, "AUROC_raw_logit": 0.8561, "AUPR_raw_logit": 0.7612, "AUROC_softmax": 0.8804, "AUPR_softmax": 0.7765, "passed": true},
+    "benchmark": {"device": "npu:0", "artifact": "benchmark_metrics_papila_pretrained_npu_0.json", "num_samples": 98, "latency_s_per_sample": 0.060215, "wall_clock_s": 5.901057, "peak_memory_mb": 486.5269, "passed": true},
+    "optimization": {"kind": "runtime_only", "speedup_ratio": 1.0, "cosine_similarity": 1.0, "note": "TASK_QUEUE_ENABLE 无显著增益 (0.99x noise), runtime_only floor; bf16 可 1.06x 但 dtype 变更不入此阶段", "passed": true}
+  }
+}

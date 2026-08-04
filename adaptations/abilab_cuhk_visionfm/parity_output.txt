@@ -1,0 +1,13 @@
+[encoder] missing=0 unexpected=0
+[head official] missing=0 unexpected=0
+[head mine]     missing=0 unexpected=0
+[state_dict] 两个 ClsHead 参数最大差异 = 0.00e+00
+[Input] fundus_01.png: original size=(512, 512), mode=RGB
+[logits] official : [ 2.036156 -3.356451  0.710639]
+[logits] mine     : [ 2.036156 -3.356451  0.710639]
+[logits] max|official - mine| = 0.00e+00
+[probs]  official : [0.7873 0.0036 0.2091]
+[probs]  mine     : [0.7873 0.0036 0.2091]
+[probs] max|official - mine| = 0.00e+00
+
+[VERDICT] PASS ✅: 本 adaptation ClsHead 与官方 head.py 在同一输入/权重下 logits 最大差异 0.00e+00 (bit-level 等价)
