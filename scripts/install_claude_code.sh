@@ -255,13 +255,15 @@ check_nodejs() {
 # ========================
 install_claude_code() {
     if command -v claude &>/dev/null; then
-        log_success "Claude Code is already installed: $(claude --version 2>/dev/null || echo 'ok')"
+        log_info "Claude Code is already installed: $(claude --version 2>/dev/null || echo 'unknown version')"
+        log_info "Updating Claude Code to the latest version..."
     else
         log_info "Installing Claude Code..."
-        npm install -g "$CLAUDE_PACKAGE" 2>/dev/null || \
-            npm install -g "$CLAUDE_PACKAGE" --registry=https://registry.npmmirror.com
-        log_success "Claude Code installed successfully"
     fi
+
+    npm install -g "${CLAUDE_PACKAGE}@latest" 2>/dev/null || \
+        npm install -g "${CLAUDE_PACKAGE}@latest" --registry=https://registry.npmmirror.com
+    log_success "Claude Code is ready: $(claude --version 2>/dev/null || echo 'latest version installed')"
 }
 
 # ========================
@@ -313,25 +315,12 @@ configure_claude() {
                 API_TIMEOUT_MS: "'"$API_TIMEOUT_MS"'",
                 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: 1,
                 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: 1
-            },
-            enabledPlugins: {
-                ...content.enabledPlugins,
-                "ops-direct-invoke-skills@cannbot": true,
-                "infra-skills@cannbot": true,
-                "ops-direct-invoke@cannbot": true
-            },
-            extraKnownMarketplaces: {
-                ...content.extraKnownMarketplaces,
-                "cannbot": {
-                    "source": { "source": "git", "url": "https://gitcode.com/cann/skills.git" }
-                }
             }
         }, null, 2), "utf-8");
     ' || { log_error "Failed to write settings.json"; exit 1; }
 
     log_success "Claude Code configured successfully"
-    log_info "cannbot 插件（ops-direct-invoke + skills + infra）已写入 settings，首次启动 claude 时自动从 gitcode.com/cann/skills 拉取安装"
-    log_info "Agent Teams 已启用（CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1），cannbot 协同适配需要 team 模式"
+    log_info "Agent Teams 已启用（CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1）"
 }
 
 # ========================
