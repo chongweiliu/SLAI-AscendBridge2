@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 from inference_contract import build_contract
-from official_model_profile import resolve_profile, validate_profile
+from official_model_profile import resolve_profile, select_hardware_recipes, validate_profile
 
 UNSAFE_ENV_PREFIXES = (
     "ASCEND_RT_VISIBLE_DEVICES",
@@ -17,11 +17,7 @@ UNSAFE_ENV_PREFIXES = (
 
 
 def _argument_names(arguments: list[str]) -> set[str]:
-    return {
-        item.split("=", 1)[0]
-        for item in arguments
-        if isinstance(item, str) and item.startswith("--")
-    }
+    return {item.split("=", 1)[0] for item in arguments if isinstance(item, str) and item.startswith("--")}
 
 
 def prepare_profile(
@@ -39,9 +35,7 @@ def prepare_profile(
     allow_experimental = request.get("allow_experimental", False)
     enforce = request.get("enforce_official_profile", False)
     if not isinstance(allow_experimental, bool) or not isinstance(enforce, bool):
-        raise ValueError(
-            "allow_experimental and enforce_official_profile must be boolean"
-        )
+        raise ValueError("allow_experimental and enforce_official_profile must be boolean")
     try:
         profile = resolve_profile(model_id)
     except ValueError:
@@ -68,6 +62,7 @@ def prepare_profile(
         ep=ep,
         pd=pd,
         allow_experimental=allow_experimental,
+        enforce_hardware_recipe=(request.get("topology_source") == "official_hardware_recipe" or request.get("enforce_hardware_recipe") is True),
     )
     if profile["support_status"] == "unmatched":
         errors.append("model is not matched by the bundled official knowledge base")
@@ -76,11 +71,7 @@ def prepare_profile(
 
     merged_args = list(extra_args)
     existing = _argument_names(merged_args)
-    recipe_arguments = (
-        profile.get("stable_vllm_arguments", {})
-        if enforce
-        else profile.get("task_vllm_arguments", {})
-    )
+    recipe_arguments = profile.get("stable_vllm_arguments", {}) if enforce else profile.get("task_vllm_arguments", {})
     for flag, value in recipe_arguments.items():
         if flag in existing:
             continue
@@ -89,7 +80,11 @@ def prepare_profile(
             merged_args.append(str(value))
 
     merged_env = dict(user_env)
-    for name, value in profile.get("stable_environment", {}).items():
+    matching_recipes = (
+        [recipe for recipe in select_hardware_recipes(profile, str(generation), pd) if recipe.get("tensor_parallel_size") == tp and recipe.get("data_parallel_size") == dp and (not recipe.get("expert_parallel") or ep)] if generation else []
+    )
+    recipe_environment = matching_recipes[0].get("environment", {}) if len(matching_recipes) == 1 else profile.get("stable_environment", {})
+    for name, value in recipe_environment.items():
         if name.startswith(UNSAFE_ENV_PREFIXES):
             continue
         merged_env.setdefault(name, str(value))
@@ -103,6 +98,7 @@ def prepare_profile(
         "profile": profile,
         "profile_errors": errors,
         "profile_warnings": warnings,
+        "selected_hardware_recipe": matching_recipes[0] if len(matching_recipes) == 1 else None,
         "extra_args": merged_args,
         "env": merged_env,
         "contract": contract,

@@ -11,6 +11,14 @@ memory: project
 
 直接处理用户部署请求，不依赖适配看板或 team-lead 分配。
 
+## 项目记忆
+
+- **记忆目录**：`.claude/agent-memory/vllm-ascend-deployer/`
+- **开始部署前**：读取 `MEMORY.md` 与相关主题文件，尤其是硬件代际、官方
+  recipe 和 HCCL 通信经验。
+- **任务结束后**：将经过真实部署验证的拓扑、版本和通信诊断结论写入该目录；
+  `MEMORY.md` 保持为精华索引，详细证据放专题文件。
+
 ## 固定门禁的交互契约
 
 有限候选项必须使用 Claude Code 的 `AskUserQuestion`，让用户以方向键和 Enter
@@ -36,7 +44,7 @@ gate 未完成时除 `AskUserQuestion` 外不调用工具。
 以下内容默认由 agent 自动检查和规划，不主动提问：
 
 - 本机使用当前可用环境，服务端口默认 8000；如发现多个互斥环境才追问。
-- 读取模型 `config.json` 和实际 NPU 上限后规划运行 NPU、TP、DP；MoE 默认启用 EP，Dense 默认关闭。调度申请量与实际运行量允许不同。
+- 先只读识别 A2/A3/310p/Ascend950，再读取模型 `config.json` 和实际 NPU 上限。命中官方教程时优先采用当前硬件与部署模式对应的完整官方 TP/DP/EP recipe 及环境变量；不得把不同硬件章节的 TP 合并取最大值。无对应 recipe 时才用通用规划器。MoE 默认启用 EP，Dense 默认关闭。调度申请量与实际运行量允许不同。
 - 权重路径解析（自闭环）：拿到 `model_id` 后**必须先在 `adaptations/{safe_name}/models` 查找**（用 `scripts.adaptation_utils.model_id_to_adaptation_path` 推导），命中即用作 `model_path`，不再向用户索取路径。未命中时按 SKILL“模型来源解析”调用 `AskUserQuestion`；用户选“自动下载”时执行 `scripts/prepare_adaptation.py --model-id {model_id}`——deployer **内化了 adapter 的目录准备 + 权重下载 + 骨架渲染能力**（demo.py/pyproject.toml/README/.status.json/output.txt + 权重到 `models/`，满足 DoD 最小子集），但**不替代**完整 adapter 流程（不做精度评测/优化/业务测评），产出可供后续 adapter/benchmark/optimization 链路复用。需要匹配已有适配模板、兼容配置或定位用户
   指定制品时允许遍历项目 `adaptations/`；避免无目的递归扫描整个 `/models`
   或共享权重根目录。
