@@ -1,0 +1,119 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# cpt_fsdp.py.tmpl — 昇腾 NPU 大模型 FSDP2 继续预训练（模型单卡装不下优化器状态时用）
+# 启动: torchrun --nproc_per_node=N cpt_fsdp.py
+# 关键（踩坑已规避，见 references/parallel-strategy.md + pitfalls.md）：
+#  - fully_shard 用 mp_policy=MixedPrecisionPolicy(...)，不是 FSDP1 的 mixed_precision/sharding_strategy
+#  - NpuFusedAdamW 与 FSDP2 不兼容（FSDP2 用 meta tensor，npu.get_npu_format 无 fake impl）→ 用 torch.optim.AdamW
+#  - 融合路径靠 SDPA→npu fusion attention + TASK_QUEUE；bf16 靠 FSDP2 MixedPrecisionPolicy
+#  - 显存预算：每卡 ≈ 参数×16字节/N + 激活；9B 需 8 卡(~18GB/卡)，卡数不足会 OOM
+import os, json, math, time, random
+import torch, torch_npu  # noqa: F401
+import torch.distributed as dist
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
+from transformers import AutoModelForCausalLM, AutoConfig
+
+MODEL_DIR=os.environ["MODEL_DIR"]; WS_DIR=os.environ["WS_DIR"]
+SEQ_LEN=int(os.environ.get("SEQ_LEN","512")); BATCH_SIZE=int(os.environ.get("BATCH_SIZE","4"))
+NUM_STEPS=int(os.environ.get("NUM_STEPS","100")); LR=float(os.environ.get("LR","1e-5"))
+WARMUP=int(os.environ.get("WARMUP","10")); WD=float(os.environ.get("WD","0.01")); GRAD_CLIP=1.0
+GRAD_ACCUM=int(os.environ.get("GRAD_ACCUM","1")); SAVE_EVERY=int(os.environ.get("SAVE_EVERY","0"))
+RESUME=os.environ.get("RESUME","0")=="1"
+SEED=int(os.environ.get("SEED","42")); REMAP=os.environ.get("REMAP","0")=="1"
+LOG=os.path.join(WS_DIR,'logs'); OUT=os.path.join(WS_DIR,'outputs')
+os.makedirs(LOG,exist_ok=True); os.makedirs(OUT,exist_ok=True)
+
+def setup():
+    r=int(os.environ['RANK']); w=int(os.environ['WORLD_SIZE']); lr=int(os.environ['LOCAL_RANK'])
+    dist.init_process_group('hccl',rank=r,world_size=w); torch.npu.set_device(lr); return r,w,lr
+
+def load_model():
+    if REMAP:
+        # 多模态→文本头重映射（见 references/multimodal-remap.md）
+        raise SystemExit("REMAP=1：按 references/multimodal-remap.md 在 load_model 填文本头类+键重映射")
+    model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, torch_dtype=torch.float32, trust_remote_code=True)
+    model.train(); model.config.use_cache=False
+    try: model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
+    except TypeError: model.gradient_checkpointing_enable()
+    return model
+
+def main():
+    r,w,lr=setup(); dev=f"npu:{lr}"
+    model=load_model()
+    P=sum(p.numel() for p in model.parameters())
+    # FSDP2 逐层切分
+    mp=MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16)
+    layers=getattr(model.model,'layers',model.transformer.h)  # 据架构取 transformer 层
+    for layer in layers: fully_shard(layer, mp_policy=mp, reshard_after_forward=True)
+    fully_shard(model, mp_policy=mp, reshard_after_forward=True)
+    optim=torch.optim.AdamW(model.parameters(), lr=LR, betas=(0.9,0.95), weight_decay=WD, eps=1e-8)
+    if r==0: print(f"[model] {P/1e9:.3f}B FSDP2 world={w} mp=bf16 opt=AdamW",flush=True)
+
+    x=torch.load(os.path.join(OUT,'input_ids.pt')); N=x.shape[0]
+    s=torch.utils.data.distributed.DistributedSampler(list(range(N)),num_replicas=w,rank=r,shuffle=True,seed=SEED,drop_last=True); s.set_epoch(0)
+    idxs=list(s); nb=len(idxs)//BATCH_SIZE
+    def lr_at(s):
+        if s<WARMUP: return LR*(s+1)/WARMUP
+        p=(s-WARMUP)/max(1,NUM_STEPS-WARMUP); return 0.5*LR*(1+math.cos(math.pi*p))
+    # resume（FSDP2：load 后重新 fully_shard 一致；见 references/resume.md）
+    ck_path=os.path.join(OUT,"ckpt_latest.pt"); start_step=0
+    if RESUME and os.path.exists(ck_path):
+        ck=torch.load(ck_path,map_location="cpu",weights_only=False)  # NPU optimizer state 需 weights_only=False（见 pitfalls #21）
+        model.load_state_dict(ck["model"],strict=False); optim.load_state_dict(ck["optimizer"]); start_step=ck["step"]
+        if r==0: print(f"[resume] from step {start_step}",flush=True)
+    log=[]; lp=os.path.join(LOG,'step_loss_fsdp.jsonl')
+    if r==0: open(lp,'a' if RESUME else 'w').close(); print(f"[train] {NUM_STEPS} steps bs/rank={BATCH_SIZE} global={BATCH_SIZE*w} seq={SEQ_LEN} lr={LR} grad_accum={GRAD_ACCUM}",flush=True)
+    t0=time.time()
+    for step in range(start_step,NUM_STEPS):
+        bi=step%nb; bidx=idxs[bi*BATCH_SIZE:(bi+1)*BATCH_SIZE]
+        batch=x[bidx].to(dev); attn=torch.ones_like(batch)
+        for g in optim.param_groups: g['lr']=lr_at(step)
+        optim.zero_grad(set_to_none=False)
+        out=model(input_ids=batch,attention_mask=attn,labels=batch); loss=out.loss
+        (loss/GRAD_ACCUM).backward()
+        if (step+1)%GRAD_ACCUM==0 or step==NUM_STEPS-1:
+            torch.nn.utils.clip_grad_norm_(model.parameters(),GRAD_CLIP); optim.step()
+        ls=float(loss.detach().cpu())
+        t=torch.tensor([ls],device=dev,dtype=torch.float32); dist.all_reduce(t,op=dist.ReduceOp.AVG); ls=float(t.cpu())
+        el=time.time()-t0; sps=el/(step-start_step+1); tps=BATCH_SIZE*w*SEQ_LEN*GRAD_ACCUM/sps if sps>0 else 0
+        log.append({"step":step,"loss":ls,"lr":lr_at(step),"s_per_step":round(sps,3)})
+        if r==0:
+            with open(lp,'a') as f: f.write(json.dumps(log[-1])+'\n')
+            if step%5==0 or step==NUM_STEPS-1: print(f"{step:>4} {ls:>10.5f} {lr_at(step):.2e} {sps:>7.3f} {tps:>8.0f}",flush=True)
+        # 周期性 resume ckpt（FSDP2 用 full_tensor 聚合，见下保存段）
+        if SAVE_EVERY>0 and (step+1)%SAVE_EVERY==0:
+            from torch.distributed._tensor import DTensor
+            sd=model.state_dict(); full={}
+            for k,v in sd.items():
+                ft=v.full_tensor() if isinstance(v,DTensor) else v
+                if r==0: full[k]=ft.detach().cpu().to(torch.bfloat16)
+                del ft
+            if r==0: torch.save({"step":step+1,"model":full,"optimizer":optim.state_dict()},ck_path)
+            del sd,full
+    # 保存 CPT ckpt（供后续评估用）：FSDP2 state_dict 返回 DTensor 分片，需 full_tensor() 聚合（见 pitfalls #20）
+    from torch.distributed._tensor import DTensor
+    sd=model.state_dict()
+    full={}
+    for k,v in sd.items():
+        ft=v.full_tensor() if isinstance(v,DTensor) else v
+        if r==0: full[k]=ft.detach().cpu().to(torch.bfloat16)
+        del ft
+    if r==0:
+        torch.save(full,os.path.join(OUT,'cpt_model_state.pt'))
+        # resume ckpt（模型已聚合，optimizer 各 rank 一致）
+        torch.save({"step":NUM_STEPS,"model":full,"optimizer":optim.state_dict()},ck_path)
+        print(f"[save] cpt_model_state.pt keys={len(full)}; ckpt_latest.pt(resume)",flush=True)
+    del sd, full
+    if r==0:
+        f5=sum(rr['loss'] for rr in log[:5])/5; l5=sum(rr['loss'] for rr in log[-5:])/5
+        sm={"parallel":"fsdp2","world_size":w,"global_batch":BATCH_SIZE*w,"seq_len":SEQ_LEN,"steps":NUM_STEPS,
+            "lr":LR,"optimizer":"AdamW(FSDP2不兼容NpuFusedAdamW)","precision":"FSDP2 MixedPrecision bf16",
+            "attention":"SDPA->npu fusion","n_params_B":round(P/1e9,3),"first5":round(f5,5),"last5":round(l5,5),
+            "min":round(min(rr['loss'] for rr in log),5),"final":round(log[-1]['loss'],5),"delta":round(f5-l5,5),
+            "total_time_s":round(time.time()-t0,2)}
+        json.dump(sm,open(os.path.join(OUT,'train_summary_fsdp.json'),'w'),ensure_ascii=False,indent=2)
+        json.dump(log,open(os.path.join(OUT,'losses_fsdp.json'),'w'),ensure_ascii=False,indent=2)
+        print("\n[done]"+json.dumps(sm,ensure_ascii=False,indent=2),flush=True)
+    dist.barrier(); dist.destroy_process_group()
+
+if __name__=='__main__': main()

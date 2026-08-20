@@ -1,0 +1,107 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# eval_cpt.py.tmpl — CPT 前后域内评估（base vs cpt_model_state.pt）
+# 指标: PPL / mean NLL / next-token acc / 生成 Precision·Recall·F1·EM
+# held-out: seed 重建训练划分取未用样本（无独立 validation 时）。见 references/eval-metrics.md
+# 踩坑已规避: fp32 模型 + autocast(bf16) 前向(pitfalls#4), NLL 取负(pitfalls#5)
+import os, json, random, math
+import torch
+import torch_npu  # noqa: F401
+from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
+from safetensors.torch import load_file
+
+MODEL_DIR=os.environ["MODEL_DIR"]; DATA_FILE=os.environ["DATA_FILE"]; WS_DIR=os.environ["WS_DIR"]
+OUT=os.path.join(WS_DIR,"outputs"); CKPT=os.path.join(OUT,"cpt_model_state.pt")
+DEVICE="npu:0"; SEED=int(os.environ.get("SEED","42")); N_VAL=int(os.environ.get("N_VAL","10"))
+RATIO=float(os.environ.get("RATIO","1.0")); TRAIN_RATIO=RATIO  # 训练用的比例，held-out=其余
+MAX_NEW=int(os.environ.get("MAX_NEW","128"))
+REMAP=os.environ.get("REMAP","0")=="1"
+
+def load_model(src, device):
+    if REMAP: raise SystemExit("REMAP=1：按 references/multimodal-remap.md 填重映射")
+    if src=='cpt':
+        model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, torch_dtype=torch.float32, trust_remote_code=True)
+        sd=torch.load(CKPT,map_location='cpu')
+        model.load_state_dict(sd,strict=False)
+    else:
+        model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, torch_dtype=torch.float32, trust_remote_code=True)
+    if hasattr(model.config,'tie_word_embeddings') and model.config.tie_word_embeddings: model.tie_weights()
+    model=model.to(device); model.eval(); model.config.use_cache=True
+    return model
+
+def lm_metrics(model, ids):
+    inp=torch.tensor([ids],dtype=torch.long,device=DEVICE); attn=torch.ones_like(inp)
+    with torch.no_grad(), torch.autocast(device_type="npu",dtype=torch.bfloat16):
+        logits=model(input_ids=inp,attention_mask=attn).logits
+    logits=logits[:,:-1,:].float(); targets=inp[:,1:]
+    lp=torch.log_softmax(logits,dim=-1).gather(-1,targets.unsqueeze(-1)).squeeze(-1)
+    nll=float(-lp.mean().cpu()); acc=float((logits.argmax(-1)==targets).float().mean().cpu())
+    return {"nll":nll,"ppl":math.exp(min(nll,20)),"acc":acc,"n_tok":int(targets.numel())}
+
+def gen_metrics(model, tok, prompt_msgs, gold):
+    ids=tok.apply_chat_template(prompt_msgs,tokenize=True,add_generation_prompt=True,return_tensors=None)
+    if hasattr(ids,'input_ids') or "input_ids" in ids: ids=ids["input_ids"] if "input_ids" in ids else ids.input_ids
+    if hasattr(ids,'tolist'): ids=ids.tolist()
+    inp=torch.tensor([ids],dtype=torch.long,device=DEVICE)
+    with torch.no_grad(), torch.autocast(device_type="npu",dtype=torch.bfloat16):
+        out=model.generate(inp,max_new_tokens=MAX_NEW,do_sample=False,pad_token_id=tok.eos_token_id,eos_token_id=tok.eos_token_id)
+    gen=tok.decode(out[0,len(ids):].tolist(),skip_special_tokens=True).strip()
+    gt=tok.tokenize(gold); gd=tok.tokenize(gen)
+    from collections import Counter
+    gc,dc=Counter(gt),Counter(gd); common=sum(min(gc[t],dc[t]) for t in gc)
+    p=common/len(gd) if gd else 0; r=common/len(gt) if gt else 0
+    f=2*p*r/(p+r) if (p+r)>0 else 0; em=1.0 if gen==gold.strip() else 0.0
+    return {"p":p,"r":r,"f1":f,"em":em}
+
+def main():
+    torch.npu.set_device(0)
+    tok=AutoTokenizer.from_pretrained(MODEL_DIR,trust_remote_code=True)
+    if tok.pad_token is None: tok.pad_token=tok.eos_token
+    recs=[json.loads(l) for l in open(DATA_FILE,encoding='utf-8') if l.strip()]
+    total=len(recs); n_tr=int(total*TRAIN_RATIO)
+    rng=random.Random(SEED); idx=list(range(total)); rng.shuffle(idx)
+    held=idx[n_tr:]; val=[recs[i] for i in held[:N_VAL]]
+    json.dump(val,open(os.path.join(OUT,'val_samples.json'),'w',encoding='utf-8'),ensure_ascii=False,indent=2)
+    print(f"[val] held_out={len(held)} 取 {len(val)} 条",flush=True)
+    res={"base":[],"cpt":[]}; summ={}
+    for tag in ["base","cpt"]:
+        print(f"\n===== eval {tag} =====",flush=True)
+        m=load_model(tag,DEVICE)
+        a_nll=a_ppl=a_acc=a_n=a_p=a_r=a_f=a_e=0.0
+        for i,rec in enumerate(val):
+            ids=None
+            if 'messages' in rec:
+                clean=[{'role':x.get('role','user'),'content':x.get('content','')} for x in rec['messages'] if isinstance(x.get('content'),str) and x.get('content','').strip()]
+                if clean:
+                    try: ids=tok.apply_chat_template(clean,tokenize=True,add_generation_prompt=False,return_tensors=None)
+                    except: ids=tok(''.join(f"<|im_start|>{x['role']}\n{x['content']}<|im_end|>\n" for x in clean),add_special_tokens=False)['input_ids']
+            elif 'text' in rec: ids=tok(rec['text'],add_special_tokens=False)['input_ids']
+            if ids is None: continue
+            if hasattr(ids,'input_ids') or "input_ids" in ids: ids=ids["input_ids"] if "input_ids" in ids else ids.input_ids
+            if hasattr(ids,'tolist'): ids=ids.tolist()
+            ids=[int(x) for x in ids]
+            lm=lm_metrics(m,ids)
+            last=None
+            for x in reversed(rec.get('messages',rec.get('text','')) or []):
+                if isinstance(x,dict) and x.get('role')=='assistant' and x.get('content','').strip(): last=x['content']; break
+            gm={"p":0,"r":0,"f1":0,"em":0}
+            if last and 'messages' in rec and len(rec['messages'])>=2:
+                pm=[x for x in rec['messages'][:-1]] if rec['messages'][-1].get('role')=='assistant' else rec['messages']
+                pm=[{'role':x.get('role','user'),'content':x.get('content','')} for x in pm if isinstance(x.get('content'),str)]
+                gm=gen_metrics(m,tok,pm,last)
+            res[tag].append({"i":i,**lm,**gm})
+            a_nll+=lm['nll']*lm['n_tok']; a_n+=lm['n_tok']; a_ppl+=lm['ppl']; a_acc+=lm['acc']
+            a_p+=gm['p']; a_r+=gm['r']; a_f+=gm['f1']; a_e+=gm['em']
+            print(f"  [{tag}] v{i}: ppl={lm['ppl']:.2f} acc={lm['acc']:.3f} nll={lm['nll']:.3f} F1={gm['f1']:.3f} R={gm['r']:.3f}",flush=True)
+        n=len(val)
+        mn=a_nll/max(1,a_n)
+        summ[tag]={"mean_nll":round(mn,5),"mean_ppl":round(math.exp(min(mn,20)),2),"mean_acc":round(a_acc/n,5),
+                   "mean_prec":round(a_p/n,4),"mean_recall":round(a_r/n,4),"mean_f1":round(a_f/n,4),"mean_em":round(a_e/n,4)}
+        del m; torch.npu.empty_cache()
+    b,c=summ["base"],summ["cpt"]
+    delta={k:round(c[k]-b[k],5) for k in b}
+    fin={"base":b,"cpt":c,"delta_cpt_minus_base":delta,"note":"nll/ppl delta<0 改善；acc/f1/recall delta>0 改善"}
+    json.dump({"summary":fin,"per_sample":res},open(os.path.join(OUT,'eval_results.json'),'w'),ensure_ascii=False,indent=2)
+    print("\n===== 汇总 =====\n"+json.dumps(fin,ensure_ascii=False,indent=2),flush=True)
+
+if __name__=='__main__': main()

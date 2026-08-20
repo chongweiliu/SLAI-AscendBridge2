@@ -1,0 +1,77 @@
+{
+  "skill_name": "ascend-torch-cpt",
+  "evals": [
+    {
+      "id": 1,
+      "name": "single-card-cpt-qwen35-0.8b",
+      "prompt": "我在一台昇腾 NPU 机器上，想对 Qwen3.5-0.8B 做继续预训练。模型权重在 /mnt/model/Qwen3.5-0.8B，训练语料是沙特方言语料在 /mnt/model/jiyg/training-data/saudi-dialect-conversations/data/train.jsonl，取 30% 训练集，seq_len=320 batch_size=32 跑 100 步，单卡。要 PyTorch+torch_npu 融合路径，输出 loss 曲线公网直链和训练前后 PPL/acc/F1 评估。脚本和结果存到 train-ws/",
+      "expected_output": "在 train-ws/ 下生成 run_env.sh/prepare_data.py/cpt_train.py/eval_cpt.py/plot_loss.py，脚本语法合法，用 NpuFusedAdamW+bf16 autocast+梯度检查点，处理 Qwen3.5 多模态→文本头重映射，含 loss 曲线+公网链接+前后评估",
+      "files": [],
+      "assertions": [
+        {
+          "text": "prepare_data.py 存在且语法合法(ast.parse)"
+        },
+        {
+          "text": "cpt_train.py 存在且语法合法"
+        },
+        {
+          "text": "cpt_train.py 使用 NpuFusedAdamW"
+        },
+        {
+          "text": "cpt_train.py 使用 bf16 autocast(torch.autocast + bfloat16)"
+        },
+        {
+          "text": "cpt_train.py 开启梯度检查点(gradient_checkpointing)"
+        },
+        {
+          "text": "run_env.sh 设 TORCH_DEVICE_BACKEND_AUTOLOAD=0 与 TASK_QUEUE_ENABLE=1"
+        },
+        {
+          "text": "处理 Qwen3.5 多模态→文本头重映射(language_model/visual/mtp/tie_weights)"
+        },
+        {
+          "text": "eval_cpt.py 计算 PPL 与 next-token acc 与生成 F1"
+        },
+        {
+          "text": "plot_loss.py 含公网上传(catbox/0x0/uguu)"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "name": "ddp-8card-cpt-qwen35-0.8b",
+      "prompt": "昇腾 NPU 8 卡，用 Qwen3.5-0.8B + 沙特方言语料(/mnt/model/jiyg/training-data/saudi-dialect-conversations/data/train.jsonl) 做 DDP 继续预训练，取 60% 训练集，跑 100 步。要用 torch_npu 融合路径(NpuFusedAdamW/融合attention)，根据软硬件自动选超参，输出 loss 曲线和概要总结。存 train-ws/",
+      "expected_output": "DDP 脚本(launch_ddp.sh+cpt_train.py 支持torchrun/hccl/DDP wrap)，用 NpuFusedAdamW，gradient_as_bucket_view=False，set_to_none=False，expandable_segments，auto 超参表，loss曲线+公网链接+summary",
+      "files": [],
+      "assertions": [
+        {
+          "text": "launch_ddp.sh 存在且用 torchrun --nproc_per_node"
+        },
+        {
+          "text": "cpt_train.py 支持 DDP(init_process_group/hccl 或 DistributedDataParallel)"
+        },
+        {
+          "text": "使用 NpuFusedAdamW"
+        },
+        {
+          "text": "gradient_as_bucket_view=False（规避融合优化器冲突）"
+        },
+        {
+          "text": "zero_grad set_to_none=False（NpuFusedAdamW 要求）"
+        },
+        {
+          "text": "PYTORCH_NPU_ALLOC_CONF=expandable_segments"
+        },
+        {
+          "text": "bf16 autocast + 梯度检查点"
+        },
+        {
+          "text": "含超参自动选择表/理由"
+        },
+        {
+          "text": "plot_loss.py 含公网上传"
+        }
+      ]
+    }
+  ]
+}

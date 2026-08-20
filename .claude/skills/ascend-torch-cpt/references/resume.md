@@ -1,0 +1,52 @@
+# 断点续训（Resume）
+
+长 CPT 中断后从断点继续，避免从头重训。需保存/恢复 4 样东西：**模型权重 + 优化器状态(m,v) + step 计数 + lr schedule 进度 + DistributedSampler epoch**。
+
+## 何时存
+- 每 N 步存一次（如每 50/100 步），或按用户要求。
+- 训练正常结束时也存（=最后一次 checkpoint）。
+
+## 存什么
+```python
+# rank0 存（DDP/FSDP2 都适用；FSDP2 权重先 full_tensor 聚合）
+ckpt = {
+    "step": step + 1,                 # 下次从这步开始
+    "model": <full state_dict>,       # model.module / full_tensor 聚合
+    "optimizer": optim.state_dict(),  # 含 m,v
+    "lr": lr,                         # 当前 lr（或靠 step 重算）
+    "rng": torch.get_rng_state(),     # 可选，复现性
+}
+torch.save(ckpt, os.path.join(OUT, "ckpt_latest.pt"))
+```
+
+## 载什么
+```python
+if os.path.exists(ckpt_path) and RESUME:
+    ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)  # NPU optimizer state 需 weights_only=False（见 pitfalls #21，否则默认 weights_only=True 拒载）
+    model.load_state_dict(ck["model"], strict=False)
+    optim.load_state_dict(ck["optimizer"])
+    start_step = ck["step"]
+    # lr schedule 靠 start_step 重算（lr_at(start_step)）
+    if rank == 0: print(f"[resume] from step {start_step}", flush=True)
+else:
+    start_step = 0
+```
+注意：`optim.load_state_dict` 后需把优化器状态搬到正确 device（DDP/FSDP2 通常自动处理，否则手动 `.to(device)`）。
+
+## sampler epoch
+DistributedSampler 用 `set_epoch(epoch)` 控制 shuffle。resume 时传**已跑过的 epoch 数**（或用 start_step 推导），保证续跑数据顺序不重复。
+```python
+epoch_done = start_step // (nb * 1)   # 简化：按已跑 step 推
+sampler.set_epoch(epoch_done)
+```
+
+## 关键约束（昇腾/PyTorch）
+- **FSDP2**：模型权重存 `full_tensor()` 聚合全量（见 pitfalls #20）；优化器状态 `optim.state_dict()` 可直接存（已是各 rank 本地分片，load 后一致）。resume 时 FSDP2 重新 fully_shard 后 load 优化器 state。
+- **DDP**：`model.module.state_dict()` rank0 存；优化器各 rank 相同（梯度 all-reduce 平均），直接存/载。
+- **NpuFusedAdamW**：optim.state_dict() 可存；resume 时同样 load。
+- **lr schedule**：用 step 重算 `lr_at(step)` 比存 lr 值更稳（避免 schedule 与 step 不同步）。
+
+## 与评估 ckpt 的区别
+- 评估用 ckpt（`cpt_model_state.pt`）：只存模型权重（bf16），供阶段 8 评估。
+- resume ckpt（`ckpt_latest.pt`）：存模型+优化器+step（fp32），供中断续训。
+- 训练结束**两者都存**：评估 ckpt 供评估，resume ckpt 供用户后续想继续训。

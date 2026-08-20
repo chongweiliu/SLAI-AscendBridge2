@@ -1,0 +1,53 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# plot_loss.py.tmpl — loss 曲线 + 公网上传（catbox/0x0/uguu 依次试）
+# 读 logs/step_loss*.jsonl，画 png 到 outputs/loss_curve.png，尝试上传取直链
+import os, json, subprocess
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+WS_DIR=os.environ["WS_DIR"]; LOG_DIR=os.path.join(WS_DIR,"logs"); OUT=os.path.join(WS_DIR,"outputs")
+DDP=os.environ.get("PLOT_DDP","0")=="1"
+LOG=os.path.join(LOG_DIR,"step_loss_ddp.jsonl") if DDP else os.path.join(LOG_DIR,"step_loss.jsonl")
+PNG=os.path.join(OUT,"loss_curve_ddp.png" if DDP else "loss_curve.png")
+
+def ema(xs,a=0.3):
+    e=xs[0]; out=[]
+    for x in xs: e=a*x+(1-a)*e; out.append(e)
+    return out
+
+def upload(path):
+    for host,args in [("catbox",["-F","reqtype=fileupload","-F",f"fileToUpload=@{path}","https://catbox.moe/user/api.php"]),
+                      ("0x0",["-F",f"file=@{path}","https://0x0.st"]),
+                      ("uguu",["-F",f"files[]=@{path}","https://uguu.se/upload.php"])]:
+        try:
+            o=subprocess.run(["curl","-sS","--max-time","120",*args],capture_output=True,text=True,timeout=130)
+            u=o.stdout.strip()
+            if o.returncode==0 and u:
+                if host=="uguu" and u.startswith("{"):
+                    return ("uguu", json.loads(u)["files"][0]["url"])
+                if u.startswith("http"): return (host,u)
+                if host=="catbox" and "." in u and "http" not in u:
+                    return ("catbox", "https://files.catbox.moe/"+u)
+        except Exception: pass
+    return None
+
+def main():
+    rows=[json.loads(l) for l in open(LOG) if l.strip()]
+    steps=[r['step'] for r in rows]; loss=[r['loss'] for r in rows]; sm=ema(loss)
+    fig,ax=plt.subplots(figsize=(11,6))
+    ax.plot(steps,loss,alpha=0.35,color="#2b6cb0",label="step loss")
+    ax.plot(steps,sm,color="#c53030",linewidth=2.2,label="EMA")
+    ax.axhline(min(loss),color="green",ls=":",alpha=0.7,label=f"min={min(loss):.4f}")
+    ax.set_xlabel("step"); ax.set_ylabel("loss (CE)")
+    ax.set_title(f"CPT loss ({'DDP' if DDP else 'single'} NPU, bs={rows[0].get('bs','?')}, {len(rows)} steps)\n"
+                 f"first5={sum(loss[:5])/5:.3f} -> last5={sum(loss[-5:])/5:.3f}")
+    ax.grid(True,alpha=0.3); ax.legend(loc="upper right"); fig.tight_layout(); fig.savefig(PNG,dpi=140)
+    print(f"[plot] {PNG}",flush=True)
+    link=upload(PNG)
+    if link: print(f"[upload] {link[0]}: {link[1]}",flush=True)
+    else: print("[upload] ALL FAILED -> 用表格展示",flush=True)
+    json.dump([link] if link else [], open(os.path.join(OUT,"public_links_ddp.json" if DDP else "public_links.json"),"w"),ensure_ascii=False,indent=2)
+
+if __name__=='__main__': main()

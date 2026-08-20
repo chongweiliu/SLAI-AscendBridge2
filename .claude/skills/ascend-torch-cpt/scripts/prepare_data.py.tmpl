@@ -1,0 +1,92 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# prepare_data.py.tmpl — 语料格式自动转换与打包（通用）
+# 支持 jsonl/json/parquet/csv；messages(chat) 或 text 字段或纯文本。
+# 产出 input_ids.pt [N, SEQ_LEN] + data_stats.json
+# 占位：MODEL_DIR, DATA_FILE, WS_DIR 由 run_env.sh 注入；SEQ_LEN/RATIO/NUM_STEPS/BATCH_SIZE/WORLD_SIZE 可 env 覆盖
+import os, json, random
+import torch
+from transformers import AutoTokenizer
+
+MODEL_DIR=os.environ["MODEL_DIR"]; DATA_FILE=os.environ["DATA_FILE"]; WS_DIR=os.environ["WS_DIR"]
+SEQ_LEN=int(os.environ.get("SEQ_LEN","320"))
+RATIO=float(os.environ.get("RATIO","1.0"))      # 取语料比例
+NUM_STEPS=int(os.environ.get("NUM_STEPS","100"))
+BATCH_SIZE=int(os.environ.get("BATCH_SIZE","16"))
+WORLD_SIZE=int(os.environ.get("WORLD_SIZE","1"))
+SEED=int(os.environ.get("SEED","42"))
+random.seed(SEED); torch.manual_seed(SEED)
+
+def read_records(path):
+    recs=[]
+    ext=path.lower().split('.')[-1]
+    if ext=='parquet':
+        import pyarrow.parquet as pq
+        for r in pq.read_table(path).to_pylist(): recs.append(r)
+    elif ext in ('json',):
+        d=json.load(open(path,encoding='utf-8'))
+        recs = d if isinstance(d,list) else d.get('data', d.get('train', []))
+    elif ext=='csv':
+        import csv
+        for r in csv.DictReader(open(path,encoding='utf-8')): recs.append(r)
+    else:  # jsonl / txt-per-line
+        for line in open(path,encoding='utf-8'):
+            line=line.strip()
+            if not line: continue
+            try: recs.append(json.loads(line))
+            except: recs.append({'text': line})
+    return recs
+
+def to_text_tokens(rec, tok):
+    """统一转 token 序列。messages(chat)->apply_chat_template；text字段->tokenize；其它->取最长文本字段。"""
+    if 'messages' in rec and isinstance(rec['messages'], list) and rec['messages']:
+        clean=[{'role':m.get('role','user'),'content':m.get('content','')}
+               for m in rec['messages'] if isinstance(m.get('content'),str) and m.get('content','').strip()]
+        if not clean: return None
+        try:
+            ids=tok.apply_chat_template(clean, tokenize=True, add_generation_prompt=False, return_tensors=None)
+        except Exception:
+            text=''.join(f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>\n" for m in clean)
+            ids=tok(text, add_special_tokens=False)['input_ids']
+    elif 'text' in rec and isinstance(rec['text'],str):
+        ids=tok(rec['text'], add_special_tokens=False)['input_ids']
+    else:
+        # 取值最长的字符串字段
+        cands=[v for v in rec.values() if isinstance(v,str) and v.strip()]
+        if not cands: return None
+        ids=tok(max(cands,key=len), add_special_tokens=False)['input_ids']
+    if "input_ids" in ids or hasattr(ids,'input_ids'):
+        ids=ids["input_ids"] if "input_ids" in ids else ids.input_ids
+    if hasattr(ids,'tolist'): ids=ids.tolist()
+    return [int(x) for x in ids]+[tok.eos_token_id]
+
+def main():
+    out=os.path.join(WS_DIR,'outputs'); os.makedirs(out,exist_ok=True)
+    recs=read_records(DATA_FILE)
+    total=len(recs)
+    n_take=int(total*RATIO) if RATIO<1.0 else total
+    rng=random.Random(SEED); idx=list(range(total)); rng.shuffle(idx)
+    subset=[recs[i] for i in idx[:n_take]]
+    tok=AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
+    if tok.pad_token is None: tok.pad_token=tok.eos_token
+    all_ids=[]
+    for rec in subset:
+        ids=to_text_tokens(rec,tok)
+        if ids: all_ids.extend(ids)
+    n_tok=len(all_ids); n_raw=n_tok//SEQ_LEN
+    blocks=[all_ids[b*SEQ_LEN:(b+1)*SEQ_LEN] for b in range(n_raw)]
+    need=NUM_STEPS*BATCH_SIZE*WORLD_SIZE
+    if len(blocks)<need:
+        rng.shuffle(blocks); base=list(blocks)
+        while len(blocks)<need: blocks.extend(base)
+    rng.shuffle(blocks); blocks=blocks[:need]
+    x=torch.tensor(blocks,dtype=torch.long)
+    p=os.path.join(out,'input_ids.pt'); torch.save(x,p)
+    stats={'total':total,'ratio':RATIO,'subset':n_take,'tokens':n_tok,'seq_len':SEQ_LEN,
+           'raw_blocks':n_raw,'train_blocks':len(blocks),'batch':BATCH_SIZE,'world':WORLD_SIZE,
+           'global_batch':BATCH_SIZE*WORLD_SIZE,'steps':NUM_STEPS,'epochs':round(need/max(1,n_raw),2)}
+    json.dump(stats,open(os.path.join(out,'data_stats.json'),'w'),ensure_ascii=False,indent=2)
+    print(f'[data] saved {p} shape={tuple(x.shape)} need={need}',flush=True)
+    print(json.dumps(stats,ensure_ascii=False,indent=2),flush=True)
+
+if __name__=='__main__': main()
