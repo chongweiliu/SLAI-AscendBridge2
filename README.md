@@ -1,8 +1,8 @@
-# SLAI-AscendBridge2.1
+# SLAI-AscendBridge2.2
 
 `SLAI-AscendBridge2` 是一款面向华为昇腾 NPU 的自动化智能体编排、单模型适配与推理部署框架，用于将 PyTorch 模型迁移到 Ascend。它支持从模型发现、环境治理、代码适配、精度评测到 NPU 性能优化的闭环流程；如果需要，也可以继续扩展到第四阶段 `business_benchmark`。
 
-当前版本为 **v2.1**。在 v2.0 模型适配、评测和优化能力的基础上，v2.1 新增了 **vLLM-Ascend 自动部署**能力，可通过专用 Agent 完成本机、SSH 或 Kubernetes/CCE/ACK 调度平台上的推理服务部署与真实请求验收。
+当前版本为 **v2.2**。它延续 v2.1 的 **vLLM-Ascend 自动部署**能力，并新增 **CANNBot 按需协同适配**：只有在标准 PyTorch 与 `torch_npu` 专用接口均无法解决算子缺口，或性能分析确认需要自定义算子时，才会把最新版 CANNBot 下载到项目内缓存并调用其 Ascend C 专家流程。
 
 这个仓库是**框架仓**，负责脚本、检查器、调度骨架、dashboard、`.claude` 下的 agents / skills / agent-memory，以及 prompt 模板，不默认携带公开 adaptation 集合。模型级 adaptation 建议放在独立仓库 `SLAI-AscendBridge2-Adaptations`，或按你的内部目录结构单独维护。
 
@@ -11,9 +11,24 @@
 - `.agents -> .claude`
 - `AGENTS.md -> CLAUDE.md`
 
-## v2.1 新增功能
+## v2.2 新增功能
 
-v2.1 新增 `vllm-ascend-deployer` Agent 和 `vllm-ascend-auto-deploy` Skill，把模型与部署需求转换为经过预检和真实推理验收的 vLLM-Ascend 服务。
+### CANNBot 按需协同适配
+
+v2.2 新增 `cannbot-adapter` Agent、CANNBot 协同工作流和项目内同步脚本，用于处理普通框架适配无法覆盖的算子兼容与性能问题。
+
+- 采用四级决策顺序：优先使用可在 Ascend 上直接执行的标准 PyTorch 算子；标准实现存在功能缺口或经 profiling 确认性能不达标时，再尝试 `torch_npu` 提供的昇腾专用接口或优化实现；随后复用 GitCode 上 CANN 与昇腾社区的已有方案；只有这些路径均不可行时，才调用 CANNBot 生成 Ascend C 自定义算子
+- 仅在真正进入第四级方案时执行 `scripts/sync_cannbot.sh --print-path`；脚本每次都会检查 `https://gitcode.com/cann/cannbot-skills.git` 的 `master` 最新版本
+- CANNBot 只下载到当前项目的 `.cache/cannbot/cannbot-skills/`，该目录已被 Git 忽略；仓库不内置其源码，也不会在项目外或 Claude 全局目录安装插件
+- 同步过程不会修改 `~/.claude/settings.json`，运行时也不会加载 CANNBot 根目录的 `AGENTS.md`、`CLAUDE.md` 或 `SessionStart` Hook，因此普通 Claude 会话仍将自己识别为 **SLAI-AscendBridge2**，不会自称 CANNBot
+- 需要生成自定义算子时，按 Architect → Design Reviewer → Developer → Reviewer 四个角色推进，再通过 `cannbot_ops.py` 接回模型适配主链路
+- 验收同时覆盖真实权重、至少 50 组输入的 fuzz 对比、精度与性能回归；必要时对非连续输入显式调用 `.contiguous()`，避免 CANN 混合调用造成结果异常
+
+详细流程见 [`docs/cannbot-collaborative-adaptation-guide.md`](docs/cannbot-collaborative-adaptation-guide.md)。
+
+### vLLM-Ascend 自动部署（v2.1 延续）
+
+`vllm-ascend-deployer` Agent 和 `vllm-ascend-auto-deploy` Skill 可把模型与部署需求转换为经过预检和真实推理验收的 vLLM-Ascend 服务。
 
 - 支持本机和 SSH 单机部署，以及 SSH 多机部署
 - 支持 Kubernetes、CCE、ACK 等调度平台
@@ -42,7 +57,9 @@ v2.1 新增 `vllm-ascend-deployer` Agent 和 `vllm-ascend-auto-deploy` Skill，�
 SLAI-AscendBridge2/
 ├── .claude/
 │   ├── agent-memory/                  # 智能体阶段记忆与规则沉淀
-│   ├── agents/                        # 智能体定义，包含 vllm-ascend-deployer
+│   ├── agents/                        # 智能体定义，包含 cannbot-adapter、vllm-ascend-deployer
+│   ├── workflows/
+│   │   └── ascend-cannbot-pipeline.js # CANNBot 四角色协同编排
 │   └── skills/
 │       └── vllm-ascend-auto-deploy/   # vLLM-Ascend 自动部署技能、知识库、脚本和模板
 ├── .agents -> .claude                 # 兼容部分 agent 工具的目录入口
@@ -78,9 +95,11 @@ SLAI-AscendBridge2/
 │   ├── download_datasets.py           # 数据集下载
 │   ├── dataset_mapping.py             # 模型 -> 数据集映射
 │   ├── ensure_agent_symlinks.sh       # 恢复 .agents / AGENTS.md 兼容软链接
+│   ├── sync_cannbot.sh                # 按需同步最新版 CANNBot 到项目内缓存
 │   └── sanitize_repo_paths.py         # 路径清洗工具
 ├── tests/
 ├── adaptations/                       # 默认空目录，可挂载或拷贝单模型 adaptation
+├── .cache/cannbot/                     # 按需生成的 CANNBot 项目缓存，不纳入 Git
 ├── CLAUDE.md                          # 项目上下文说明
 ├── pyproject.toml
 ├── uv.lock
@@ -102,6 +121,7 @@ bash scripts/ensure_agent_symlinks.sh
 
 ```text
 Discovery -> Planning -> Adaptation -> Healing -> Benchmark -> Optimization -> [Optional] BusinessBenchmark -> Sync
+                                  \-> [OperatorGap] CANNBot -> Validation -/
 ```
 
 - `Discovery`
@@ -116,6 +136,8 @@ Discovery -> Planning -> Adaptation -> Healing -> Benchmark -> Optimization -> [
   - 生成 `accuracy_run.py`，输出 `outputs_*.pt`、`benchmark_metrics_*.json`、`trace_*.json`
 - `Optimization`
   - 生成 `accuracy_run_perf.py`、`model_files/`、`optimization_notes.json`，验证精度与性能
+- `[OperatorGap] CANNBot`
+  - 当适配阶段遇到功能缺口，或优化阶段确认 CPU 回退、同步开销等算子瓶颈时按需触发；完成四角色设计、开发和复核后，再回到项目主流程做真实权重验证
 - `[Optional] BusinessBenchmark`
   - 在真实数据和真实权重下补齐 NPU/CUDA 侧业务测评
 - `Sync`
@@ -188,12 +210,13 @@ export TASK_QUEUE_ENABLE=1
 
 ## 使用指南
 
-下面分四种典型使用方式：
+下面分五种典型使用方式：
 
 1. `Claude` 自动批量编排
 2. `Claude` 单模型连贯适配
 3. `Codex / Cursor` 单模型连贯适配
-4. `vLLM-Ascend` 自动部署
+4. `CANNBot` 按需协同适配
+5. `vLLM-Ascend` 自动部署
 
 ### 1. Claude 自动批量编排
 
@@ -409,7 +432,47 @@ Done when:
 
 ---
 
-### 4. vLLM-Ascend 自动部署
+### 4. CANNBot 按需协同适配
+
+适用场景：
+
+- 模型在 Ascend 上存在标准 PyTorch 算子和 `torch_npu` 专用接口都无法补齐的算子缺口
+- 已经通过 profiling 确认 CPU 回退、频繁同步或低效算子是主要性能瓶颈
+- 希望在保留 SLAI-AscendBridge2 主体身份和工作流的前提下，临时借用 CANNBot 的 Ascend C 专家能力
+
+推荐通过 `team-lead` 触发，不需要提前安装 CANNBot：
+
+```bash
+IS_SANDBOX=1 claude --dangerously-skip-permissions --agent team-lead
+```
+
+示例提示词：
+
+```text
+请继续完成当前模型的 Ascend 适配。如果发现算子缺口，先尝试可在 Ascend 上直接执行的标准
+PyTorch 算子；标准实现存在功能缺口或经 profiling 确认性能不达标时，再尝试 torch_npu
+提供的昇腾专用接口或优化实现。随后搜索 GitCode 上已有的 CANN/昇腾社区方案；只有这些
+路径均不可行时，才调用 cannbot-adapter。
+请用真实权重完成精度和性能验收，并在最终报告中说明触发原因、采用方案和 CANNBot 版本。
+```
+
+进入 CANNBot 阶段时，项目会自动执行：
+
+```bash
+scripts/sync_cannbot.sh --print-path
+```
+
+该命令会检查并同步上游 `master` 最新提交，只在标准输出中返回项目缓存路径，供协同工作流读取。可用以下命令查看当前已缓存版本；尚未下载时会显示 `not installed`：
+
+```bash
+scripts/sync_cannbot.sh --status
+```
+
+注意：不要直接在 `.cache/cannbot/cannbot-skills/` 中启动 Claude。CANNBot 是按需读取的外部能力来源，项目主体、任务编排和最终交付仍由 SLAI-AscendBridge2 负责。
+
+---
+
+### 5. vLLM-Ascend 自动部署
 
 适用场景：
 

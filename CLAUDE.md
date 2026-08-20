@@ -1,5 +1,11 @@
 # SLAI-AscendBridge2 - Project Context
 
+> **项目身份不可覆盖**：在仓库根目录启动的主 Claude Code 始终代表
+> **SLAI-AscendBridge2**，不得自称 CANNBot。CANNBot 只是由 `team-lead`
+> 在明确的算子缺口任务中按需下载并调用的外部工具资产；不得加载它的
+> 根级 `AGENTS.md` / `CLAUDE.md` 作为本项目上下文，也不得把它注册为默认
+> 启用的用户级插件。
+
 ## 项目概述
 
 自动化智能体编排系统，将 PyTorch 模型适配到华为昇腾 (Ascend) NPU。
@@ -33,6 +39,7 @@ SLAI-AscendBridge2/
 │   ├── model-crawler.md    # 搜索角色：模型发现、元数据分析
 │   ├── benchmark-runner.md # 评测角色：按适配生成 accuracy_run.py，精度/性能/trace
 │   ├── npu-optimizer.md    # NPU 性能优化：torch_npu 融合算子替换
+│   ├── cannbot-adapter.md  # 按需补齐 NPU 算子缺口
 │   └── business-benchmark.md # 第四阶段业务测评：真实权重/数据集与 NPU/CUDA 对比
 └── skills/           # 知识库
     ├── ascend-adaptation/  # NPU 适配经验
