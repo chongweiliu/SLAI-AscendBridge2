@@ -1,10 +1,10 @@
-# SLAI-AscendBridge2.2
+# SLAI-AscendBridge2.3
 
 `SLAI-AscendBridge2` 是一款面向华为昇腾 NPU 的自动化智能体编排、单模型适配与推理部署框架，用于将 PyTorch 模型迁移到 Ascend。它支持从模型发现、环境治理、代码适配、精度评测到 NPU 性能优化的闭环流程；如果需要，也可以继续扩展到第四阶段 `business_benchmark`。
 
-当前版本为 **v2.3**。在 v2.0 模型适配、评测和优化能力的基础上，v2.1 新增了 **vLLM-Ascend 自动部署**能力，可通过专用 Agent 完成本机、SSH 或 Kubernetes/CCE/ACK 调度平台上的推理服务部署与真实请求验收。v2.3 新增 **昇腾 NPU 继续预训练（CPT）** 能力，通过 `ascend-torch-cpt` Skill 把任意 HF 模型 + 语料在昇腾 NPU 上端到端跑通继续预训练，覆盖单卡/DDP/FSDP2 自动选型、torch_npu 融合路径、超参自动择优、loss 曲线、前后 PPL/acc/F1 评估与断点续训。
+当前版本为 **v2.3**。新增 **昇腾 NPU 继续预训练（CPT）** 能力，通过 `ascend-torch-cpt` Skill 把任意 HF 模型 + 语料在昇腾 NPU 上端到端跑通继续预训练，覆盖单卡/DDP/FSDP2 自动选型、torch_npu 融合路径、超参自动择优、loss 曲线、前后 PPL/acc/F1 评估与断点续训。
 
-当前版本为 **v2.2**。它延续 v2.1 的 **vLLM-Ascend 自动部署**能力，并新增 **CANNBot 按需协同适配**：只有在标准 PyTorch 与 `torch_npu` 专用接口均无法解决算子缺口，或性能分析确认需要自定义算子时，才会把最新版 CANNBot 下载到项目内缓存并调用其 Ascend C 专家流程。
+版本 **v2.2**。它延续 v2.1 的 **vLLM-Ascend 自动部署**能力，并新增 **CANNBot 按需协同适配**：只有在标准 PyTorch 与 `torch_npu` 专用接口均无法解决算子缺口，或性能分析确认需要自定义算子时，才会把最新版 CANNBot 下载到项目内缓存并调用其 Ascend C 专家流程。
 
 这个仓库是**框架仓**，负责脚本、检查器、调度骨架、dashboard、`.claude` 下的 agents / skills / agent-memory，以及 prompt 模板，不默认携带公开 adaptation 集合。模型级 adaptation 建议放在独立仓库 `SLAI-AscendBridge2-Adaptations`，或按你的内部目录结构单独维护。
 
@@ -12,6 +12,29 @@
 
 - `.agents -> .claude`
 - `AGENTS.md -> CLAUDE.md`
+
+## v2.3 新增功能
+### 昇腾 NPU 继续预训练（CPT）功能
+
+v2.3 新增 `ascend-torch-cpt` Skill，把任意 HuggingFace 模型 + 训练语料在昇腾 NPU（Ascend 910/910B/910C/950 等）上端到端跑一遍继续预训练（Continued Pre-Training, CPT），并产出训练脚本、loss 曲线（含公网直链）、概要总结与训练前后域内评估。
+
+用户只需给出【模型权重路径】+【训练数据集路径】即可启动；其余超参由 Skill 据模型规模、硬件显存与数据规模自动择优。核心能力：
+
+- **训练方式自动选型**：单卡 Eager / DDP（每卡持完整参数）/ FSDP2（`fully_shard` 分片），按模型参数量与单卡显存自动决定
+- **torch_npu 融合路径**：`NpuFusedAdamW` 融合优化器、`F.scaled_dot_product_attention`→NPU fusion attention 自动路由、`TASK_QUEUE_ENABLE` 异步算子下发；图模式（torchair）仅长训练/推理用
+- **超参自动择优**：precision（fp32 主权重 + bf16 autocast）、lr/batch/seq/warmup、梯度检查点、梯度累积，并附 OOM 6 级回退阶梯
+- **数据格式自动转换**：jsonl/json/parquet/csv 均支持；`{"messages"}` chat 格式或 `{"text"}` 纯文本自动识别，按 `seq_len` 打包
+- **断点续训**：周期存 `ckpt_latest.pt`（模型+优化器+step），`RESUME=1` 中断续训
+- **loss 曲线 + 公网直链**：matplotlib 画图，catbox.moe/0x0.st/uguu.se 顺序上传取直链，外网全不通降级表格
+- **训练前后评估**：PPL / next-token acc / mean NLL + 生成 Precision/Recall/F1/EM（chat 数据），给出“训练是否有效”结论
+- **踩坑清单与标准模板**：21 条真实踩坑（含 FSDP2、torch_npu autoload、NpuFusedAdamW 与 FSDP2 不兼容、torch.load weights_only 等）+ 7 个可直接复用的脚本模板
+- **多模态模型支持**：多模态 checkpoint → 文本头权重重映射（如 Qwen3.5 `ForConditionalGeneration` → `ForCausalLM`）
+
+> 范围：单机多卡（1–8 卡）。多机 CPT 需 `torchrun --nnodes` + RDMA/HCCL 跨机配置，属另一层复杂度，本 Skill 不含。
+
+适用场景：在已有 HF 模型上“继续预训练 / 二次预训练 / CPT / 再喂点领域语料训一轮”，需要 NPU + 模型 + 语料 + DDP/FSDP/融合算子/loss 曲线/评估的端到端闭环。
+
+Skill 与全部 references/scripts 位于 `.claude/skills/ascend-torch-cpt/`。示例见下方“昇腾 NPU 继续预训练（CPT）”章节。
 
 ## v2.2 新增功能
 
@@ -44,27 +67,6 @@ v2.2 新增 `cannbot-adapter` Agent、CANNBot 协同工作流和项目内同步�
 
 示例见下方“vLLM-Ascend 自动部署”章节。
 
-## v2.3 新增功能
-
-v2.3 新增 `ascend-torch-cpt` Skill，把任意 HuggingFace 模型 + 训练语料在昇腾 NPU（Ascend 910/910B/910C/950 等）上端到端跑一遍继续预训练（Continued Pre-Training, CPT），并产出训练脚本、loss 曲线（含公网直链）、概要总结与训练前后域内评估。
-
-用户只需给出【模型权重路径】+【训练数据集路径】即可启动；其余超参由 Skill 据模型规模、硬件显存与数据规模自动择优。核心能力：
-
-- **训练方式自动选型**：单卡 Eager / DDP（每卡持完整参数）/ FSDP2（`fully_shard` 分片），按模型参数量与单卡显存自动决定
-- **torch_npu 融合路径**：`NpuFusedAdamW` 融合优化器、`F.scaled_dot_product_attention`→NPU fusion attention 自动路由、`TASK_QUEUE_ENABLE` 异步算子下发；图模式（torchair）仅长训练/推理用
-- **超参自动择优**：precision（fp32 主权重 + bf16 autocast）、lr/batch/seq/warmup、梯度检查点、梯度累积，并附 OOM 6 级回退阶梯
-- **数据格式自动转换**：jsonl/json/parquet/csv 均支持；`{"messages"}` chat 格式或 `{"text"}` 纯文本自动识别，按 `seq_len` 打包
-- **断点续训**：周期存 `ckpt_latest.pt`（模型+优化器+step），`RESUME=1` 中断续训
-- **loss 曲线 + 公网直链**：matplotlib 画图，catbox.moe/0x0.st/uguu.se 顺序上传取直链，外网全不通降级表格
-- **训练前后评估**：PPL / next-token acc / mean NLL + 生成 Precision/Recall/F1/EM（chat 数据），给出“训练是否有效”结论
-- **踩坑清单与标准模板**：21 条真实踩坑（含 FSDP2、torch_npu autoload、NpuFusedAdamW 与 FSDP2 不兼容、torch.load weights_only 等）+ 7 个可直接复用的脚本模板
-- **多模态模型支持**：多模态 checkpoint → 文本头权重重映射（如 Qwen3.5 `ForConditionalGeneration` → `ForCausalLM`）
-
-> 范围：单机多卡（1–8 卡）。多机 CPT 需 `torchrun --nnodes` + RDMA/HCCL 跨机配置，属另一层复杂度，本 Skill 不含。
-
-适用场景：在已有 HF 模型上“继续预训练 / 二次预训练 / CPT / 再喂点领域语料训一轮”，需要 NPU + 模型 + 语料 + DDP/FSDP/融合算子/loss 曲线/评估的端到端闭环。
-
-Skill 与全部 references/scripts 位于 `.claude/skills/ascend-torch-cpt/`。示例见下方“昇腾 NPU 继续预训练（CPT）”章节。
 
 ## 仓库定位
 
