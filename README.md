@@ -49,8 +49,8 @@ v2.2 新增 `cannbot-adapter` Agent、CANNBot 协同工作流和项目内同步�
 
 详细流程见 [`docs/cannbot-collaborative-adaptation-guide.md`](docs/cannbot-collaborative-adaptation-guide.md)。
 
-## v2.1 支持模型vLLM服务化多机自动部署
-### vLLM-Ascend 自动部署
+## v2.1 新增功能
+### 支持模型vLLM-Ascend服务化多机自动部署
 
 `vllm-ascend-deployer` Agent 和 `vllm-ascend-auto-deploy` Skill 可把模型与部署需求转换为经过预检和真实推理验收的 vLLM-Ascend 服务。
 
@@ -66,6 +66,7 @@ v2.2 新增 `cannbot-adapter` Agent、CANNBot 协同工作流和项目内同步�
 
 示例见下方“vLLM-Ascend 自动部署”章节。
 
+=============================================================
 
 ## 仓库定位
 
