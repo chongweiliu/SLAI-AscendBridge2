@@ -145,6 +145,16 @@ for chip in "${CHIPS[@]}"; do
     DOCKER_RUN+=(--device="/dev/davinci${chip}")
 done
 
+# === 挂载 npu-smi 工具 ===
+# 部分宿主机上 npu-smi 不在驱动目录 /usr/local/Ascend/driver 内（如单独安装在
+# /usr/local/bin/npu-smi），仅挂载驱动目录时容器内会缺少该命令，这里自动探测并挂载
+NPU_SMI_BIN=$(command -v npu-smi 2>/dev/null)
+if [ -n "$NPU_SMI_BIN" ] && [[ "$NPU_SMI_BIN" != /usr/local/Ascend/driver/* ]]; then
+    NPU_SMI_REAL=$(readlink -f "$NPU_SMI_BIN")
+    DOCKER_RUN+=(-v "${NPU_SMI_REAL}:${NPU_SMI_BIN}:ro")
+    echo "检测到 npu-smi: ${NPU_SMI_BIN}，将挂载到容器内"
+fi
+
 DOCKER_RUN+=(
     --device=/dev/davinci_manager
     --device=/dev/devmm_svm
