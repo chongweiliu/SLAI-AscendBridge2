@@ -15,6 +15,7 @@ from audit_official_model_coverage import audit  # noqa: E402
 from deployment_profile import prepare_profile  # noqa: E402
 from inference_contract import build_contract  # noqa: E402
 from official_model_profile import resolve_profile, validate_profile  # noqa: E402
+from plan_topology import plan as plan_topology  # noqa: E402
 from validate_inference_result import (  # noqa: E402
     validate_embedding,
     validate_rerank,
@@ -25,9 +26,7 @@ from validate_inference_result import (  # noqa: E402
 class OfficialModelProfileTests(unittest.TestCase):
     def test_interactive_gates_use_claude_code_option_picker(self) -> None:
         skill_text = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
-        agent_text = (
-            SKILL_ROOT.parents[1] / "agents" / "vllm-ascend-deployer.md"
-        ).read_text(encoding="utf-8")
+        agent_text = (SKILL_ROOT.parents[1] / "agents" / "vllm-ascend-deployer.md").read_text(encoding="utf-8")
         for text in (skill_text, agent_text):
             self.assertIn("AskUserQuestion", text)
             self.assertIn("方向键", text)
@@ -45,6 +44,81 @@ class OfficialModelProfileTests(unittest.TestCase):
         profile = resolve_profile("Qwen/Qwen3-8B")
         self.assertEqual(profile["tutorial_name"], "Qwen3-Dense")
         self.assertEqual(profile["task_type"], "chat")
+
+    def test_official_recipes_are_scoped_by_detected_hardware(self) -> None:
+        profile = resolve_profile("DeepSeek-V4-Flash")
+        a2 = [recipe for recipe in profile["hardware_recipes"] if recipe["hardware_generation"] == "A2" and not recipe["pd"]]
+        a3 = [recipe for recipe in profile["hardware_recipes"] if recipe["hardware_generation"] == "A3" and not recipe["pd"]]
+        self.assertIn((8, 1, True), {(r["tensor_parallel_size"], r["data_parallel_size"], r["expert_parallel"]) for r in a2})
+        self.assertIn((4, 4, True), {(r["tensor_parallel_size"], r["data_parallel_size"], r["expert_parallel"]) for r in a3})
+        self.assertNotIn(8, {r["tensor_parallel_size"] for r in a3})
+
+    def test_hardware_specific_recipe_rejects_cross_generation_topology(self) -> None:
+        profile = resolve_profile("DeepSeek-V4-Flash")
+        errors, _ = validate_profile(
+            profile,
+            hardware_generation="A3",
+            tp=8,
+            dp=1,
+            ep=True,
+            pd=False,
+            allow_experimental=False,
+            enforce_hardware_recipe=True,
+        )
+        self.assertTrue(any("does not match" in item for item in errors))
+        errors, _ = validate_profile(
+            profile,
+            hardware_generation="A3",
+            tp=4,
+            dp=4,
+            ep=True,
+            pd=False,
+            allow_experimental=False,
+            enforce_hardware_recipe=True,
+        )
+        self.assertFalse(any("does not match" in item for item in errors))
+
+    def test_selected_recipe_injects_scenario_environment(self) -> None:
+        prepared = prepare_profile(
+            {
+                "model_id": "DeepSeek-V4-Flash",
+                "model_name": "dsv4",
+                "ascend_generation": "A3",
+                "enforce_official_profile": True,
+                "allow_experimental": True,
+                "enforce_hardware_recipe": True,
+            },
+            tp=4,
+            dp=4,
+            ep=True,
+            pd=False,
+            extra_args=[],
+            user_env={},
+        )
+        self.assertEqual(prepared["selected_hardware_recipe"]["hardware_generation"], "A3")
+        self.assertEqual(prepared["env"]["HCCL_BUFFSIZE"], "1024")
+        self.assertEqual(prepared["env"]["VLLM_ASCEND_ENABLE_FLASHCOMM1"], "1")
+
+    def test_topology_planner_prefers_hardware_recipe_candidates(self) -> None:
+        config = {"num_attention_heads": 32, "num_key_value_heads": 8}
+        generic = plan_topology(config, node_count=1, runtime_cap_per_node=8)
+        official = plan_topology(
+            config,
+            node_count=1,
+            runtime_cap_per_node=16,
+            official_recipes=[
+                {
+                    "tensor_parallel_size": 4,
+                    "data_parallel_size": 4,
+                    "expert_parallel": True,
+                }
+            ],
+        )
+        self.assertEqual(generic["tensor_parallel_size"], 8)
+        self.assertEqual(official["tensor_parallel_size"], 4)
+        self.assertEqual(official["data_parallel_size"], 4)
+        self.assertEqual(official["runtime_npu_per_node"], 16)
+        self.assertEqual(official["topology_source"], "official_hardware_recipe")
 
     def test_hardware_specific_matrix_rows_do_not_leak_features(self) -> None:
         profile = resolve_profile("Qwen/Qwen3-8B")
@@ -172,22 +246,14 @@ class OfficialModelProfileTests(unittest.TestCase):
 
     def test_embedding_and_rerank_semantics(self) -> None:
         self.assertEqual(
-            validate_embedding(
-                {"data": [{"embedding": [0.1, 0.2]}, {"embedding": [0.3, 0.4]}]}
-            ),
+            validate_embedding({"data": [{"embedding": [0.1, 0.2]}, {"embedding": [0.3, 0.4]}]}),
             [],
         )
         self.assertEqual(
-            validate_rerank(
-                {"results": [{"relevance_score": 0.9}, {"relevance_score": 0.1}]}
-            ),
+            validate_rerank({"results": [{"relevance_score": 0.9}, {"relevance_score": 0.1}]}),
             [],
         )
-        self.assertTrue(
-            validate_rerank(
-                {"results": [{"relevance_score": 0.5}, {"relevance_score": 0.5}]}
-            )
-        )
+        self.assertTrue(validate_rerank({"results": [{"relevance_score": 0.5}, {"relevance_score": 0.5}]}))
 
 
 if __name__ == "__main__":

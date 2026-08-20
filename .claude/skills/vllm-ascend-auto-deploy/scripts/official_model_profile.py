@@ -96,9 +96,7 @@ def _index_rows() -> list[dict]:
         cells = [cell.strip() for cell in line.strip("|").split("|")]
         if len(cells) != 5:
             continue
-        tp_values = [
-            int(value) for value in re.findall(r"\d+", cells[2])
-        ]
+        tp_values = [int(value) for value in re.findall(r"\d+", cells[2])]
         rows.append(
             {
                 "name": cells[0],
@@ -159,9 +157,7 @@ def _family_bonus(requested: str, row: dict) -> float:
             bonus += 0.06
         elif present or row_present:
             bonus -= 0.18
-    if "qwen3" in requested and "qwen3dense" in name and not any(
-        marker in requested for marker in markers
-    ):
+    if "qwen3" in requested and "qwen3dense" in name and not any(marker in requested for marker in markers):
         bonus += 0.25
     for version in ("qwen35", "qwen36"):
         if (version in requested) != (version in name):
@@ -182,25 +178,14 @@ def _select_row(model_id: str) -> tuple[dict, str, float]:
                 continue
             requested_basename = _normalized(model_id.split("/")[-1])
             candidate_basename = _normalized(identity.split("/")[-1])
-            score = difflib.SequenceMatcher(
-                None, requested_basename, candidate_basename
-            ).ratio()
-            length_ratio = min(len(requested_basename), len(candidate_basename)) / max(
-                len(requested_basename), len(candidate_basename)
-            )
-            if (
-                requested_basename in candidate_basename
-                or candidate_basename in requested_basename
-            ) and length_ratio >= 0.55:
+            score = difflib.SequenceMatcher(None, requested_basename, candidate_basename).ratio()
+            length_ratio = min(len(requested_basename), len(candidate_basename)) / max(len(requested_basename), len(candidate_basename))
+            if (requested_basename in candidate_basename or candidate_basename in requested_basename) and length_ratio >= 0.55:
                 score += 0.35
             score += _family_bonus(model_id, row)
             requested_major = _series_major(model_id, requested_family)
             candidate_major = _series_major(identity, requested_family)
-            if (
-                requested_major
-                and candidate_major
-                and requested_major != candidate_major
-            ):
+            if requested_major and candidate_major and requested_major != candidate_major:
                 score -= 0.45
             if best is None or score > best[0]:
                 best = (score, row, identity)
@@ -209,14 +194,51 @@ def _select_row(model_id: str) -> tuple[dict, str, float]:
     return best[1], best[2], min(best[0], 1.0)
 
 
+def _annotated_shell_blocks(tutorial: str) -> list[dict]:
+    """Return vLLM recipes together with their nearest official scenario labels."""
+    blocks: list[dict] = []
+    headings: dict[int, str] = {}
+    variant = ""
+    lines = tutorial.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        heading = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if heading:
+            level = len(heading.group(1))
+            headings = {key: value for key, value in headings.items() if key < level}
+            headings[level] = heading.group(2)
+            variant = ""
+        tab = re.match(r'^\s*===\s+["\'](.+?)["\']\s*$', line)
+        if tab:
+            variant = tab.group(1)
+        fence = re.match(r"^\s*```(?:shell|bash)\s*$", line, re.IGNORECASE)
+        if not fence:
+            index += 1
+            continue
+        end = index + 1
+        while end < len(lines) and not re.match(r"^\s*```\s*$", lines[end]):
+            end += 1
+        # Keep the trailing newline expected by the existing command parser's
+        # end-of-block lookahead.
+        block = "\n".join(lines[index + 1 : end]) + "\n"
+        if "vllm serve" in block:
+            context = " / ".join(item for item in [*headings.values(), variant] if item)
+            hardware = [generation for generation in ("A2", "A3", "310p", "Ascend950") if re.search(rf"(?<![A-Za-z0-9]){re.escape(generation)}(?![A-Za-z0-9])", context, re.IGNORECASE)]
+            blocks.append(
+                {
+                    "block": block,
+                    "context": context,
+                    "hardware": hardware,
+                    "pd": bool(re.search(r"\bPD\b|Prefill.?Decode", context, re.IGNORECASE)),
+                }
+            )
+        index = end + 1
+    return blocks
+
+
 def _shell_blocks(tutorial: str) -> list[str]:
-    return [
-        match.group(1)
-        for match in re.finditer(
-            r"```(?:shell|bash)\s*\n(.*?)```", tutorial, re.DOTALL | re.IGNORECASE
-        )
-        if "vllm serve" in match.group(1)
-    ]
+    return [item["block"] for item in _annotated_shell_blocks(tutorial)]
 
 
 def _parse_recipe(block: str) -> dict:
@@ -228,9 +250,7 @@ def _parse_recipe(block: str) -> dict:
     ):
         if "$" not in value and not PLACEHOLDER.search(value):
             exports[name] = value.strip().strip("'\"")
-    command_match = re.search(
-        r"vllm\s+serve\s+(.+?)(?=\n\s*(?:```|$))", block, re.DOTALL
-    )
+    command_match = re.search(r"vllm\s+serve\s+(.+?)(?=\n\s*(?:```|$))", block, re.DOTALL)
     if not command_match:
         return {"env": exports, "arguments": {}}
     command = re.sub(r"\\\s*\n", " ", command_match.group(1))
@@ -272,13 +292,47 @@ def _stable_requirements(recipes: list[dict]) -> tuple[dict, dict]:
         common = set(maps[0])
         for mapping in maps[1:]:
             common &= set(mapping)
-        return {
-            key: maps[0][key]
-            for key in sorted(common - excluded)
-            if all(mapping[key] == maps[0][key] for mapping in maps)
-        }
+        return {key: maps[0][key] for key in sorted(common - excluded) if all(mapping[key] == maps[0][key] for mapping in maps)}
 
     return intersection(argument_maps, MANAGED_FLAGS), intersection(env_maps)
+
+
+def _hardware_recipes(tutorial: str) -> list[dict]:
+    """Compile hardware-scoped official topology recipes for fail-closed planning."""
+    result = []
+    seen = set()
+    for annotated in _annotated_shell_blocks(tutorial):
+        parsed = _parse_recipe(annotated["block"])
+        arguments = parsed["arguments"]
+        try:
+            tp = int(arguments.get("--tensor-parallel-size"))
+            dp = int(arguments.get("--data-parallel-size", 1))
+        except (TypeError, ValueError):
+            continue
+        if not annotated["hardware"] or tp < 1 or dp < 1:
+            continue
+        for generation in annotated["hardware"]:
+            key = (generation, annotated["pd"], tp, dp)
+            if key in seen:
+                continue
+            seen.add(key)
+            result.append(
+                {
+                    "hardware_generation": generation,
+                    "pd": annotated["pd"],
+                    "tensor_parallel_size": tp,
+                    "data_parallel_size": dp,
+                    "expert_parallel": arguments.get("--enable-expert-parallel") is True,
+                    "context": annotated["context"],
+                    "environment": parsed["env"],
+                }
+            )
+    return result
+
+
+def select_hardware_recipes(profile: dict, hardware_generation: str, pd: bool) -> list[dict]:
+    """Select official recipes for the detected hardware and deployment mode."""
+    return [recipe for recipe in profile.get("hardware_recipes", []) if recipe.get("hardware_generation") == hardware_generation and recipe.get("pd") is pd]
 
 
 def _mapping_consensus(mappings: list[dict]) -> dict:
@@ -288,11 +342,7 @@ def _mapping_consensus(mappings: list[dict]) -> dict:
     common = set(mappings[0])
     for mapping in mappings[1:]:
         common &= set(mapping)
-    return {
-        key: mappings[0][key]
-        for key in sorted(common)
-        if all(mapping[key] == mappings[0][key] for mapping in mappings)
-    }
+    return {key: mappings[0][key] for key in sorted(common) if all(mapping[key] == mappings[0][key] for mapping in mappings)}
 
 
 def _family_guidance(model_id: str, task_type: str) -> dict:
@@ -316,12 +366,8 @@ def _family_guidance(model_id: str, task_type: str) -> dict:
             }
         )
 
-    arguments = _mapping_consensus(
-        [candidate["stable_vllm_arguments"] for candidate in candidates]
-    )
-    environment = _mapping_consensus(
-        [candidate["stable_environment"] for candidate in candidates]
-    )
+    arguments = _mapping_consensus([candidate["stable_vllm_arguments"] for candidate in candidates])
+    environment = _mapping_consensus([candidate["stable_environment"] for candidate in candidates])
     task_defaults = {
         "embedding": {"--runner": "pooling"},
         "rerank": {"--runner": "pooling"},
@@ -329,16 +375,8 @@ def _family_guidance(model_id: str, task_type: str) -> dict:
     }
     for key, value in task_defaults.get(task_type, {}).items():
         arguments.setdefault(key, value)
-    architectures = sorted(
-        {candidate["architecture_type"] for candidate in candidates}
-    )
-    recommended_tp = sorted(
-        {
-            value
-            for candidate in candidates
-            for value in candidate["recommended_tp"]
-        }
-    )
+    architectures = sorted({candidate["architecture_type"] for candidate in candidates})
+    recommended_tp = sorted({value for candidate in candidates for value in candidate["recommended_tp"]})
     return {
         "strategy": "family_consensus" if candidates else "knowledge_heuristic",
         "family": family,
@@ -349,11 +387,7 @@ def _family_guidance(model_id: str, task_type: str) -> dict:
             }
             for candidate in candidates
         ],
-        "architecture_type": (
-            architectures[0]
-            if len(architectures) == 1
-            else "family_mixed" if architectures else "knowledge_inferred"
-        ),
+        "architecture_type": (architectures[0] if len(architectures) == 1 else "family_mixed" if architectures else "knowledge_inferred"),
         "recommended_tp": recommended_tp,
         "stable_vllm_arguments": arguments,
         "stable_environment": environment,
@@ -386,9 +420,7 @@ def _match_support(model_id: str, row: dict) -> dict | None:
     candidates = []
     for support in _support_rows():
         model = support.get("Model", "")
-        score = difflib.SequenceMatcher(
-            None, requested, _normalized(model)
-        ).ratio()
+        score = difflib.SequenceMatcher(None, requested, _normalized(model)).ratio()
         contained = requested in _normalized(model) or _normalized(model) in requested
         if contained:
             score += 0.35
@@ -412,11 +444,7 @@ def _matching_support_variants(model_id: str, row: dict) -> list[dict]:
     if not candidates:
         return []
     best_score = max(score for score, _ in candidates)
-    return [
-        support
-        for score, support in candidates
-        if score >= best_score - 0.02
-    ]
+    return [support for score, support in candidates if score >= best_score - 0.02]
 
 
 def _support_hardware(support: dict) -> list[str]:
@@ -426,9 +454,7 @@ def _support_hardware(support: dict) -> list[str]:
         hardware_text = "310p"
     elif not hardware_text and "A2/A3" in section:
         hardware_text = "A2/A3"
-    return [
-        item for item in ("A2", "A3", "310p", "Ascend950") if item in hardware_text
-    ]
+    return [item for item in ("A2", "A3", "310p", "Ascend950") if item in hardware_text]
 
 
 def _tutorial_hardware(tutorial: str) -> list[str]:
@@ -475,18 +501,12 @@ def _matrix_only_profile(model_id: str) -> dict:
     if score < 0.45:
         raise ValueError(f"no official support-matrix profile matched model: {model_id}")
     model_text = f"{model_id} {support.get('Model', '')}".lower()
-    combined = (
-        f"{model_id} {support.get('Model', '')} {support.get('section', '')}"
-    ).lower()
+    combined = (f"{model_id} {support.get('Model', '')} {support.get('section', '')}").lower()
     if "asr" in combined:
         task_type = "asr"
     elif "rerank" in model_text:
         task_type = "rerank"
-    elif (
-        "embedding" in model_id.lower()
-        or "bert" in model_id.lower()
-        or "molmo" in model_id.lower()
-    ):
+    elif "embedding" in model_id.lower() or "bert" in model_id.lower() or "molmo" in model_id.lower():
         task_type = "embedding"
     elif "reward" in combined or "-rm" in combined:
         task_type = "reward"
@@ -495,18 +515,8 @@ def _matrix_only_profile(model_id: str) -> dict:
     else:
         task_type = "chat"
     guidance = _family_guidance(model_id, task_type)
-    equivalent_variants = [
-        item
-        for item in _support_rows()
-        if _normalized(item.get("Model", "")) == _normalized(support.get("Model", ""))
-    ]
-    hardware = sorted(
-        {
-            generation
-            for item in equivalent_variants
-            for generation in _support_hardware(item)
-        }
-    )
+    equivalent_variants = [item for item in _support_rows() if _normalized(item.get("Model", "")) == _normalized(support.get("Model", ""))]
+    hardware = sorted({generation for item in equivalent_variants for generation in _support_hardware(item)})
     return {
         "schema_version": 1,
         "model_id": model_id,
@@ -527,11 +537,7 @@ def _matrix_only_profile(model_id: str) -> dict:
         "feature_support": support,
         "support_variants": equivalent_variants,
         "stable_vllm_arguments": guidance["stable_vllm_arguments"],
-        "task_vllm_arguments": {
-            key: value
-            for key, value in guidance["stable_vllm_arguments"].items()
-            if key in {"--runner", "--task", "--hf_overrides"}
-        },
+        "task_vllm_arguments": {key: value for key, value in guidance["stable_vllm_arguments"].items() if key in {"--runner", "--task", "--hf_overrides"}},
         "stable_environment": guidance["stable_environment"],
         "recipe_count": 0,
         "profile_source": "support_matrix",
@@ -539,11 +545,7 @@ def _matrix_only_profile(model_id: str) -> dict:
         "family_guidance": guidance,
         "inference_basis": [
             "official_support_matrix",
-            (
-                "same_family_same_task_tutorial_consensus"
-                if guidance["candidate_tutorials"]
-                else "task_type_defaults"
-            ),
+            ("same_family_same_task_tutorial_consensus" if guidance["candidate_tutorials"] else "task_type_defaults"),
             "model_config_topology",
         ],
         "requires_model_config_topology": True,
@@ -558,16 +560,11 @@ def resolve_profile(model_id: str) -> dict:
     tutorial_path = MODEL_ROOT / row["tutorial_file"]
     tutorial = tutorial_path.read_text(encoding="utf-8")
     recipes = [_parse_recipe(block) for block in _shell_blocks(tutorial)]
+    hardware_recipes = _hardware_recipes(tutorial)
     stable_args, stable_env = _stable_requirements(recipes)
     support = _match_support(model_id, row)
     support_variants = _matching_support_variants(model_id, row)
-    matrix_hardware = sorted(
-        {
-            generation
-            for variant in support_variants
-            for generation in _support_hardware(variant)
-        }
-    )
+    matrix_hardware = sorted({generation for variant in support_variants for generation in _support_hardware(variant)})
     tutorial_hardware = _tutorial_hardware(tutorial)
     hardware = sorted(set(matrix_hardware + tutorial_hardware))
     return {
@@ -593,12 +590,9 @@ def resolve_profile(model_id: str) -> dict:
         "feature_support": support or {},
         "support_variants": support_variants,
         "stable_vllm_arguments": stable_args,
-        "task_vllm_arguments": {
-            key: value
-            for key, value in stable_args.items()
-            if key in {"--runner", "--task", "--hf_overrides"}
-        },
+        "task_vllm_arguments": {key: value for key, value in stable_args.items() if key in {"--runner", "--task", "--hf_overrides"}},
         "stable_environment": stable_env,
+        "hardware_recipes": hardware_recipes,
         "recipe_count": len(recipes),
         "profile_source": "tutorial",
         "parameter_source": "exact_or_variant_tutorial",
@@ -614,6 +608,7 @@ def validate_profile(
     ep: bool,
     pd: bool,
     allow_experimental: bool,
+    enforce_hardware_recipe: bool = False,
 ) -> tuple[list[str], list[str]]:
     errors: list[str] = []
     warnings: list[str] = []
@@ -621,21 +616,13 @@ def validate_profile(
     support_variants = profile.get("support_variants", [])
     if hardware_generation and support_variants:
         selected_support = next(
-            (
-                variant
-                for variant in support_variants
-                if hardware_generation in _support_hardware(variant)
-            ),
+            (variant for variant in support_variants if hardware_generation in _support_hardware(variant)),
             None,
         )
     tutorial_hardware = profile.get("hardware_sources", {}).get("tutorial", [])
     if selected_support is not None:
         status = selected_support.get("Support")
-    elif (
-        hardware_generation
-        and support_variants
-        and hardware_generation in tutorial_hardware
-    ):
+    elif hardware_generation and support_variants and hardware_generation in tutorial_hardware:
         status = "tutorial_only"
     else:
         status = profile.get("support_status")
@@ -644,27 +631,14 @@ def validate_profile(
     elif status == "🟡":
         errors.append("the bundled official matrix marks this model unverified")
     elif status == "🔵" and not allow_experimental:
-        errors.append(
-            "experimental official support requires allow_experimental=true"
-        )
+        errors.append("experimental official support requires allow_experimental=true")
     elif status == "tutorial_only":
         warnings.append("model has an official tutorial but no exact support-matrix row")
 
     supported_hardware = profile.get("supported_hardware", [])
-    if (
-        hardware_generation
-        and supported_hardware
-        and hardware_generation not in supported_hardware
-    ):
-        errors.append(
-            f"model does not support {hardware_generation}; "
-            f"supported={supported_hardware}"
-        )
-    features = (
-        selected_support
-        if selected_support is not None
-        else {} if status == "tutorial_only" else profile.get("feature_support", {})
-    )
+    if hardware_generation and supported_hardware and hardware_generation not in supported_hardware:
+        errors.append(f"model does not support {hardware_generation}; supported={supported_hardware}")
+    features = selected_support if selected_support is not None else {} if status == "tutorial_only" else profile.get("feature_support", {})
     for enabled, key, label in (
         (tp > 1, "TP", "tensor parallel"),
         (dp > 1, "DP", "data parallel"),
@@ -679,10 +653,21 @@ def validate_profile(
         elif enabled and state == "🔵" and not allow_experimental:
             errors.append(f"{label} is experimental and requires explicit opt-in")
     recommended_tp = profile.get("recommended_tp", [])
-    if recommended_tp and tp not in recommended_tp:
-        warnings.append(
-            f"TP={tp} is outside tutorial recommendations {recommended_tp}"
+    hardware_recipes = select_hardware_recipes(profile, hardware_generation, pd) if hardware_generation else []
+    if enforce_hardware_recipe and hardware_recipes and not any(recipe.get("tensor_parallel_size") == tp and recipe.get("data_parallel_size") == dp and (not recipe.get("expert_parallel") or ep) for recipe in hardware_recipes):
+        expected = sorted(
+            {
+                (
+                    recipe["tensor_parallel_size"],
+                    recipe["data_parallel_size"],
+                    recipe["expert_parallel"],
+                )
+                for recipe in hardware_recipes
+            }
         )
+        errors.append(f"TP={tp}, DP={dp}, EP={ep} does not match the bundled official {hardware_generation} {'PD' if pd else 'non-PD'} recipes {expected}")
+    elif recommended_tp and tp not in recommended_tp:
+        warnings.append(f"TP={tp} is outside tutorial recommendations {recommended_tp}")
     return errors, warnings
 
 

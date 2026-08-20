@@ -165,13 +165,21 @@ PD 分离时先显式区分角色的并行作用域：
 
 ## 安全 TP 规划
 
-读取模型 `config.json`；Qwen/VLM/MoE 优先读取嵌套 `text_config`。运行：
+先通过只读预检识别实际硬件代际（A2/A3/310p/Ascend950），再读取模型
+`config.json`；Qwen/VLM/MoE 优先读取嵌套 `text_config`。如果命中官方模型教程，
+必须优先选择该硬件代际、该部署模式对应的完整官方 recipe（TP/DP/EP 与配套
+环境变量），禁止把不同硬件章节的 TP 合并后再取最大值。只有教程没有当前硬件
+recipe 时，才回退基于模型配置的通用拓扑计算。运行：
 
 ```bash
-python scripts/plan_topology.py CONFIG.json --node-count N --runtime-cap-per-node M
+python scripts/plan_topology.py CONFIG.json --node-count N --runtime-cap-per-node M \
+  --model-id MODEL_ID --hardware-generation A3
 ```
 
-默认选择同时整除 `num_attention_heads` 和 `num_key_value_heads` 的最大 TP，且不超过单节点运行上限。只有已有真实推理证据时才允许 `TP > num_key_value_heads` 的 KV replication。
+官方硬件 recipe 仍须满足模型头数和运行资源上限；无对应 recipe 时，默认选择
+同时整除 `num_attention_heads` 和 `num_key_value_heads` 的最大 TP，且不超过
+单节点运行上限。只有已有真实推理证据时才允许 `TP > num_key_value_heads` 的
+KV replication。
 
 不要把“服务启动和 `/v1/models` 200”当作拓扑可用。TP 错误可能只在首次 forward 暴露；必须发送真实生成请求。
 
