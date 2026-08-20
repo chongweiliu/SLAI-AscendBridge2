@@ -44,7 +44,7 @@ memory: project
 
 ### 0.1 初始化概述
 
-Team-Lead 是团队的**核心协调者**，负责创建团队、启动 teammates（adapter、model-crawler、benchmark-runner、npu-optimizer、business-benchmark）、分配任务、监控进度。
+Team-Lead 是团队的**核心协调者**，负责创建团队、启动 teammates（adapter、model-crawler、benchmark-runner、npu-optimizer、business-benchmark，以及按需启动的 cannbot-adapter）、分配任务、监控进度。
 
 ### 0.2 初始化参数说明
 
@@ -52,7 +52,7 @@ Team-Lead 本身由用户直接启动或作为主 agent 运行。当需要启动
 
 | 参数 | 类型 | 必须 | 说明 |
 |------|------|------|------|
-| `subagent_type` | string | ✅ | Agent 类型，可选 `"adapter"`、`"model-crawler"`、`"benchmark-runner"`、`"npu-optimizer"` 或 `business benchmark` 角色入口 |
+| `subagent_type` | string | ✅ | Agent 类型，可选 `"adapter"`、`"model-crawler"`、`"benchmark-runner"`、`"npu-optimizer"`、`"cannbot-adapter"` 或 `business benchmark` 角色入口 |
 | `team_name` | string | ✅ | 团队名称，与 TeamCreate 时一致 |
 | `name` | string | ✅ | **Teammate 名称**，用于通信和任务分配 |
 | `description` | string | ✅ | 简短描述（3-5 词） |
@@ -72,6 +72,7 @@ Team-Lead 本身由用户直接启动或作为主 agent 运行。当需要启动
 | `"model-crawler"` | 发现并注册模型 | 全部工具 |
 | `"benchmark-runner"` | 执行模型评测 | 全部工具 |
 | `"npu-optimizer"` | NPU 性能优化 | 全部工具 |
+| `"cannbot-adapter"` | 按需补齐 NPU 算子缺口 | 全部工具 |
 | `business benchmark` 角色入口 | 执行第四阶段真实业务测评 | 全部工具 |
 
 #### `team_name`（团队名称）
@@ -300,7 +301,30 @@ Task(
 
 **注意**：第四阶段建议统一使用 `business-benchmark-{N}` 命名。其任务分配入口是 `assign_business_benchmark_task`。
 
-### 0.10 关键概念对比
+### 0.10 启动 CANNBot-Adapter 示例
+
+**按需同步与身份隔离（必须）**：`cannbot-adapter` 完成原生算子和社区方案判定、确认必须进入 CANNBot 生成阶段后，才执行 `scripts/sync_cannbot.sh --print-path`，检查并下载上游 `master` 最新版。四角色一律以通用 `AGENTS` subagent 启动，并在各自 prompt 中显式读取项目内缓存的对应角色文件和 Skills；不得依赖全局 `ops-direct-invoke:*` 注册名。不得把 CANNBot 注册成用户级默认插件，不得执行上游 `init.sh`，也不得让上游根级 `AGENTS.md` / `CLAUDE.md` / SessionStart hook 覆盖 SLAI-AscendBridge2 的主会话身份。
+
+```json
+Task(
+  subagent_type: "cannbot-adapter",
+  team_name: "adaptation-team",
+  name: "cannbot-adapter-1",
+  description: "NPU 算子缺口补齐",
+  prompt: "",
+  model: "sonnet"
+)
+```
+
+**注意**：CANNBot-Adapter 不通过 `assign_*_task` 接管任务；原 adaptation/optimization owner 保持不变，由 team-lead 通过 `SendMessage` 派发 `action=fix_operator_gap` 或 `action=fix_perf_operator_gap`。
+
+**算子缺口协调流程**：
+1. adapter 遇到无法跑通的 CUDA-only 算子，或 npu-optimizer 发现 CPU 回退/极慢热点，向 team-lead 报告结构化缺口信息。
+2. team-lead 按需启动 cannbot-adapter，并发送 `model_id`、`adaptation_path`、`gap_description`、`caller` 和写入边界。
+3. cannbot-adapter 依次尝试 torch_npu/纯 Torch、社区现成算子，最后才同步 CANNBot 并执行四角色生成流程。
+4. cannbot-adapter 回报 `result=operator_gap_fixed`；team-lead 通知原 caller 继续适配或重新测速。
+
+### 0.11 关键概念对比
 
 | 概念 | 说明 |
 |------|------|
