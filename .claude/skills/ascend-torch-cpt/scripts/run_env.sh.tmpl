@@ -1,0 +1,16 @@
+#!/bin/bash
+# run_env.sh.tmpl — 昇腾 NPU CPT 统一环境入口（复制到 train-ws/ 后填实际值）
+# 用法: source train-ws/run_env.sh
+export PYTHON=__PYTHON_BIN__                       # 如 /home/user/miniconda3/envs/X/bin/python
+source /usr/local/Ascend/ascend-toolkit/set_env.sh  # CANN
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0             # 规避 torch_npu autoload 崩，手动 import
+export TASK_QUEUE_ENABLE=1                          # 异步算子下发
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True  # 减碎片，给融合优化器留空间
+export TOKENIZERS_PARALLELISM=false
+# 单卡时固定一卡（多卡/DDP 时改为 0,1,...,N-1 并由 torch.npu.set_device(local_rank)）
+export ASCEND_RT_VISIBLE_DEVICES=0
+export HF_ENDPOINT=https://hf-mirror.com           # 国内下载
+# 任务参数
+export MODEL_DIR=__MODEL_DIR__
+export DATA_FILE=__DATA_FILE__
+export WS_DIR=$PWD

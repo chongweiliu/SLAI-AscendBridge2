@@ -1,0 +1,172 @@
+---
+name: ascend-torch-cpt
+description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTorch + torch_npu 对任意 HuggingFace 模型做继续预训练（Continued Pre-Training, CPT）的端到端技能。用户只需给出【模型权重路径】+【训练数据集路径】即可启动：自动探测环境/依赖、（按需下载模型与语料）、语料格式自动转换、训练脚本自动生成、单卡/DDP/FSDP2 自动选型、torch_npu 融合路径（NpuFusedAdamW、SDPA→npu fusion attention、TASK_QUEUE）、超参自动择优、默认产出 loss 曲线图+公网可访问直链（catbox.moe/0x0.st/uguu.se 顺序尝试，外网全不通则降级表格展示）、概要总结、训练前后 PPL/acc/F1 评估。只要用户要在昇腾上“继续预训练/二次预训练/CPT/再喂点领域语料训一轮 某模型”，或提到 NPU 训练 + 模型 + 语料 + DDP/FSDP/融合算子/loss 曲线/评估，就应使用本技能——即使用户没明说“skill”。也用于“评估继续预训练效果”“NPU 上 DDP 训练”“昇腾 CPT 踩坑”等。本技能基于 PyTorch 与 torch_npu（不是 CUDA/megatron/deepspeed）。
+---
+
+# Ascend NPU 继续预训练（CPT）技能
+
+## 这是什么
+
+把一个 HF 模型 + 一个语料，在昇腾 NPU 上端到端跑一遍继续预训练，并产出：训练脚本、loss 曲线（含公网直链）、概要总结、训练前后域内评估（PPL / next-token acc / 生成 F1·Recall·EM）。全程在保证精度与正确性前提下尽量提效降时。
+
+适用：任意 decoder-only LM（CausalLM）。多模态模型的“文本头”也支持（见 references/multimodal-remap.md）。
+
+## 输入（用户给路径即可启动）
+- **模型权重路径**（必填）：HF 目录（含 config.json/safetensors/tokenizer）。可在命令里直接指定，如
+  `ascend-torch-cpt --model-dir /mnt/model/Qwen3-0.8B --data-file /path/train.jsonl`，
+  或由 `run_env.sh` 的 `MODEL_DIR` 注入。本地没有则按需从 modelscope / hf-mirror 下载。
+- **训练数据集路径**（必填）：jsonl/json/parquet/csv 均可；`{"messages":[...]}` chat 格式或 `{"text":...}` 纯文本均自动识别转换。由 `DATA_FILE` 指定，缺失则按需下载。
+- 可选：seq_len、batch_size、步数、并行方式（单卡/DDP/FSDP2）、语料比例（如取 30%/60%）、是否评估。未指定者由技能自动择优。
+- 工作目录：默认当前目录下 `train-ws/`（无则新建），所有脚本与产物存此。
+
+## 默认产出（loss 曲线 + 公网链接 为默认方式）
+每次训练**默认**产出 loss 曲线图（png）并尝试上传为**外部公网可访问直链**：
+- 上传顺序：`catbox.moe` → `0x0.st` → `uguu.se`（按可达性依次尝试，见 scripts/plot_loss.py.tmpl）。
+- 校验链接 HTTP 200 后告知用户直链。
+- **若外网全不通**（catbox/0x0/uguu 均不可用）：自动降级为**表格展示 loss 收敛趋势**（逐 step / 每 10 步 + first5→last5 + min）。
+- 不论是否拿到公网链接，本地 png 与 `losses.json`/`step_loss.jsonl` 始终保存。
+- **链接时效**：uguu.se 等临时直链会过期；永久留本地 png + `losses.json`，长期复看以本地为准。
+- 除曲线外另产出：训练前后 PPL/acc/F1 评估、`train_summary.json`、概要总结报告（README.md）、**resume ckpt**（`ckpt_latest.pt`，含模型+优化器+step，供续训）。
+
+## 核心原则（务必内化）
+
+1. **先 Eager 基线，再谈融合/图模式。** 任何融合路径（torchair 图模式、NpuFusedAdamW 等）只在 Eager 单卡能跑通、loss 正常后才上。不要在没基线时归因到融合层。
+2. **精度优先于速度。** 融合算子/图模式若改变数值（如 bf16 纯前向 vs fp32 主权重+autocast），先用域内 PPL/acc 校验一致性再接受加速比。
+3. **不装 CUDA 专属核。** 昇腾上 flash-linear-attention / causal-conv1d 等 CUDA 库装不上也无用；走 torch_npu 自己的融合路径（SDPA→npu fusion、NpuFusedAdamW）或 torchair 图模式，参考 references/fusion-api.md。
+4. **每个产物都做本地预检再写库/交付。** 脚本能 `python -c "import ast; ast.parse(open(...).read())"` 过；真跑前先 `--dry-run` 或 2 步 smoke。
+5. **训练结束必须保存 ckpt。** CPT 的验收标准之一就是"训练前后对比评估"，因此训练脚本末尾必须落盘模型权重（`cpt_model_state.pt`），否则后续 PPL/acc/F1 评估无 ckpt 可用。DDP 用 `model.module.state_dict()`（每卡持全量，rank0 存即可）；FSDP2 用 `DTensor.full_tensor()` 聚合（见 references/pitfalls.md #20，否则只存到 1/N 分片）。
+
+## 工作流（9 阶段，每阶段都要在屏幕实时更新用时表）
+
+### 阶段 0 · 意图确认与路径核对
+- 核对用户给的**模型路径**与**语料路径**是否真实存在（`ls`）。本类任务里用户常给理想化/不存在路径；不存在则搜索本机可用副本并**显式告知**用户用了哪个、改了什么。
+- 确认：模型 id/路径、语料路径、seq_len、batch_size、步数、是否要 DDP/FSDP2、是否要评估。用户未指定的超参由本技能自动择优（见下）。
+
+### 阶段 1 · 环境/依赖勘察
+探测并记录（写进 `train-ws/env_probe.json`）：
+- NPU：卡数、每卡显存（`torch.npu.mem_get_info(i)`）、CANN 版本、`npu-smi`/`/dev/davinci*`。
+- torch / torch_npu / transformers 版本；解释器路径。
+- CANN env：`source /usr/local/Ascend/ascend-toolkit/set_env.sh`。
+- 必设环境变量：`TORCH_DEVICE_BACKEND_AUTOLOAD=0`（规避 torch_npu autoload 崩，手动 import）、`TASK_QUEUE_ENABLE=1`（异步算子下发）、`PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`（减碎片，给融合优化器留空间）。
+- torchair 依赖（仅在走图模式时需要，见 references/fusion-api.md）：protobuf/scipy/attrs/decorator/cloudpickle/ml_dtypes/tornado，`setuptools<82`（≥82 移除 pkg_resources 破坏 GE init）。
+
+用 `scripts/run_env.sh.tmpl` 生成统一入口。
+
+### 阶段 2 · 模型与数据集获取
+- 模型：本地有就用本地；否则从 modelscope（国内优先，`modelscope` CLI 或 git clone）或 `hf-mirror.com`（`git clone` + `git-lfs`）下载。`huggingface.co` 国内通常不可达。
+- 语料：同上。`/mnt/share/...` 等用户给的理想路径不存在时，搜本机或下载。
+- 数据集若只有 train 分割、用户要“验证集”：用 `seed` 重建训练划分取 held-out（见 references/eval-metrics.md）。
+
+### 阶段 3 · 语料格式转换与打包
+- 读语料（jsonl/json/parquet/csv 均要支持）。
+- **格式判定**：
+  - 若是 `{"messages":[...]}` chat 格式 → `tokenizer.apply_chat_template` 转连续 token 流（CPT 用）。
+  - 若是 `{"text": "..."}` / 纯文本 → 直接 tokenize。
+  - 其它 → 取可读文本字段拼接。
+- 打包成 `seq_len` 的定长块（`input_ids.pt`，shape `[N, seq_len]`）。不足步数需求则循环重采样补齐（记录 epoch 数）。
+- 数据预处理边界（去重/长文档分块/多语料混合/packing vs padding/tokenizer）见 `references/data-prep.md`。
+- 用 `scripts/prepare_data.py.tmpl`。**务必打印**：总样本/子集样本/总 token/原始块数/训练块数/epoch 估计。
+
+### 阶段 4 · 训练方式自动选型
+按 `references/parallel-strategy.md` 的决策树，据**模型参数量**、**单卡显存**、**语料规模**、**用户要求**选：
+
+```
+单卡能装下整套(权重+优化器状态+激活)？
+├─ 能 → 想多卡提速？
+│      ├─ 是且步数够多(>~150) → DDP（每卡持完整参数/梯度/优化器，hccl 后端）
+│      └─ 否/步数极少 → 单卡 Eager
+└─ 不能 → 模型多大？
+       ├─ 中等(靠多卡分片可装) → FSDP2（fully_shard，参数/梯度/优化器分片）
+       └─ 超大 → FSDP2 + CPU offload / 流水/张量并行
+```
+
+经验阈值（单张 ~65GB 卡，bf16 权重+fp32 AdamW 状态，近似）：
+- 权重占单卡 ≤ ~40% 显存 → 单卡；想提速走 DDP。
+- 0.5–3B 常单卡或 DDP；7–14B 单卡勉强→DDP 或 FSDP2；≥30B → FSDP2。
+- **步数 < ~150 且用图模式不划算**（torchair 首图编译 ~15min 摊销不了）→ 走 Eager+融合优化器。
+
+### 阶段 5 · 超参自动择优（`references/hyperparam-selection.md`）
+- **precision**：fp32 主权重 + bf16 autocast（NPU 原生 bf16，数值稳）。**不要**纯 bf16 前向（混合线性注意力模型会数值崩，见 pitfalls.md）。
+- **lr**：CPT 基线 1e-5；全局 batch 越大按 sqrt 缩放上调（DDP 8×→ 可 2e-5）。短训练(100步)用保守值避免发散。
+- **warmup**：~10% 步数；cosine 衰减到 0。
+- **optimizer**：`NpuFusedAdamW`（融合，替代 torch.optim.AdamW）；betas=(0.9,0.95)，wd=0.01，eps=1e-8，grad_clip=1.0。
+- **batch_size**：先按“激活显存预算”估上限，2 步 smoke 验不 OOM；OOM 则降 per-rank bs 或开梯度检查点。优先开**梯度检查点**而非降 bs（保有效 batch）。
+- **seq_len**：用户指定优先；否则据语料平均长度选 512/1024（长上下文模型可更大，但显存↑）。
+- **attention**：full_attention 层走 SDPA（→NPU fusion attention 自动路由）；不要轻易改 eager（会慢且图模式才需要）。
+- **梯度检查点**：线性注意力/hybrid 模型 fallback 激活显存大，默认开（`use_reentrant=False`）。
+
+### 阶段 6 · 生成训练脚本并 smoke
+- 按选型用 `scripts/cpt_train.py.tmpl`（**单卡 + DDP 自动检测**，由 RANK env 决定）/ `cpt_fsdp.py.tmpl`（FSDP2）。单卡 `python cpt_train.py`；DDP `bash launch_ddp.sh`（torchrun）。
+- 模板通用化：`AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 references/multimodal-remap.md。
+- 模板已支持断点续训（`RESUME=1`/`SAVE_EVERY=N`）与梯度累积（`GRAD_ACCUM=N`），见 references/resume.md。
+- **smoke**：2 步、2 卡（DDP）或单卡，确认前向+反向+优化器 step 都通过、loss 合理（初始 ~模型典型值）再上正式。
+- 踩坑先看 references/pitfalls.md（已在脚本模板里规避了多数）。
+
+> **范围声明**：本 skill 覆盖**单机多卡**（1–8 卡）。**多机（multi-node）** CPT 需 `torchrun --nnodes` + RDMA/网络配置（HCCL 跨机），属另一层复杂度，本 skill 不含；如需多机，在单机跑通后另加 `--nnodes`/`--rdzv` 与 HCCL 网络配置。
+
+### 阶段 7 · 正式训练 + loss 曲线 + 公网直链
+- 逐 step 记录 `step, loss, lr, elapsed, s/step, tok/s` 到 `logs/step_loss.jsonl` + stdout。
+- 训完出 `train_summary.json`。
+- **保存 CPT ckpt**（`cpt_model_state.pt`）供阶段 8 评估用（见核心原则 5；FSDP2 用 full_tensor 聚合）。
+- **保存 resume ckpt**（`ckpt_latest.pt`：模型+优化器+step，`SAVE_EVERY=N` 周期存 + 训练结束存），供中断续训（见 `references/resume.md`）。
+- 画 loss 曲线 png（`scripts/plot_loss.py.tmpl`，matplotlib，EMA 平滑），**尝试上传公网直链**：catbox.moe → 0x0.st → uguu.se（按可达性依次试；catbox/0x0 常不可用，uguu.se 通常可用）。校验链接 HTTP 200 后告知用户。外网全不通则用表格展示 loss 收敛。
+- 所有产物存到用户指定目录（默认当前工作目录 `train-ws/`）。
+
+### 阶段 8 · 训练前后域内评估
+- 用 `scripts/eval_cpt.py.tmpl`：取 held-out 样本，对 **base** 与 **CPT** 两套算：
+  - PPL = exp(mean NLL)、mean NLL、next-token acc（全序列 token 级，从 logits argmax）。
+  - **chat 数据**：末轮 assistant 贪心生 128 token，token 级 Precision/Recall/F1/EM。
+  - **纯文本数据**（无 messages，如 base 模型喂网页/代码文本）：只算 PPL/NLL/next-token acc（无"末轮 assistant"可生成比对）。
+- 指标选择要"据训练数据与模型合理"：方言/领域语料用域内 PPL/acc/生成 F1；**不要**强行套英文 MMLU/HellaSwag（不对齐且需额外下载 lm-eval-harness）。若用户模型是**通用知识型**（非领域方言）且明确要英文基准，按 `references/eval-metrics.md` 的 MMLU how-to 跑小子集并说明局限。
+- **NLL 公式务必取负**：`nll = -log_probs.gather(...).mean()`（漏取负会得负值，见 pitfalls.md）。
+- 出 `eval_results.json` + 结论表，给"训练是否有效"结论（Δ 方向 + 是否过拟合）。
+- **FSDP2 大模型评估**：ckpt 是 `full_tensor()` 聚合的全量 state_dict，单卡直接 `load_state_dict` 即可（评估不需 FSDP2/DDP）。base 多模态走 remap。完整 9B FSDP2 实战案例（含结果表 + 与 0.8B 对比）见 `references/eval-metrics.md`。
+- **ckpt 转 HF 可复用目录**（可选）：若用户想用 `from_pretrained` 直接加载 CPT 模型做推理/当新 base，把 `cpt_model_state.pt` 存成 HF 目录（拷 config.json+tokenizer 到 `outputs/cpt_hf_model/` + 存权重为 `model.safetensors`）。否则评估用 `load_state_dict` 即可。
+
+### 阶段 9 · 概要总结报告
+输出（Markdown）含：任务/模型/语料、并行策略、融合 API、超参表、loss 收敛(first5→last5, min, delta)、用时表(每阶段实际/预计)、公网直链、关键修正记录、复跑命令。全部归档到 `train-ws/`。
+
+## 自动选型速查（写进脚本头注释）
+
+| 输入 | 选型 |
+|---|---|
+| 小模型(<3B) + 单卡装下 | 单卡 Eager + NpuFusedAdamW + SDPA |
+| 小/中模型 + 想提速 + 步数>150 | DDP(每卡完整参数) + NpuFusedAdamW + hccl |
+| 大模型(单卡装不下优化器状态) | FSDP2(fully_shard) |
+| 短训练(<150步) | 不要图模式，Eager+融合优化器 |
+| 长训练/推理 + 想极致融合 | torchair 图模式（见 references/fusion-api.md，含 converter 补全清单） |
+
+## 产物目录约定
+
+```
+train-ws/
+├── run_env.sh              # NPU 环境入口
+├── env_probe.json          # 软硬探测结果
+├── prepare_data.py         # 语料转换打包
+├── cpt_train.py            # 训练(单卡/DDP/FSDP2 按选型)
+├── launch_ddp.sh           # DDP 启动(torchrun)
+├── eval_cpt.py             # 前后评估
+├── plot_loss.py            # 曲线+上传
+├── README.md               # 总结报告
+├── logs/{step_loss.jsonl, *_stdout.log}
+└── outputs/{input_ids.pt, losses.json, train_summary.json,
+            loss_curve.png, public_links.json,
+            cpt_*_state.pt, eval_results.json, val_samples.json}
+```
+
+## 用时表（每次执行全程实时更新）
+
+每完成一阶段就刷新下表（阶段/预计/实际/状态），让用户随时知道进度与剩余预估。
+
+## references（按需读）
+- `references/fusion-api.md` — torch_npu 融合 API 清单 + torchair 图模式 + 缺失 converter 补全（softplus/eye/softplus_backward 等）
+- `references/pitfalls.md` — 踩坑清单与解法（必读，避免重犯）
+- `references/parallel-strategy.md` — 单卡/DDP/FSDP2 选型与代码骨架
+- `references/hyperparam-selection.md` — 超参自动择优 + OOM 回退阶梯 + 梯度累积
+- `references/data-prep.md` — 数据预处理边界（去重/分块/混合/packing vs padding/tokenizer）
+- `references/resume.md` — 断点续训（存/载 optimizer+step+sampler）
+- `references/eval-metrics.md` — PPL/acc/F1/Recall/EM 定义 + held-out 重建 + FSDP2 实战案例 + MMLU how-to
+- `references/multimodal-remap.md` — 多模态 checkpoint → 文本头权重重映射
+
+## scripts（标准模板，新模型微调即用）
+见 `scripts/*.tmpl`。生成时复制到 `train-ws/` 并按当前模型/语料/选型替换占位。模板已规避多数踩坑（set_to_none=False、gradient_as_bucket_view=False、expandable_segments、autocast、grad-ckpt）。

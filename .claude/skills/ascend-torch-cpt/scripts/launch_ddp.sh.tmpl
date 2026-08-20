@@ -1,0 +1,8 @@
+#!/bin/bash
+# launch_ddp.sh.tmpl — DDP 多卡启动（torchrun + hccl）
+source "$(dirname "$0")/run_env.sh"
+export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7   # 全卡可见（覆盖单卡0），按实际卡数改
+export BATCH_SIZE=${BATCH_SIZE:-16}
+cd "$WS_DIR"
+echo "=== launch DDP: world=__N__ bs/rank=$BATCH_SIZE global=$((BATCH_SIZE*__N__)) ==="
+$PYTHON -m torch.distributed.run --nproc_per_node=__N__ --master_port=${MASTER_PORT:-29512} cpt_train.py

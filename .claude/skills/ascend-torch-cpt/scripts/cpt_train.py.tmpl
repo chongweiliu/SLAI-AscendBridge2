@@ -1,0 +1,133 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# cpt_train.py.tmpl — 昇腾 NPU CPT 训练（单卡 / DDP 自动检测，torch_npu 融合路径）
+# 单卡: python cpt_train.py
+# DDP : torchrun --nproc_per_node=N cpt_train.py  (自动 init hccl + DDP wrap)
+# 默认: AutoModelForCausalLM.from_pretrained（纯文本 LM 直接用）；
+#       多模态→文本头：设 REMAP=1 并填 TEXT_MODEL_CLASS（见 references/multimodal-remap.md）
+# 踩坑已规避: autoload=0, set_to_none=False, gradient_as_bucket_view=False, expandable_segments, grad-ckpt(use_reentrant=False), fp32+bf16 autocast
+import os, json, math, time, random
+import torch
+import torch_npu  # noqa: F401  必须，autoload=0 时手动注册
+try:
+    import torch.distributed as dist
+    from torch.nn.parallel import DistributedDataParallel as DDP
+    _DDP=True
+except Exception: _DDP=False
+from transformers import AutoModelForCausalLM, AutoConfig
+from torch_npu.optim import NpuFusedAdamW
+
+MODEL_DIR=os.environ["MODEL_DIR"]; WS_DIR=os.environ["WS_DIR"]
+SEQ_LEN=int(os.environ.get("SEQ_LEN","320"))
+BATCH_SIZE=int(os.environ.get("BATCH_SIZE","16"))
+NUM_STEPS=int(os.environ.get("NUM_STEPS","100"))
+LR=float(os.environ.get("LR","1e-5"))
+WARMUP=int(os.environ.get("WARMUP","10"))
+WD=float(os.environ.get("WD","0.01"))
+GRAD_CLIP=float(os.environ.get("GRAD_CLIP","1.0"))
+GRAD_ACCUM=int(os.environ.get("GRAD_ACCUM","1"))      # 梯度累积步数（per-rank bs 太小时凑有效 batch）
+SAVE_EVERY=int(os.environ.get("SAVE_EVERY","0"))      # >0 则每 N 步存 resume ckpt
+RESUME=os.environ.get("RESUME","0")=="1"              # 从 ckpt_latest.pt 续训
+SEED=int(os.environ.get("SEED","42"))
+REMAP=os.environ.get("REMAP","0")=="1"
+LOG=os.path.join(WS_DIR,'logs'); OUT=os.path.join(WS_DIR,'outputs')
+os.makedirs(LOG,exist_ok=True); os.makedirs(OUT,exist_ok=True)
+
+def is_ddp(): return _DDP and 'RANK' in os.environ
+
+def setup_dist():
+    r=int(os.environ['RANK']); w=int(os.environ['WORLD_SIZE']); lr=int(os.environ['LOCAL_RANK'])
+    dist.init_process_group('hccl',rank=r,world_size=w); torch.npu.set_device(lr)
+    return r,w,lr
+
+def load_model(device):
+    if REMAP:
+        # 多模态→文本头重映射：在此填实际文本头类与 strip 前缀逻辑
+        # 模板见 references/multimodal-remap.md（已验证 Qwen3.5 路径）
+        raise SystemExit("REMAP=1：请按 references/multimodal-remap.md 在 load_model 内填文本头类与键重映射")
+    model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, torch_dtype=torch.float32, trust_remote_code=True)
+    model=model.to(device); model.train(); model.config.use_cache=False
+    try: model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
+    except TypeError: model.gradient_checkpointing_enable()
+    return model
+
+def main():
+    rank=world=local=0
+    if is_ddp(): rank,world,local=setup_dist()
+    else: torch.npu.set_device(0)
+    device=f"npu:{local}"
+    model=load_model(device)
+    nP=sum(p.numel() for p in model.parameters())
+    if is_ddp():
+        model=DDP(model,device_ids=[local],find_unused_parameters=True,gradient_as_bucket_view=False)
+    if rank==0: print(f"[model] {nP/1e9:.3f}B dev={device} ddp={is_ddp()} world={max(1,world)} optim=NpuFusedAdamW",flush=True)
+
+    optim=NpuFusedAdamW(model.parameters(),lr=LR,betas=(0.9,0.95),weight_decay=WD,eps=1e-8)
+    x=torch.load(os.path.join(OUT,'input_ids.pt')); N=x.shape[0]
+    if is_ddp():
+        s=torch.utils.data.distributed.DistributedSampler(list(range(N)),num_replicas=world,rank=rank,shuffle=True,seed=SEED,drop_last=True); s.set_epoch(0); idxs=list(s)
+    else:
+        rng=random.Random(SEED); idxs=list(range(N)); rng.shuffle(idxs)
+    nb=len(idxs)//BATCH_SIZE
+
+    def lr_at(s):
+        if s<WARMUP: return LR*(s+1)/WARMUP
+        p=(s-WARMUP)/max(1,NUM_STEPS-WARMUP); return 0.5*LR*(1+math.cos(math.pi*p))
+
+    # resume：载模型+优化器+step（见 references/resume.md）
+    ck_path=os.path.join(OUT,"ckpt_latest.pt")
+    start_step=0
+    if RESUME and os.path.exists(ck_path):
+        ck=torch.load(ck_path,map_location="cpu",weights_only=False)  # NPU optimizer state 需 weights_only=False（见 pitfalls #21）
+        m=model.module if is_ddp() else model
+        m.load_state_dict(ck["model"],strict=False)
+        optim.load_state_dict(ck["optimizer"])
+        start_step=ck["step"]
+        if rank==0: print(f"[resume] from step {start_step}",flush=True)
+
+    log=[]; lp=os.path.join(LOG,f"step_loss{'_ddp' if is_ddp() else ''}.jsonl")
+    if rank==0:
+        open(lp,'a' if RESUME else 'w').close()
+        print(f"[train] {NUM_STEPS} steps bs/rank={BATCH_SIZE} global={BATCH_SIZE*max(1,world)} seq={SEQ_LEN} lr={LR} grad_accum={GRAD_ACCUM}",flush=True)
+        print(f"{'step':>4} {'loss':>10} {'lr':>10} {'s/step':>7} {'tok/s':>8}",flush=True)
+    t0=time.time()
+    for step in range(start_step,NUM_STEPS):
+        bi=step%nb; bidx=idxs[bi*BATCH_SIZE:(bi+1)*BATCH_SIZE]
+        batch=x[bidx].to(device); attn=torch.ones_like(batch)
+        lr=lr_at(step)
+        for g in optim.param_groups: g['lr']=lr
+        optim.zero_grad(set_to_none=False)   # NpuFusedAdamW 不支持 set_to_none=True
+        with torch.autocast(device_type="npu",dtype=torch.bfloat16):
+            out=model(input_ids=batch,attention_mask=attn,labels=batch); loss=out.loss
+        (loss/GRAD_ACCUM).backward()
+        if (step+1)%GRAD_ACCUM==0 or step==NUM_STEPS-1:   # 累满 GRAD_ACCUM 才 step
+            torch.nn.utils.clip_grad_norm_(model.parameters(),GRAD_CLIP); optim.step()
+        ls=float(loss.detach().cpu())
+        if is_ddp():
+            t=torch.tensor([ls],device=device,dtype=torch.float32); dist.all_reduce(t,op=dist.ReduceOp.AVG); ls=float(t.cpu())
+        el=time.time()-t0; sps=el/(step-start_step+1); tps=BATCH_SIZE*max(1,world)*SEQ_LEN*GRAD_ACCUM/sps if sps>0 else 0
+        log.append({"step":step,"loss":ls,"lr":lr,"elapsed_s":round(el,2),"s_per_step":round(sps,3)})
+        if rank==0:
+            with open(lp,'a') as f: f.write(json.dumps(log[-1])+'\n')
+            if step%5==0 or step==NUM_STEPS-1: print(f"{step:>4} {ls:>10.5f} {lr:.2e} {sps:>7.3f} {tps:>8.0f}",flush=True)
+        # 周期性 resume ckpt
+        if SAVE_EVERY>0 and (step+1)%SAVE_EVERY==0 and rank==0:
+            m=model.module if is_ddp() else model
+            torch.save({"step":step+1,"model":m.state_dict(),"optimizer":optim.state_dict()},ck_path)
+    if rank==0:
+        m=model.module if is_ddp() else model
+        torch.save(m.state_dict(),os.path.join(OUT,'cpt_model_state.pt'))   # 评估用(bf16 不需要)
+        torch.save({"step":NUM_STEPS,"model":m.state_dict(),"optimizer":optim.state_dict()},ck_path)  # resume 用
+        f5=sum(r['loss'] for r in log[:5])/5; l5=sum(r['loss'] for r in log[-5:])/5
+        s={"parallel":"ddp" if is_ddp() else "single","world_size":max(1,world),"global_batch":BATCH_SIZE*max(1,world),
+           "batch_per_rank":BATCH_SIZE,"seq_len":SEQ_LEN,"steps":NUM_STEPS,"lr":LR,"warmup":WARMUP,"wd":WD,
+           "grad_clip":GRAD_CLIP,"optim":"NpuFusedAdamW","precision":"fp32+bf16 autocast","grad_ckpt":True,
+           "n_params_B":round(nP/1e9,4),"first5":round(f5,5),"last5":round(l5,5),
+           "min":round(min(r['loss'] for r in log),5),"final":round(log[-1]['loss'],5),"delta":round(f5-l5,5),
+           "total_time_s":round(time.time()-t0,2)}
+        json.dump(s,open(os.path.join(OUT,'train_summary.json'),'w'),ensure_ascii=False,indent=2)
+        json.dump(log,open(os.path.join(OUT,'losses.json'),'w'),ensure_ascii=False,indent=2)
+        print("\n[done]"+json.dumps(s,ensure_ascii=False,indent=2),flush=True)
+    if is_ddp(): dist.barrier(); dist.destroy_process_group()
+
+if __name__=='__main__': main()
