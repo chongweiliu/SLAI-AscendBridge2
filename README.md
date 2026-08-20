@@ -2,9 +2,7 @@
 
 `SLAI-AscendBridge2` 是一款面向华为昇腾 NPU 的自动化智能体编排、单模型适配与推理部署框架，用于将 PyTorch 模型迁移到 Ascend。它支持从模型发现、环境治理、代码适配、精度评测到 NPU 性能优化的闭环流程；如果需要，也可以继续扩展到第四阶段 `business_benchmark`。
 
-当前版本为 **v2.3**。新增 **昇腾 NPU 继续预训练（CPT）** 能力，通过 `ascend-torch-cpt` Skill 把任意 HF 模型 + 语料在昇腾 NPU 上端到端跑通继续预训练，覆盖单卡/DDP/FSDP2 自动选型、torch_npu 融合路径、超参自动择优、loss 曲线、前后 PPL/acc/F1 评估与断点续训。
-
-版本 **v2.2**。它延续 v2.1 的 **vLLM-Ascend 自动部署**能力，并新增 **CANNBot 按需协同适配**：只有在标准 PyTorch 与 `torch_npu` 专用接口均无法解决算子缺口，或性能分析确认需要自定义算子时，才会把最新版 CANNBot 下载到项目内缓存并调用其 Ascend C 专家流程。
+当前版本为 **v2.3**。在 v2.0 模型适配、评测和优化能力的基础上：v2.1 新增 **vLLM-Ascend 自动部署**能力（本机/SSH/Kubernetes/CCE/ACK 推理服务部署与真实请求验收）；v2.2 新增 **CANNBot 按需协同适配**（仅在标准 PyTorch 与 `torch_npu` 专用接口均无法解决算子缺口时，才调用 CANNBot 生成 Ascend C 自定义算子）；v2.3 新增 **昇腾 NPU 继续预训练（CPT）** 能力，通过 `ascend-torch-cpt` Skill 把任意 HF 模型 + 语料在昇腾 NPU 上端到端跑通继续预训练，覆盖单卡/DDP/FSDP2 自动选型、torch_npu 融合路径、超参自动择优、loss 曲线、前后 PPL/acc/F1 评估与断点续训。
 
 这个仓库是**框架仓**，负责脚本、检查器、调度骨架、dashboard、`.claude` 下的 agents / skills / agent-memory，以及 prompt 模板，不默认携带公开 adaptation 集合。模型级 adaptation 建议放在独立仓库 `SLAI-AscendBridge2-Adaptations`，或按你的内部目录结构单独维护。
 
