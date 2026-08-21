@@ -88,5 +88,9 @@ def main():
     json.dump(stats,open(os.path.join(out,'data_stats.json'),'w'),ensure_ascii=False,indent=2)
     print(f'[data] saved {p} shape={tuple(x.shape)} need={need}',flush=True)
     print(json.dumps(stats,ensure_ascii=False,indent=2),flush=True)
+    # 多卡提示: WORLD_SIZE=1 时若实际要 DDP/FSDP2 N 卡, need 会算少 → 每卡数据不足 → 训练内循环重复采样
+    if WORLD_SIZE==1:
+        print('[hint] WORLD_SIZE=1: 若用 DDP/FSDP2 N 卡训练, 先 `export WORLD_SIZE=N` 再重跑本步,'
+              ' 否则 need=steps*bs*1 块分到 N 卡后每卡仅 1/N 块、训练会循环重复采样',flush=True)
 
 if __name__=='__main__': main()

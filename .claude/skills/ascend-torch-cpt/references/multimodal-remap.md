@@ -14,7 +14,12 @@ CPT 目标是文本（CausalLM），但用户的 ckpt 可能是多模态（ForCo
 - 文本头 `Qwen3_5ForCausalLM(tc)`（tc=cfg.text_config）期望键：`model.<x>` + `lm_head.weight`（tie 时缺）。
 - 映射：strip `model.language_model.` → `model.`；丢 `visual`/`mtp`；`strict=False`。
 - `tie_word_embeddings=True` → lm_head 缺失正常，`model.tie_weights()`。
-- 验证：加载 320/miss 0(lm_head tie 忽略)/unexp 0。
+
+## tie=False 时须保留 lm_head.weight（必读）
+- **先 `cat config.json` 看 `tie_word_embeddings`**：同族不同规格模型可能不同（如 Qwen3.5-0.8B 是 `True`，Qwen3.5-9B 是 `False`）。
+- **tie=False**：ckpt 顶层有独立的 `lm_head.weight` 张量，重映射时**保留**它（不 strip `model.language_model.` 之外的不动、不 drop），加载后 `miss_lm_head` 应为 0；**不要**调 `tie_weights()`（会把 lm_head 绑成 embed，错误覆盖）。
+- **tie=True**：lm_head 与 embed_tokens 共享，ckpt 无独立 `lm_head.weight`，加载后 lm_head 缺失正常，**必须**调 `model.tie_weights()` 绑定。
+- 判据：加载后看 `miss_lm_head` 数——tie=True 时为 1（正常），tie=False 时应为 0。
 
 ## 通用步骤
 1. 读 ckpt 键前缀（`model.safetensors.index.json` 的 `weight_map` keys）。

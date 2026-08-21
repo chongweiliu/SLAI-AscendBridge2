@@ -10,6 +10,7 @@ export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True  # 减碎片，给融合�
 export TOKENIZERS_PARALLELISM=false
 # 单卡时固定一卡（多卡/DDP 时改为 0,1,...,N-1 并由 torch.npu.set_device(local_rank)）
 export ASCEND_RT_VISIBLE_DEVICES=0
+export WORLD_SIZE=${WORLD_SIZE:-1}                # 多卡训练(DDP/FSDP2)前 export WORLD_SIZE=N, prepare_data 据此算块数
 export HF_ENDPOINT=https://hf-mirror.com           # 国内下载
 # 工作目录: 仓库根目录下的 training-ws/<模型名>-cpt/ (不与仓库平行)
 export REPO_ROOT=__REPO_ROOT__                      # SLAI-AscendBridge2 仓库根目录绝对路径
