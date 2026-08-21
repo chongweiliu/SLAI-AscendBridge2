@@ -17,8 +17,11 @@ MODEL_DIR=os.environ["MODEL_DIR"]; WS_DIR=os.environ["WS_DIR"]
 SEQ_LEN=int(os.environ.get("SEQ_LEN","512")); BATCH_SIZE=int(os.environ.get("BATCH_SIZE","4"))
 NUM_STEPS=int(os.environ.get("NUM_STEPS","100")); LR=float(os.environ.get("LR","1e-5"))
 WARMUP=int(os.environ.get("WARMUP","10")); WD=float(os.environ.get("WD","0.01")); GRAD_CLIP=1.0
-GRAD_ACCUM=int(os.environ.get("GRAD_ACCUM","1")); SAVE_EVERY=int(os.environ.get("SAVE_EVERY","0"))
-RESUME=os.environ.get("RESUME","0")=="1"
+GRAD_ACCUM=int(os.environ.get("GRAD_ACCUM","1"))
+RESUME=os.environ.get("RESUME","0")=="1"              # 断点续训总开关（默认关闭）
+EST_STEP_S=float(os.environ.get("EST_STEP_S","10"))   # 预估每步秒数（估总时长→保存间隔）
+CKPT_MIN_INTERVAL_S=float(os.environ.get("CKPT_MIN_INTERVAL_S","900"))  # 周期保存最小间隔(s)，默认15min
+CKPT_MAX_SAVES=int(os.environ.get("CKPT_MAX_SAVES","5"))                # 训练期间最多保存次数
 SEED=int(os.environ.get("SEED","42")); REMAP=os.environ.get("REMAP","0")=="1"
 LOG=os.path.join(WS_DIR,'logs'); OUT=os.path.join(WS_DIR,'outputs')
 os.makedirs(LOG,exist_ok=True); os.makedirs(OUT,exist_ok=True)
@@ -64,6 +67,8 @@ def main():
     log=[]; lp=os.path.join(LOG,'step_loss_fsdp.jsonl')
     if r==0: open(lp,'a' if RESUME else 'w').close(); print(f"[train] {NUM_STEPS} steps bs/rank={BATCH_SIZE} global={BATCH_SIZE*w} seq={SEQ_LEN} lr={LR} grad_accum={GRAD_ACCUM}",flush=True)
     t0=time.time()
+    last_save_t=t0
+    _save_interval_s=max(CKPT_MIN_INTERVAL_S, NUM_STEPS*EST_STEP_S/CKPT_MAX_SAVES)  # 周期保存间隔（时间基准）
     for step in range(start_step,NUM_STEPS):
         bi=step%nb; bidx=idxs[bi*BATCH_SIZE:(bi+1)*BATCH_SIZE]
         batch=x[bidx].to(dev); attn=torch.ones_like(batch)
@@ -80,8 +85,8 @@ def main():
         if r==0:
             with open(lp,'a') as f: f.write(json.dumps(log[-1])+'\n')
             if step%5==0 or step==NUM_STEPS-1: print(f"{step:>4} {ls:>10.5f} {lr_at(step):.2e} {sps:>7.3f} {tps:>8.0f}",flush=True)
-        # 周期性 resume ckpt（FSDP2 用 full_tensor 聚合，见下保存段）
-        if SAVE_EVERY>0 and (step+1)%SAVE_EVERY==0:
+        # 周期保存 resume ckpt（仅 RESUME=1 时，按时间基准：≤5 次、间隔 ≥15min；FSDP2 用 full_tensor 聚合）
+        if RESUME and (time.time()-last_save_t>=_save_interval_s) and step<NUM_STEPS-1:
             from torch.distributed._tensor import DTensor
             sd=model.state_dict(); full={}
             for k,v in sd.items():
@@ -90,6 +95,7 @@ def main():
                 del ft
             if r==0: torch.save({"step":step+1,"model":full,"optimizer":optim.state_dict()},ck_path)
             del sd,full
+            last_save_t=time.time()
     # 保存 CPT ckpt（供后续评估用）：FSDP2 state_dict 返回 DTensor 分片，需 full_tensor() 聚合（见 pitfalls #20）
     from torch.distributed._tensor import DTensor
     sd=model.state_dict()

@@ -113,3 +113,58 @@ if r == 0:
 - **症状**：比标准模型慢、编译图大。
 - **根因**：chunked delta rule 有 Python 嵌套循环，Dynamo 展开成巨图；torch fallback 慢。
 - **解法**：接受 Eager 较慢；图模式仅长训练/推理用；真正解法是等上游 NPU 原生线性注意力算子。
+
+## 22. `nproc` 误报单核（OMP_NUM_THREADS=1）
+- **症状**：`nproc` 返回 1，误以为单核，怪 CPU。
+- **根因**：环境里 `OMP_NUM_THREADS=1`，coreutils 的 `nproc` 会受 `OMP_NUM_THREADS`/`OMP_THREAD_LIMIT` 影响取最小值。
+- **解法**：用 `nproc --all` / `lscpu` / `os.cpu_count()` / `os.sched_getaffinity(0)` 查真实核数。实战：机器实际 640 核（8 NUMA × 80），CPU 并非瓶颈，别被 `nproc`=1 误导。
+
+## 23. HCCL 卡间互联慢（RoCE 未配置）→ FSDP2 通信成为主瓶颈
+- **症状**：FSDP2 训练 50s/step，但 torch_npu.profiler 显示 HcclAllGather+HcclReduceScatter 占 ~97%，计算只占 ~3%。
+- **根因**：卡间 RoCE IP 未配置（`hccn_tool -i <devid> -ip -g` 报 "no ip was preset"），HCCL 走慢速 PCIe（实测 ~2.16GB/s；正常 HCCS/RoCE 应 25-100GB/s）。
+- **解法**：**选并行策略前先探测卡间互联**。`hccn_tool -i <devid> -ip -g` 看是否配了 RoCE IP；若通信带宽 ~GB/s 级（远低于 25GB/s），FSDP2 会通信-bound，改走模型并行（#24）。
+
+## 24. 卡间互联慢时用朴素模型并行（device_map="auto"）替代 FSDP2
+- **症状**：FSDP2 通信-bound 慢（见 #23）。
+- **根因**：FSDP2 每步 all-gather 参数 + reduce-scatter 梯度，搬运 ~108GB 数据；互联慢时通信成为瓶颈。而模型并行拆层后参数各归其卡，无 all-gather。
+- **解法**：`AutoModelForCausalLM.from_pretrained(..., torch_dtype=torch.float32, device_map="auto")` 自动把层拆到多卡，优化器直接放 NPU。实测 12B/4 卡从 50s/step 降到 ~5.5s/step（8.3×）。**单进程即可**：`.to(device)` 可微分，autograd 自动跨卡回传梯度，无需手写 P2P。显存 = 参数×16/N（12B/4卡 ≈ 48GB/卡，fp32 参数 12GB + m/v 24GB + 激活）。optimizer 用默认 `torch.optim.AdamW`（`foreach=True` 对多 device 参数可能不兼容，用默认 False）。见 references/parallel-strategy.md「模型并行」节。
+
+## 25. bf16 权重 + 小 lr → 更新被精度吞掉（训练不前进）
+- **症状**：用 bf16 权重 + lr 5e-6，loss 几乎不动。
+- **根因**：bf16 相对精度 ~0.4%（~4e-3），lr 5e-6 的更新量远小于权重分辨率，加不到权重上。fp16 同理（~5e-4 仍不够）。
+- **解法**：CPT 小 lr（≤1e-5）必须 **fp32 主权重**。device_map 用 `torch_dtype=torch.float32`；单卡用 fp32 主权重 + bf16 autocast。
+
+## 26. 单卡 + CPU-offload 优化器反而更慢（别这么干）
+- **症状**：把 fp32 主权重 + AdamW 放 CPU 省显存，结果 ~60s/step 比 FSDP2 还慢。
+- **根因**：CPU AdamW over 12B fp32 要 ~42s/step（CPU 内存带宽 ~7GB/s 慢，`foreach=True` 也只降到 ~32s）；copy-back `master[n].to(device, bf16)` 若先传 fp32 再 cast 会传 48GB 而非 24GB（~10s）。
+- **解法**：12B 全参训练别用 CPU-offload 优化器，用模型并行（#24）把优化器放 NPU。若必须 CPU-offload：`foreach=True` + 先在 CPU cast 成 bf16 再传（`master[n].to(torch.bfloat16).to(device)`）。
+
+## 27. torch_npu.profiler 无 key_averages，用 operator_details.csv 解析
+- **症状**：`prof.key_averages()` 报 `'profile' object has no attribute 'key_averages'`。
+- **根因**：torch_npu 的 profiler 实现与 CUDA 不同。
+- **解法**：`on_trace_ready=torch_npu.profiler.tensorboard_trace_handler(logdir)` 落盘，解析 `<rank>_ascend_pt/ASCEND_PROFILER_OUTPUT/operator_details.csv`（列 Name / Device Self Duration(us) / Host Total Duration 等），按 Device Self Duration 聚合找 top 算子。
+
+## 28. transformers 5.x apply_chat_template 返回 BatchEncoding 不是 list
+- **症状**：`len(tok.apply_chat_template(msgs, tokenize=True))` 返回 2（以为是 2 个 token）。
+- **根因**：transformers 5.x 返回 `BatchEncoding`（dict 含 input_ids/attention_mask），`len()` 是键数。
+- **解法**：取 `ids["input_ids"]` 再 `tolist()`（模板已处理，新代码注意）。
+
+## 29. mem_get_info 返回值语义混乱（负 free 是假象）
+- **症状**：`torch_npu.npu.mem_get_info(i)` 返回的 free 可能为负，误判卡满了。
+- **根因**：返回值语义与 CUDA 不同/含 reserved 内存，与真实可分配量不符。
+- **解法**：以**实际分配测试**为准（`torch.empty(N, device='npu:i')` 逐级试 10/30/50GB），不要依赖 mem_get_info 的 free 判断卡是否可用。
+
+## 30. 多模态模型（Gemma4Unified 等）文本 CPT 的注意点
+- **症状**：`AutoModelForCausalLM` 加载多模态模型，vision/audio 塔无梯度；FSDP2 逐层分片找错层路径。
+- **根因**：Gemma4Unified 文本塔在 `model.model.language_model`（48 层 `layers`），vision/audio 塔（`embed_vision`/`embed_audio`）很小且文本 CPT 无梯度；`lm_head.weight` 与 `embed_tokens.weight` 是 tied（同一 tensor）。
+- **解法**：文本 CPT 全参训练即可（vision/audio 塔 grad=None，AdamW 自动跳过），或 freeze `embed_vision`/`embed_audio`。FSDP2/模型并行取层路径是 `model.model.language_model.layers`，不是 `model.model.layers`。
+
+## 31. eval 阶段 fp32 加载 12B 单卡 OOM → 用 bf16 加载评估
+- **症状**：eval 时 `from_pretrained(torch_dtype=float32)` + `.to('npu')` OOM。
+- **根因**：fp32 权重 48GB + 激活超单卡 61GB。
+- **解法**：eval 用 bf16 加载（24GB）。标准 attention 模型（Gemma4 sliding/full）无纯 bf16 数值问题（pitfalls #4 仅针对线性注意力）。
+
+## 32. kill -9 后 NPU 显存残留
+- **症状**：kill -9 训练进程后立刻重跑，`model.to(device)` OOM（"2.5GB reserved, 76MB free"），但 ps 无残留进程。
+- **根因**：SIGKILL 不让进程清理 NPU 显存，driver 异步回收有延迟。
+- **解法**：kill 后 `sleep` 几秒 + `torch.npu.empty_cache()` 再重跑；或改用 SIGTERM 优雅退出。

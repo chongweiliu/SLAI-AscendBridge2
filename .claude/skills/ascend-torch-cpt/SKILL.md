@@ -17,7 +17,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
   或由 `run_env.sh` 的 `MODEL_DIR` 注入。本地没有则按需从 modelscope / hf-mirror 下载。
 - **训练数据集路径**（必填）：jsonl/json/parquet/csv 均可；`{"messages":[...]}` chat 格式或 `{"text":...}` 纯文本均自动识别转换。由 `DATA_FILE` 指定，缺失则按需下载。
 - 可选：seq_len、batch_size、步数、并行方式（单卡/DDP/FSDP2）、语料比例（如取 30%/60%）、是否评估。未指定者由技能自动择优。
-- 工作目录：默认当前目录下 `train-ws/`（无则新建），所有脚本与产物存此。
+- 工作目录：默认以 **`<模型名>-cpt/`** 命名（无则新建），所有脚本与产物统一归档于此。模型名取权重路径最后一段（如 `/mnt/model/gemma-4-12B-it` → `gemma-4-12B-it-cpt/`）。
 
 ## 默认产出（loss 曲线 + 公网链接 为默认方式）
 每次训练**默认**产出 loss 曲线图（png）并尝试上传为**外部公网可访问直链**：
@@ -35,6 +35,9 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 3. **不装 CUDA 专属核。** 昇腾上 flash-linear-attention / causal-conv1d 等 CUDA 库装不上也无用；走 torch_npu 自己的融合路径（SDPA→npu fusion、NpuFusedAdamW）或 torchair 图模式，参考 references/fusion-api.md。
 4. **每个产物都做本地预检再写库/交付。** 脚本能 `python -c "import ast; ast.parse(open(...).read())"` 过；真跑前先 `--dry-run` 或 2 步 smoke。
 5. **训练结束必须保存 ckpt。** CPT 的验收标准之一就是"训练前后对比评估"，因此训练脚本末尾必须落盘模型权重（`cpt_model_state.pt`），否则后续 PPL/acc/F1 评估无 ckpt 可用。DDP 用 `model.module.state_dict()`（每卡持全量，rank0 存即可）；FSDP2 用 `DTensor.full_tensor()` 聚合（见 references/pitfalls.md #20，否则只存到 1/N 分片）。
+6. **必须用昇腾 NPU 训练，禁止回退 CPU。** 继续预训练默认且只能跑在 Ascend NPU 上（`torch_npu`），不允许静默回退到 CPU 训练（如 `device='cpu'` 或 `torch.device('cpu')`）。若因算子缺失/环境异常确实必须回退 CPU，**必须先向用户说明原因并征得确认**后再进行。
+7. **后台长跑要有心跳输出。** 后台运行的脚本（训练/评估/下载）最长 **2–3 分钟**必须向 stdout 打印一次进度信息（step/loss/用时或"仍在运行"心跳），`print(..., flush=True)`，让人感知任务还在跑。不要在步数很少时才打印——打印间隔要按**时间**折算（如 50s/step 时每 2–3 步打一次），保证屏幕 ≤2–3 分钟必有输出。
+8. **所有产物统一归档到 `<模型名>-cpt/` 子目录。** 训练/评估全过程的脚本、代码、README、ckpt 权重、loss 曲线、日志、summary 等全部放进以"模型名-cpt"命名的子目录（见「产物目录约定」），不散落到仓库根目录或其他位置。
 
 ## 工作流（9 阶段，每阶段都要在屏幕实时更新用时表）
 
@@ -44,7 +47,8 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 
 ### 阶段 1 · 环境/依赖勘察
 探测并记录（写进 `train-ws/env_probe.json`）：
-- NPU：卡数、每卡显存（`torch.npu.mem_get_info(i)`）、CANN 版本、`npu-smi`/`/dev/davinci*`。
+- NPU：卡数、每卡显存（**以实际分配测试为准**，`mem_get_info` 的 free 可能为负，见 pitfalls #29）、CANN 版本、`npu-smi`/`/dev/davinci*`。
+- **卡间互联**：`hccn_tool -i <devid> -ip -g` 看是否配了 RoCE IP（报 "no ip was preset" = 只能走慢速 PCIe，见 pitfalls #23）；**真实 CPU 核数**用 `nproc --all`/`os.cpu_count()`（`nproc` 会受 OMP_NUM_THREADS 误导，见 pitfalls #22）。
 - torch / torch_npu / transformers 版本；解释器路径。
 - CANN env：`source /usr/local/Ascend/ascend-toolkit/set_env.sh`。
 - 必设环境变量：`TORCH_DEVICE_BACKEND_AUTOLOAD=0`（规避 torch_npu autoload 崩，手动 import）、`TASK_QUEUE_ENABLE=1`（异步算子下发）、`PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`（减碎片，给融合优化器留空间）。
@@ -68,22 +72,25 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - 用 `scripts/prepare_data.py.tmpl`。**务必打印**：总样本/子集样本/总 token/原始块数/训练块数/epoch 估计。
 
 ### 阶段 4 · 训练方式自动选型
-按 `references/parallel-strategy.md` 的决策树，据**模型参数量**、**单卡显存**、**语料规模**、**用户要求**选：
+按 `references/parallel-strategy.md` 的决策树，据**卡间互联速度**、**模型参数量**、**单卡显存**、**语料规模**、**用户要求**选。**先探测卡间互联**（`hccn_tool -i <devid> -ip -g` 是否配 RoCE IP）：
 
 ```
-单卡能装下整套(权重+优化器状态+激活)？
-├─ 能 → 想多卡提速？
-│      ├─ 是且步数够多(>~150) → DDP（每卡持完整参数/梯度/优化器，hccl 后端）
-│      └─ 否/步数极少 → 单卡 Eager
-└─ 不能 → 模型多大？
-       ├─ 中等(靠多卡分片可装) → FSDP2（fully_shard，参数/梯度/优化器分片）
-       └─ 超大 → FSDP2 + CPU offload / 流水/张量并行
+卡间互联慢（RoCE 未配 / PCIe ~GB/s）？
+├─ 是 → 大模型(单卡装不下) → 【模型并行 device_map="auto"】拆层到多卡，
+│       无 all-gather，优化器放 NPU（实测 8× 加速，见 parallel-strategy.md「模型并行」）
+└─ 否（互联正常）→ 常规决策树：
+    单卡能装下整套(权重+优化器状态+激活)？
+    ├─ 能 → 想多卡提速？
+    │      ├─ 是且步数够多(>~150) → DDP（每卡持完整参数/梯度/优化器，hccl 后端）
+    │      └─ 否/步数极少 → 单卡 Eager
+    └─ 不能 → FSDP2（fully_shard，参数/梯度/优化器分片）
 ```
 
 经验阈值（单张 ~65GB 卡，bf16 权重+fp32 AdamW 状态，近似）：
 - 权重占单卡 ≤ ~40% 显存 → 单卡；想提速走 DDP。
-- 0.5–3B 常单卡或 DDP；7–14B 单卡勉强→DDP 或 FSDP2；≥30B → FSDP2。
+- 0.5–3B 常单卡或 DDP；7–14B 单卡勉强→DDP 或 FSDP2/模型并行；≥30B → FSDP2 或模型并行。
 - **步数 < ~150 且用图模式不划算**（torchair 首图编译 ~15min 摊销不了）→ 走 Eager+融合优化器。
+- **卡间互联慢时大模型别用 FSDP2**：其 all-gather/reduce-scatter 会通信-bound（实测 97% 时间在通信），改模型并行。
 
 ### 阶段 5 · 超参自动择优（`references/hyperparam-selection.md`）
 - **precision**：fp32 主权重 + bf16 autocast（NPU 原生 bf16，数值稳）。**不要**纯 bf16 前向（混合线性注意力模型会数值崩，见 pitfalls.md）。
@@ -98,7 +105,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 ### 阶段 6 · 生成训练脚本并 smoke
 - 按选型用 `scripts/cpt_train.py.tmpl`（**单卡 + DDP 自动检测**，由 RANK env 决定）/ `cpt_fsdp.py.tmpl`（FSDP2）。单卡 `python cpt_train.py`；DDP `bash launch_ddp.sh`（torchrun）。
 - 模板通用化：`AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 references/multimodal-remap.md。
-- 模板已支持断点续训（`RESUME=1`/`SAVE_EVERY=N`）与梯度累积（`GRAD_ACCUM=N`），见 references/resume.md。
+- 模板已支持断点续训（`RESUME=1` 开关，默认关闭）与梯度累积（`GRAD_ACCUM=N`），见 references/resume.md。
 - **smoke**：2 步、2 卡（DDP）或单卡，确认前向+反向+优化器 step 都通过、loss 合理（初始 ~模型典型值）再上正式。
 - 踩坑先看 references/pitfalls.md（已在脚本模板里规避了多数）。
 
@@ -106,11 +113,12 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 
 ### 阶段 7 · 正式训练 + loss 曲线 + 公网直链
 - 逐 step 记录 `step, loss, lr, elapsed, s/step, tok/s` 到 `logs/step_loss.jsonl` + stdout。
+- **心跳输出**：`print(..., flush=True)` 的间隔按**时间**折算（见核心原则 7），保证屏幕 ≤2–3 分钟必有输出（如 50s/step 时每 2–3 步打一次，而非固定每 5 步）。
 - 训完出 `train_summary.json`。
 - **保存 CPT ckpt**（`cpt_model_state.pt`）供阶段 8 评估用（见核心原则 5；FSDP2 用 full_tensor 聚合）。
-- **保存 resume ckpt**（`ckpt_latest.pt`：模型+优化器+step，`SAVE_EVERY=N` 周期存 + 训练结束存），供中断续训（见 `references/resume.md`）。
+- **保存 resume ckpt**（`ckpt_latest.pt`：模型+优化器+step）。断点续训开关 `RESUME=1` **默认关闭**；开启后按**时间基准**周期保存（间隔 `= max(15分钟, 预估总时长/5)`，训练期间 **≤5 次**、每次间隔 **≥15 分钟**），训练结束**总是**存一次最终 ckpt（见 `references/resume.md`）。
 - 画 loss 曲线 png（`scripts/plot_loss.py.tmpl`，matplotlib，EMA 平滑），**尝试上传公网直链**：catbox.moe → 0x0.st → uguu.se（按可达性依次试；catbox/0x0 常不可用，uguu.se 通常可用）。校验链接 HTTP 200 后告知用户。外网全不通则用表格展示 loss 收敛。
-- 所有产物存到用户指定目录（默认当前工作目录 `train-ws/`）。
+- 所有产物存到 `<模型名>-cpt/` 子目录（见核心原则 8 与「产物目录约定」）。
 
 ### 阶段 8 · 训练前后域内评估
 - 用 `scripts/eval_cpt.py.tmpl`：取 held-out 样本，对 **base** 与 **CPT** 两套算：
@@ -132,18 +140,23 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 |---|---|
 | 小模型(<3B) + 单卡装下 | 单卡 Eager + NpuFusedAdamW + SDPA |
 | 小/中模型 + 想提速 + 步数>150 | DDP(每卡完整参数) + NpuFusedAdamW + hccl |
-| 大模型(单卡装不下优化器状态) | FSDP2(fully_shard) |
+| 大模型(单卡装不下优化器状态) + 互联正常 | FSDP2(fully_shard) |
+| 大模型 + **卡间互联慢**(RoCE 未配/PCIe ~GB/s) | **模型并行 device_map="auto"**（fp32 权重，无 all-gather，8× 加速） |
 | 短训练(<150步) | 不要图模式，Eager+融合优化器 |
 | 长训练/推理 + 想极致融合 | torchair 图模式（见 references/fusion-api.md，含 converter 补全清单） |
 
 ## 产物目录约定
 
+所有产物统一归档到 **`<模型名>-cpt/`** 子目录（如 `gemma-4-12B-it-cpt/`），不散落到仓库根目录。
+
 ```
-train-ws/
+<模型名>-cpt/
 ├── run_env.sh              # NPU 环境入口
 ├── env_probe.json          # 软硬探测结果
 ├── prepare_data.py         # 语料转换打包
-├── cpt_train.py            # 训练(单卡/DDP/FSDP2 按选型)
+├── cpt_train.py            # 训练(单卡/DDP 按选型)
+├── cpt_mp.py               # 训练(模型并行 device_map，卡间互联慢时)
+├── cpt_fsdp.py             # 训练(FSDP2)
 ├── launch_ddp.sh           # DDP 启动(torchrun)
 ├── eval_cpt.py             # 前后评估
 ├── plot_loss.py            # 曲线+上传
@@ -161,7 +174,7 @@ train-ws/
 ## references（按需读）
 - `references/fusion-api.md` — torch_npu 融合 API 清单 + torchair 图模式 + 缺失 converter 补全（softplus/eye/softplus_backward 等）
 - `references/pitfalls.md` — 踩坑清单与解法（必读，避免重犯）
-- `references/parallel-strategy.md` — 单卡/DDP/FSDP2 选型与代码骨架
+- `references/parallel-strategy.md` — 单卡/DDP/FSDP2/**模型并行(device_map)** 选型与代码骨架 + 卡间互联探测
 - `references/hyperparam-selection.md` — 超参自动择优 + OOM 回退阶梯 + 梯度累积
 - `references/data-prep.md` — 数据预处理边界（去重/分块/混合/packing vs padding/tokenizer）
 - `references/resume.md` — 断点续训（存/载 optimizer+step+sampler）

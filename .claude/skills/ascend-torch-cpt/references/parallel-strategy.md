@@ -1,13 +1,25 @@
-# 并行策略选型（单卡 / DDP / FSDP2）
+# 并行策略选型（单卡 / DDP / FSDP2 / 模型并行）
 
-## 决策树
+## 决策树（**先探测卡间互联速度**，见下「卡间互联探测」）
 ```
-单卡能装下整套(权重+优化器状态+激活)？
-├─ 能 → 想多卡提速 且 步数>~150？
-│      ├─ 是 → DDP（每卡持完整参数/梯度/优化器）
-│      └─ 否 → 单卡 Eager + NpuFusedAdamW + SDPA
-└─ 不能 → FSDP2（参数/梯度/优化器分片，fully_shard）
+先查卡间互联：hccn_tool -i <devid> -ip -g 是否配了 RoCE IP？带宽是否 ≥25GB/s？
+├─ 否（RoCE 未配 / PCIe ~2GB/s，互联慢）→ 大模型直接走【模型并行 device_map】(#24)，
+│      不要用 FSDP2（其 all-gather/reduce-scatter 会通信-bound，实测慢 8×）
+└─ 是（互联正常）→ 按下面常规决策树：
+    单卡能装下整套(权重+优化器状态+激活)？
+    ├─ 能 → 想多卡提速 且 步数>~150？
+    │      ├─ 是 → DDP（每卡持完整参数/梯度/优化器）
+    │      └─ 否 → 单卡 Eager + NpuFusedAdamW + SDPA
+    └─ 不能 → FSDP2（参数/梯度/优化器分片，fully_shard）
 ```
+
+## 卡间互联探测（选型前必做）
+```bash
+# 是否配了 RoCE IP（没配 = 只能走慢速 PCIe）
+/usr/local/Ascend/driver/tools/hccn_tool -i <devid> -ip -g
+# 报 "no ip was preset" → 互联慢，大模型优先模型并行而非 FSDP2
+```
+- 定量确认：跑 2 步训练 + torch_npu.profiler，看 `operator_details.csv` 里 `HcclAllGather`+`HcclReduceScatter` 占比。>50% 说明通信-bound，改模型并行。
 
 ## 选型表（单张 ~65GB NPU，bf16 权重 + fp32 AdamW 状态，近似）
 
@@ -84,6 +96,36 @@ optim = torch.optim.AdamW(model.parameters(), lr=LR, betas=(0.9,0.95), weight_de
 | 30B | 30B | — | ~60GB | FSDP2 8卡临界 |
 
 规则：`params × 16 / N ≤ 单卡 free × 0.85` 才够。
+
+## 模型并行（device_map="auto"，卡间互联慢时首选）
+当卡间 RoCE 未配、HCCL 走慢速 PCIe 时，FSDP2 的 all-gather/reduce-scatter 会通信-bound（实测 12B/4卡 50s/step）。模型并行把层拆到多卡、参数各归其卡、无 all-gather，优化器放 NPU，实测降到 ~5.5s/step（8.3×）。
+
+**代码骨架（单进程即可，无需 torchrun）**
+```python
+import torch, torch_npu  # noqa: F401
+from transformers import AutoModelForCausalLM
+
+# 关键：必须 fp32（bf16 权重 + 小 lr 会被精度吞掉，见 pitfalls #25）
+model = AutoModelForCausalLM.from_pretrained(
+    MODEL, torch_dtype=torch.float32, trust_remote_code=True,
+    low_cpu_mem_usage=True, device_map="auto")   # 自动拆到可见的所有 NPU 卡
+model.train(); model.config.use_cache = False
+model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+
+optim = torch.optim.AdamW(model.parameters(), lr=LR, betas=(0.9, 0.95), weight_decay=WD)  # 默认 foreach=False
+# 训练循环：输入放 model.device（embed 所在卡），其余同单卡
+batch = x[bidx].to(model.device); attn = torch.ones_like(batch)
+loss = model(input_ids=batch, attention_mask=attn, labels=batch).loss
+loss.backward(); torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+optim.step(); optim.zero_grad(set_to_none=False)
+# 保存：model.named_parameters() 已含各卡权重，直接 .cpu().to(bf16) 存
+```
+
+关键：
+- `.to(device)` 可微分，autograd 自动跨卡回传梯度，无需手写 P2P/`dist.send`。
+- 显存预算：`params × 16 / N`（fp32 参数 4 + m 4 + v 4 + grad 4，共 16 字节/参数）。12B/4卡 ≈ 48GB/卡，装得下。
+- 模型拆分配由 device_map 自动按字节均衡；embed（首卡）与 lm_head（末卡）tied 时，多模态模型需注意（见 pitfalls #30）。
+- 评估时用 bf16 单卡加载（fp32 会 OOM，见 pitfalls #31）。
 
 ## 多卡选空闲卡
 无 `npu-smi` 时，用 `torch.npu.mem_get_info(i)` 逐卡查 free 显存，选空闲卡。

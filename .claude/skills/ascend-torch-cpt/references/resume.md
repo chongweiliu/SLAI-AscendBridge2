@@ -2,9 +2,25 @@
 
 长 CPT 中断后从断点继续，避免从头重训。需保存/恢复 4 样东西：**模型权重 + 优化器状态(m,v) + step 计数 + lr schedule 进度 + DistributedSampler epoch**。
 
-## 何时存
-- 每 N 步存一次（如每 50/100 步），或按用户要求。
-- 训练正常结束时也存（=最后一次 checkpoint）。
+## 何时存（断点续训开关默认关闭）
+- **断点续训开关 `RESUME=1` 默认关闭**（`RESUME=0`）。只有明确要断点续训时才开启周期保存。
+- 开启后**按时间基准**周期保存（不是固定步数）：保存间隔 `= max(15 分钟, 预估总时长/5)`，保证训练期间**最多 5 次**、**每次间隔 ≥15 分钟**。预估总时长 `= NUM_STEPS × EST_STEP_S`（`EST_STEP_S` 预估每步秒数，默认 10s）。
+- 训练正常结束时**总是**存一次最终 ckpt（与开关无关，供评估与后续续训）。
+
+## 周期保存规则（实现）
+```python
+RESUME = os.environ.get("RESUME", "0") == "1"          # 总开关，默认关闭
+EST_STEP_S = float(os.environ.get("EST_STEP_S", "10")) # 预估每步秒数
+CKPT_MIN_INTERVAL_S = float(os.environ.get("CKPT_MIN_INTERVAL_S", "900"))  # 最小间隔 15min
+CKPT_MAX_SAVES = int(os.environ.get("CKPT_MAX_SAVES", "5"))                # 最多保存次数
+_save_interval_s = max(CKPT_MIN_INTERVAL_S, NUM_STEPS * EST_STEP_S / CKPT_MAX_SAVES)
+# 循环里（时间基准，非固定步数；最后一步交给结束保存，避免重复）：
+last_save_t = t0
+for step in range(...):
+    ...
+    if RESUME and (time.time() - last_save_t >= _save_interval_s) and step < NUM_STEPS - 1:
+        _save_ckpt(step + 1); last_save_t = time.time()
+```
 
 ## 存什么
 ```python
