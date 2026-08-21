@@ -223,3 +223,13 @@ sys.meta_path.insert(0, _StubFinder())
 - **症状**：`source /usr/local/Ascend/ascend-toolkit/set_env.sh` 报 `No such file or directory`；或该机器 `LD_LIBRARY_PATH`/`ASCEND_TOOLKIT_HOME` 已在 base profile 注入，根本不需要 source。
 - **根因**：不同镜像 CANN 安装路径不同（有的是 `ascend-toolkit/set_env.sh`，有的只有 `driver/`，有的 env 已在 `/etc/profile` 注入）。
 - **解法**：`run_env.sh` 里对 `set_env.sh` 做 `[ -f ]` 条件 source，不存在则跳过（env_probe 阶段先 `python -c "import torch_npu; print(torch.npu.is_available())"` 验证 env 是否已就绪）。不要硬 source。
+
+## 42. FSDP2 `getattr(model.model,'layers',model.transformer.h)` 默认参数立即求值致崩
+- **症状**：FSDP2 切层时报 `AttributeError: 'XForCausalLM' object has no attribute 'transformer'`（在 `layers=getattr(model.model,'layers',model.transformer.h)` 行），即使 `model.model.layers` 实际存在。
+- **根因**：Python 调用 `getattr(obj, name, default)` 时**默认参数 `default` 会被立即求值**（先于 getattr 执行）。`model.transformer.h` 在无 `.transformer` 的模型（Qwen3.5/Llama 等多数现代模型）上当场抛 AttributeError，根本到不了 getattr 返回 `model.model.layers`。
+- **解法**：不用单行 getattr+默认值。两步安全取：`inner=getattr(model,'model',None) or getattr(model,'transformer',None); layers=getattr(inner,'layers',None) or getattr(inner,'h',None)`。`cpt_fsdp.py.tmpl` 已修。
+
+## 43. 调试期多次崩溃致 NPU driver 内部错误（ErrCode 507899 / drvRetCode=42）
+- **症状**：训练首步 `aclnnInplaceCopy failed, error code 207001` / `halMemAlloc failed ... drvRetCode=42 ... driver error:internal error ErrCode=507899`，**每次崩在不同卡**，但 `npu-smi` 显示各卡显存基本空闲（~3GB driver）、无残留进程。
+- **根因**：不是显存容量 OOM，而是前面多次异常退出（如 AttributeError 崩、SIGTERM）的进程把 NPU **driver 搞到不健康状态**（driver 内部状态/资源未完全回收）。单卡简单算子（matmul）可能仍正常，但 FSDP2 首步 all-gather/copy 触发 driver 内部错误。
+- **解法**：`pkill -9` 清残留进程 → `sleep 25~60s` 等 driver 自愈 → 单卡 `torch.empty(40GB)` 或 matmul 实测确认 driver 健康 → 再重试。若仍不行需 driver reset（`npu-smi set -l` 或重启，需 root）。预防：smoke 前先修语法/逻辑错误（别让进程反复崩在 NPU 已分配后）。

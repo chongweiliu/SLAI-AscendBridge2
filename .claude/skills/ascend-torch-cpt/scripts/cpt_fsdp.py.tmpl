@@ -23,6 +23,7 @@ EST_STEP_S=float(os.environ.get("EST_STEP_S","10"))   # 预估每步秒数（估
 CKPT_MIN_INTERVAL_S=float(os.environ.get("CKPT_MIN_INTERVAL_S","900"))  # 周期保存最小间隔(s)，默认15min
 CKPT_MAX_SAVES=int(os.environ.get("CKPT_MAX_SAVES","5"))                # 训练期间最多保存次数
 SEED=int(os.environ.get("SEED","42")); REMAP=os.environ.get("REMAP","0")=="1"
+CPT_BASE_CKPT=os.environ.get("CPT_BASE_CKPT","")  # 第二轮CPT: base=上一轮cpt_model_state.pt(已是文本头, 无需remap)
 LOG=os.path.join(WS_DIR,'logs'); OUT=os.path.join(WS_DIR,'outputs')
 os.makedirs(LOG,exist_ok=True); os.makedirs(OUT,exist_ok=True)
 
@@ -34,6 +35,11 @@ def load_model():
     if REMAP:
         # 多模态→文本头重映射（见 references/multimodal-remap.md）
         raise SystemExit("REMAP=1：按 references/multimodal-remap.md 在 load_model 填文本头类+键重映射")
+    if CPT_BASE_CKPT:
+        # 第二轮CPT: base=上一轮 cpt_model_state.pt(已是文本头 bf16 state_dict, 无需remap)
+        # 填实际文本头类(如 Qwen3_5ForCausalLM), 用 text_config 构建 + load_state_dict(ckpt, strict=False)
+        raise SystemExit("CPT_BASE_CKPT 已设: 构建文本头类(AutoConfig.from_pretrained(MODEL_DIR).text_config) "
+                         "+ model.load_state_dict(torch.load(CPT_BASE_CKPT,'cpu'), strict=False); tie=False时lm_head已在ckpt内(miss_lm_head=0)")
     model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, torch_dtype=torch.float32, trust_remote_code=True)
     model.train(); model.config.use_cache=False
     try: model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
@@ -44,9 +50,10 @@ def main():
     r,w,lr=setup(); dev=f"npu:{lr}"
     model=load_model()
     P=sum(p.numel() for p in model.parameters())
-    # FSDP2 逐层切分
+    # FSDP2 逐层切分; 注意 getattr 默认参数会被立即求值, 不能写 model.transformer.h(无 .transformer 时崩, pitfalls #37)
     mp=MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16)
-    layers=getattr(model.model,'layers',model.transformer.h)  # 据架构取 transformer 层
+    inner=getattr(model,'model',None) or getattr(model,'transformer',None)
+    layers=getattr(inner,'layers',None) or getattr(inner,'h',None)
     for layer in layers: fully_shard(layer, mp_policy=mp, reshard_after_forward=True)
     fully_shard(model, mp_policy=mp, reshard_after_forward=True)
     optim=torch.optim.AdamW(model.parameters(), lr=LR, betas=(0.9,0.95), weight_decay=WD, eps=1e-8)

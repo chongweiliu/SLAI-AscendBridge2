@@ -115,6 +115,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - 按选型用 `scripts/cpt_train.py.tmpl`（**单卡 + DDP 自动检测**，由 RANK env 决定）/ `cpt_fsdp.py.tmpl`（FSDP2）。单卡 `python cpt_train.py`；DDP `bash launch_ddp.sh`（torchrun）。
 - 模板通用化：`AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 references/multimodal-remap.md。
 - 模板已支持断点续训（`RESUME=1` 开关，默认关闭）与梯度累积（`GRAD_ACCUM=N`），见 references/resume.md。
+- **第二轮 CPT（base=上一轮 `cpt_model_state.pt`）**：设 `CPT_BASE_CKPT=<上一轮ckpt路径>`。上一轮 ckpt 已是文本头 state_dict，**无需多模态 remap**——按 `load_model` 的 `CPT_BASE_CKPT` 分支：用 `text_config` 构建文本头类 + `load_state_dict(ckpt, strict=False)`（`tie=False` 时 `lm_head` 已在 ckpt，`miss_lm_head=0`）。
 - **smoke**：2 步、2 卡（DDP）或单卡，确认前向+反向+优化器 step 都通过、loss 合理（初始 ~模型典型值）再上正式。
 - **smoke 的 s/step 不可直接外推正式训练用时**：smoke 的 `s/step = 累计耗时/(step+1)` 把首次 import(~90s)+多卡加载模型+FSDP2/DDP 初始化全摊进前几步，前几步 s/step 虚高。预估正式训练取正式 run 稳态步的 s/step（累计平均越往后越准），或 `总耗时/NUM_STEPS`。
 - 踩坑先看 references/pitfalls.md（已在脚本模板里规避了多数）。
