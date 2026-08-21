@@ -9,8 +9,23 @@ import matplotlib.pyplot as plt
 
 WS_DIR=os.environ["WS_DIR"]; LOG_DIR=os.path.join(WS_DIR,"logs"); OUT=os.path.join(WS_DIR,"outputs")
 DDP=os.environ.get("PLOT_DDP","0")=="1"
-LOG=os.path.join(LOG_DIR,"step_loss_ddp.jsonl") if DDP else os.path.join(LOG_DIR,"step_loss.jsonl")
-PNG=os.path.join(OUT,"loss_curve_ddp.png" if DDP else "loss_curve.png")
+# 自动探测日志文件: 单卡 step_loss.jsonl / DDP step_loss_ddp.jsonl / FSDP2 step_loss_fsdp.jsonl
+# 避免 FSDP2 写 _fsdp 但模板只认 _ddp/无后缀导致 FileNotFoundError(需手动 cp/symlink)
+_CANDIDATES=[("ddp","step_loss_ddp.jsonl","loss_curve_ddp.png"),
+             ("fsdp","step_loss_fsdp.jsonl","loss_curve_fsdp.png"),
+             ("single","step_loss.jsonl","loss_curve.png")]
+LOG=PNG=None
+if DDP:
+    LOG=os.path.join(LOG_DIR,"step_loss_ddp.jsonl"); PNG=os.path.join(OUT,"loss_curve_ddp.png")
+for _tag,_lf,_pf in _CANDIDATES:
+    p=os.path.join(LOG_DIR,_lf)
+    if LOG is None or (not os.path.exists(LOG) and os.path.exists(p)):
+        LOG=p; PNG=os.path.join(OUT,_pf)
+if LOG is None or not os.path.exists(LOG):
+    # fallback: 取 logs 下任意 step_loss*.jsonl
+    import glob
+    gs=sorted(glob.glob(os.path.join(LOG_DIR,"step_loss*.jsonl")))
+    if gs: LOG=gs[0]; PNG=os.path.join(OUT,"loss_curve.png")
 
 def ema(xs,a=0.3):
     e=xs[0]; out=[]

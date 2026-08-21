@@ -54,7 +54,7 @@ def fmt(s):
     if s is None:
         return "—"
     if s < 60:
-        return f"{s:.1f}min" if s >= 1 else f"{int(s*60)}s"
+        return f"{s:.0f}s"
     return f"{s/60:.1f}min"
 
 

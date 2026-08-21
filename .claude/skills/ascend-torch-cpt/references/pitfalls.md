@@ -167,4 +167,23 @@ if r == 0:
 ## 32. kill -9 后 NPU 显存残留
 - **症状**：kill -9 训练进程后立刻重跑，`model.to(device)` OOM（"2.5GB reserved, 76MB free"），但 ps 无残留进程。
 - **根因**：SIGKILL 不让进程清理 NPU 显存，driver 异步回收有延迟。
-- **解法**：kill 后 `sleep` 几秒 + `torch.npu.empty_cache()` 再重跑；或改用 SIGTERM 优雅退出。
+- **解法**：kill 后 `sleep` 几秒 + `torch.npu.empty_cache()` 再重跑；或改用 SIGTERM 优雅退出。**正常退出的多卡训练也复现**：8 卡 FSDP2 `rc=0` 退出后数秒内跑单卡评估仍 OOM（card 仅剩几百 MB free，无残留进程），driver 回收延迟同样存在——多卡训练后跑单卡评估前先 `npu-smi` 确认卡空闲（或 `torch.empty(40GB, device='npu:0')` 实测）再开评估。
+
+## 33. prepare_data 多卡未设 WORLD_SIZE → 训练内循环重复采样
+- **症状**：DDP/FSDP2 N 卡训练，`prepare_data` 只产出 `NUM_STEPS×BATCH_SIZE×1` 块（远少于 `×N`），DistributedSampler 把少量块分到 N 卡、每卡仅 1/N 块，`step%nb` 在 200 步内循环 N× 重复采样同一批。
+- **根因**：`prepare_data.py` 的 `WORLD_SIZE` 默认 1；`run_env.sh` 历史上不导出它。多卡场景 need 算少。
+- **解法**：多卡训练前 `export WORLD_SIZE=N` 再跑 `prepare_data`（`run_env.sh.tmpl` 已加 `WORLD_SIZE=${WORLD_SIZE:-1}` 旋钮）。脚本在 `WORLD_SIZE==1` 时打印 hint 提醒。单卡不受影响。
+
+## 34. FSDP2 日志名 `step_loss_fsdp.jsonl` 与 plot 模板不匹配
+- **症状**：`plot_loss.py` 报 `step_loss.jsonl`/`step_loss_ddp.jsonl` No such file，因为 FSDP2 训练写 `step_loss_fsdp.jsonl`，而 plot 模板只认无后缀或 `_ddp`。
+- **解法**：`plot_loss.py.tmpl` 已改为自动探测（依次试 `_ddp`/`_fsdp`/无后缀 + glob 兜底），无需手动 cp/symlink。注意：若手动建符号链接，`ln -sf` 目标相对路径以**链接所在目录**解析，写成 `ln -sf logs/step_loss_fsdp.jsonl logs/step_loss.jsonl` 会指向 `logs/logs/...`（dangling）；要么用 `cp`，要么目标写文件名 `ln -sf step_loss_fsdp.jsonl logs/step_loss.jsonl`。
+
+## 35. smoke 的 s/step 严重高估正式训练用时
+- **症状**：2 步 smoke 显示 26s/step，据此估 200 步需 ~90min；实际正式跑稳态 3s/step，200 步仅 10min。
+- **根因**：`s/step = 累计耗时/(step+1)` 把首次 import(~90s)+多卡加载模型+FSDP2/DDP 初始化全摊进前几步，步数少时 s/step 虚高；步数多了初始化被摊薄。
+- **解法**：smoke 的 s/step **不可直接外推**正式训练用时。预估取正式 run 稳态步（累计平均越往后越准），或 `总耗时/NUM_STEPS`；用时表阶段 7 预估等正式 run 跑出稳态后再回填校准。
+
+## 36. 多模态 tie=False 模型重映射须保留 lm_head.weight
+- **症状**：照搬 tie=True 模型（如 0.8B）的重映射逻辑（依赖 `tie_weights()` 补 lm_head），到 tie=False 模型（如 9B）时 lm_head 真缺失 → 输出层随机，loss/评估异常。
+- **根因**：同族不同规格模型 tie 配置不同；tie=False 时 lm_head 是 ckpt 里独立的顶层张量。
+- **解法**：重映射前 `cat config.json` 看 `tie_word_embeddings`。tie=False 时**保留** ckpt 顶层 `lm_head.weight`（不 strip、不 drop），验证 `miss_lm_head=0`；tie=True 时 lm_head 缺失正常，调 `model.tie_weights()`。多模态 remap 见 references/multimodal-remap.md。

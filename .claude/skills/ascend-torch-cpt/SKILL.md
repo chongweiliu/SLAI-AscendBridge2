@@ -74,6 +74,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - 打包成 `seq_len` 的定长块（`input_ids.pt`，shape `[N, seq_len]`）。不足步数需求则循环重采样补齐（记录 epoch 数）。
 - 数据预处理边界（去重/长文档分块/多语料混合/packing vs padding/tokenizer）见 `references/data-prep.md`。
 - 用 `scripts/prepare_data.py.tmpl`。**务必打印**：总样本/子集样本/总 token/原始块数/训练块数/epoch 估计。
+- **多卡必设 `WORLD_SIZE=N`**：`need = NUM_STEPS × BATCH_SIZE × WORLD_SIZE`，`prepare_data` 据此生成块数。若多卡训练却留 `WORLD_SIZE=1`（默认），need 会算少 → 每卡仅 1/N 块 → 训练内循环重复采样（见 pitfalls）。单卡不用设。
 
 ### 阶段 4 · 训练方式自动选型
 按 `references/parallel-strategy.md` 的决策树，据**卡间互联速度**、**模型参数量**、**单卡显存**、**语料规模**、**用户要求**选。**先探测卡间互联**（`hccn_tool -i <devid> -ip -g` 是否配 RoCE IP）：
@@ -111,6 +112,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - 模板通用化：`AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 references/multimodal-remap.md。
 - 模板已支持断点续训（`RESUME=1` 开关，默认关闭）与梯度累积（`GRAD_ACCUM=N`），见 references/resume.md。
 - **smoke**：2 步、2 卡（DDP）或单卡，确认前向+反向+优化器 step 都通过、loss 合理（初始 ~模型典型值）再上正式。
+- **smoke 的 s/step 不可直接外推正式训练用时**：smoke 的 `s/step = 累计耗时/(step+1)` 把首次 import(~90s)+多卡加载模型+FSDP2/DDP 初始化全摊进前几步，前几步 s/step 虚高。预估正式训练取正式 run 稳态步的 s/step（累计平均越往后越准），或 `总耗时/NUM_STEPS`。
 - 踩坑先看 references/pitfalls.md（已在脚本模板里规避了多数）。
 
 > **范围声明**：本 skill 覆盖**单机多卡**（1–8 卡）。**多机（multi-node）** CPT 需 `torchrun --nnodes` + RDMA/网络配置（HCCL 跨机），属另一层复杂度，本 skill 不含；如需多机，在单机跑通后另加 `--nnodes`/`--rdzv` 与 HCCL 网络配置。
@@ -134,6 +136,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - **NLL 公式务必取负**：`nll = -log_probs.gather(...).mean()`（漏取负会得负值，见 pitfalls.md）。
 - 出 `eval_results.json` + 结论表，给"训练是否有效"结论（Δ 方向 + 是否过拟合）。
 - **FSDP2 大模型评估**：ckpt 是 `full_tensor()` 聚合的全量 state_dict，单卡直接 `load_state_dict` 即可（评估不需 FSDP2/DDP）。base 多模态走 remap。完整 9B FSDP2 实战案例（含结果表 + 与 0.8B 对比）见 `references/eval-metrics.md`。
+- **多卡训练后别立刻跑单卡评估**：8 卡 FSDP2/DDP 训练退出后 NPU driver **异步回收显存有延迟**（pitfalls #32），立刻 `model.to(npu)` 易 OOM（card 仅剩几百 MB free 但无残留进程）。训练退出后等几秒、`npu-smi` 确认卡空闲（或 `torch.empty(40GB)` 实测可分配）再跑评估；评估脚本载入前先 `torch.npu.empty_cache()`。
 - **ckpt 转 HF 可复用目录**（可选）：若用户想用 `from_pretrained` 直接加载 CPT 模型做推理/当新 base，把 `cpt_model_state.pt` 存成 HF 目录（拷 config.json+tokenizer 到 `outputs/cpt_hf_model/` + 存权重为 `model.safetensors`）。否则评估用 `load_state_dict` 即可。
 
 ### 阶段 9 · 概要总结报告
