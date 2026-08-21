@@ -1,0 +1,125 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# timing_table.py.tmpl — 全程用时表渲染器（读 outputs/timing.json，打印 Markdown 表）
+# 由 agent 在每阶段完成 / 训练心跳 / 评估切换时调用，在屏幕实时刷新用时进度。
+# 用法: $PYTHON timing_table.py            # 读 timing.json 打印表
+#       $PYTHON timing_table.py --set 7 actual 175 "100步完成"      # 记实际用时+置done+说明
+#       $PYTHON timing_table.py --set 7 est 360 ""                  # 设该阶段预计用时
+#       $PYTHON timing_table.py --overall 1320 "~22min"               # 更新整体预估
+#       $PYTHON timing_table.py --doing 7 "50/100步 ETA1.5min"         # 标记进行中+说明
+import os, json, sys
+
+WS_DIR = os.environ.get("WS_DIR", os.getcwd())
+TFILE = os.path.join(WS_DIR, "outputs", "timing.json")
+
+# 9 阶段默认骨架（预计值仅为占位，agent 据实填）
+DEFAULT = {
+    "overall_estimate_s": None,
+    "overall_note": "",
+    "phases": [
+        {"id": 0, "name": "意图确认与路径核对", "est_s": None, "actual_s": None, "status": "pending", "note": ""},
+        {"id": 1, "name": "环境/依赖勘察", "est_s": None, "actual_s": None, "status": "pending", "note": ""},
+        {"id": 2, "name": "模型与数据集获取", "est_s": None, "actual_s": None, "status": "pending", "note": ""},
+        {"id": 3, "name": "语料格式转换与打包", "est_s": None, "actual_s": None, "status": "pending", "note": ""},
+        {"id": 4, "name": "训练方式选型", "est_s": None, "actual_s": None, "status": "pending", "note": ""},
+        {"id": 5, "name": "超参自动择优", "est_s": None, "actual_s": None, "status": "pending", "note": ""},
+        {"id": 6, "name": "生成脚本并smoke", "est_s": None, "actual_s": None, "status": "pending", "note": ""},
+        {"id": 7, "name": "正式训练+曲线", "est_s": None, "actual_s": None, "status": "pending", "note": ""},
+        {"id": 8, "name": "训练前后评估", "est_s": None, "actual_s": None, "status": "pending", "note": ""},
+        {"id": 9, "name": "概要总结报告", "est_s": None, "actual_s": None, "status": "pending", "note": ""},
+    ],
+}
+
+
+def load():
+    if os.path.exists(TFILE):
+        try:
+            d = json.load(open(TFILE, encoding="utf-8"))
+            # 补全缺失键
+            for k in DEFAULT:
+                if k not in d:
+                    d[k] = DEFAULT[k]
+            return d
+        except Exception:
+            pass
+    return json.loads(json.dumps(DEFAULT))  # deep copy
+
+
+def save(d):
+    os.makedirs(os.path.dirname(TFILE), exist_ok=True)
+    json.dump(d, open(TFILE, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+
+
+def fmt(s):
+    if s is None:
+        return "—"
+    if s < 60:
+        return f"{s:.1f}min" if s >= 1 else f"{int(s*60)}s"
+    return f"{s/60:.1f}min"
+
+
+def render(d):
+    ico = {"done": "✅done", "doing": "⏳doing", "pending": "⏳pending"}
+    lines = []
+    lines.append("| 阶段 | 预计 | 实际 | 状态 | 说明 |")
+    lines.append("|---|---|---|---|---|")
+    sum_est = sum_act = 0.0
+    act_done = False
+    for p in d["phases"]:
+        est = p.get("est_s")
+        act = p.get("actual_s")
+        sum_est += est or 0
+        if act is not None:
+            sum_act += act
+        st = ico.get(p.get("status", "pending"), p.get("status", ""))
+        lines.append(f"| {p['id']} {p['name']} | {fmt(est)} | {fmt(act)} | {st} | {p.get('note','')} |")
+    overall_est = d.get("overall_estimate_s")
+    overall_note = d.get("overall_note", "")
+    rem = None
+    if overall_est:
+        rem = max(0, overall_est - sum_act)
+    rem_txt = f" 剩余 ~{fmt(rem)}" if rem is not None else ""
+    overall_st = "进行中" if any(p.get("status") == "doing" for p in d["phases"]) else (
+        "✅完成" if all(p.get("status") == "done" for p in d["phases"]) else "待开始")
+    lines.append(f"| **合计** | **{fmt(overall_est) or overall_note or '—'}** "
+                 f"| **{fmt(sum_act) if sum_act else '—'}** | **{overall_st}** |{rem_txt} |")
+    return "\n".join(lines)
+
+
+def main():
+    d = load()
+    args = sys.argv[1:]
+    if not args:
+        print(render(d), flush=True)
+        return
+    if args[0] == "--overall" and len(args) >= 2:
+        d["overall_estimate_s"] = float(args[1])
+        if len(args) >= 3:
+            d["overall_note"] = args[2]
+        save(d); print(render(d), flush=True); return
+    if args[0] == "--set" and len(args) >= 4:
+        pid = int(args[1]); field = args[2]; val = args[3]
+        note = " ".join(args[4:]) if len(args) > 4 else None
+        for p in d["phases"]:
+            if p["id"] == pid:
+                if field == "est":
+                    p["est_s"] = float(val)
+                elif field == "actual":
+                    p["actual_s"] = float(val)
+                    p["status"] = "done"
+                elif field in ("status",):
+                    p["status"] = val
+                if note is not None:
+                    p["note"] = note
+        save(d); print(render(d), flush=True); return
+    if args[0] == "--doing" and len(args) >= 2:
+        pid = int(args[1]); note = args[2] if len(args) >= 3 else ""
+        for p in d["phases"]:
+            if p["id"] == pid:
+                p["status"] = "doing"; p["note"] = note
+        save(d); print(render(d), flush=True); return
+    print(render(d), flush=True)
+
+
+if __name__ == "__main__":
+    main()
