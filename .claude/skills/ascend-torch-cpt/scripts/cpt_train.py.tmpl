@@ -26,8 +26,10 @@ WARMUP=int(os.environ.get("WARMUP","10"))
 WD=float(os.environ.get("WD","0.01"))
 GRAD_CLIP=float(os.environ.get("GRAD_CLIP","1.0"))
 GRAD_ACCUM=int(os.environ.get("GRAD_ACCUM","1"))      # 梯度累积步数（per-rank bs 太小时凑有效 batch）
-SAVE_EVERY=int(os.environ.get("SAVE_EVERY","0"))      # >0 则每 N 步存 resume ckpt
-RESUME=os.environ.get("RESUME","0")=="1"              # 从 ckpt_latest.pt 续训
+RESUME=os.environ.get("RESUME","0")=="1"              # 断点续训总开关（默认关闭）
+EST_STEP_S=float(os.environ.get("EST_STEP_S","10"))   # 预估每步秒数（估总时长→保存间隔）
+CKPT_MIN_INTERVAL_S=float(os.environ.get("CKPT_MIN_INTERVAL_S","900"))  # 周期保存最小间隔(s)，默认15min
+CKPT_MAX_SAVES=int(os.environ.get("CKPT_MAX_SAVES","5"))                # 训练期间最多保存次数
 SEED=int(os.environ.get("SEED","42"))
 REMAP=os.environ.get("REMAP","0")=="1"
 LOG=os.path.join(WS_DIR,'logs'); OUT=os.path.join(WS_DIR,'outputs')
@@ -91,6 +93,8 @@ def main():
         print(f"[train] {NUM_STEPS} steps bs/rank={BATCH_SIZE} global={BATCH_SIZE*max(1,world)} seq={SEQ_LEN} lr={LR} grad_accum={GRAD_ACCUM}",flush=True)
         print(f"{'step':>4} {'loss':>10} {'lr':>10} {'s/step':>7} {'tok/s':>8}",flush=True)
     t0=time.time()
+    last_save_t=t0
+    _save_interval_s=max(CKPT_MIN_INTERVAL_S, NUM_STEPS*EST_STEP_S/CKPT_MAX_SAVES)  # 周期保存间隔（时间基准）
     for step in range(start_step,NUM_STEPS):
         bi=step%nb; bidx=idxs[bi*BATCH_SIZE:(bi+1)*BATCH_SIZE]
         batch=x[bidx].to(device); attn=torch.ones_like(batch)
@@ -110,10 +114,11 @@ def main():
         if rank==0:
             with open(lp,'a') as f: f.write(json.dumps(log[-1])+'\n')
             if step%5==0 or step==NUM_STEPS-1: print(f"{step:>4} {ls:>10.5f} {lr:.2e} {sps:>7.3f} {tps:>8.0f}",flush=True)
-        # 周期性 resume ckpt
-        if SAVE_EVERY>0 and (step+1)%SAVE_EVERY==0 and rank==0:
+        # 周期保存 resume ckpt（仅 RESUME=1 时，按时间基准：≤5 次、间隔 ≥15min）
+        if RESUME and rank==0 and (time.time()-last_save_t>=_save_interval_s) and step<NUM_STEPS-1:
             m=model.module if is_ddp() else model
             torch.save({"step":step+1,"model":m.state_dict(),"optimizer":optim.state_dict()},ck_path)
+            last_save_t=time.time()
     if rank==0:
         m=model.module if is_ddp() else model
         torch.save(m.state_dict(),os.path.join(OUT,'cpt_model_state.pt'))   # 评估用(bf16 不需要)
