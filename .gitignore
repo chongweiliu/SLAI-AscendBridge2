@@ -97,3 +97,9 @@ images/*.tar
 images/*.tar.sha256
 !images/README.md
 !images/fetch-image.sh
+
+# ascend-torch-cpt 继续预训练工作区（含大 ckpt/venv，不入库）
+training-ws/*/
+training-ws/*/.venv/
+training-ws/*/__pycache__/
+!training-ws/.gitkeep

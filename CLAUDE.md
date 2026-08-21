@@ -67,6 +67,7 @@ prompts/
 scripts/
 tests/
 adaptations/          # 默认空目录，按需挂载或拷贝单模型 adaptation
+training-ws/          # ascend-torch-cpt 继续预训练工作区（含大 ckpt/venv，已 .gitignore，不入库）
 CLAUDE.md
 README.md
 ```

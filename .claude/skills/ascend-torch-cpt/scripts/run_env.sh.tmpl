@@ -1,6 +1,7 @@
 #!/bin/bash
-# run_env.sh.tmpl — 昇腾 NPU CPT 统一环境入口（复制到 train-ws/ 后填实际值）
-# 用法: source train-ws/run_env.sh
+# run_env.sh.tmpl — 昇腾 NPU CPT 统一环境入口（填实际值后置入 training-ws/<模型名>-cpt/）
+# 工作目录约定: <REPO_ROOT>/training-ws/<模型名>-cpt/  (training-ws 位于仓库根目录下, 无则新建)
+# 用法: source <REPO_ROOT>/training-ws/<模型名>-cpt/run_env.sh
 export PYTHON=__PYTHON_BIN__                       # 如 /home/user/miniconda3/envs/X/bin/python
 source /usr/local/Ascend/ascend-toolkit/set_env.sh  # CANN
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0             # 规避 torch_npu autoload 崩，手动 import
@@ -10,7 +11,11 @@ export TOKENIZERS_PARALLELISM=false
 # 单卡时固定一卡（多卡/DDP 时改为 0,1,...,N-1 并由 torch.npu.set_device(local_rank)）
 export ASCEND_RT_VISIBLE_DEVICES=0
 export HF_ENDPOINT=https://hf-mirror.com           # 国内下载
+# 工作目录: 仓库根目录下的 training-ws/<模型名>-cpt/ (不与仓库平行)
+export REPO_ROOT=__REPO_ROOT__                      # SLAI-AscendBridge2 仓库根目录绝对路径
+export MODEL_NAME=__MODEL_NAME__                    # 模型名(权重路径最后一段)
+export WS_DIR=${REPO_ROOT}/training-ws/${MODEL_NAME}-cpt
+mkdir -p ${WS_DIR}/logs ${WS_DIR}/outputs
 # 任务参数
 export MODEL_DIR=__MODEL_DIR__
 export DATA_FILE=__DATA_FILE__
-export WS_DIR=$PWD

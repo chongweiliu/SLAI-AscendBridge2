@@ -91,7 +91,7 @@ def main():
     if rank==0:
         open(lp,'a' if RESUME else 'w').close()
         print(f"[train] {NUM_STEPS} steps bs/rank={BATCH_SIZE} global={BATCH_SIZE*max(1,world)} seq={SEQ_LEN} lr={LR} grad_accum={GRAD_ACCUM}",flush=True)
-        print(f"{'step':>4} {'loss':>10} {'lr':>10} {'s/step':>7} {'tok/s':>8}",flush=True)
+        print(f"{'step':>4} {'loss':>10} {'lr':>10} {'s/step':>7} {'tok/s':>8} {'ETA':>8}",flush=True)
     t0=time.time()
     last_save_t=t0
     _save_interval_s=max(CKPT_MIN_INTERVAL_S, NUM_STEPS*EST_STEP_S/CKPT_MAX_SAVES)  # 周期保存间隔（时间基准）
@@ -113,7 +113,10 @@ def main():
         log.append({"step":step,"loss":ls,"lr":lr,"elapsed_s":round(el,2),"s_per_step":round(sps,3)})
         if rank==0:
             with open(lp,'a') as f: f.write(json.dumps(log[-1])+'\n')
-            if step%5==0 or step==NUM_STEPS-1: print(f"{step:>4} {ls:>10.5f} {lr:.2e} {sps:>7.3f} {tps:>8.0f}",flush=True)
+            # 心跳: 按时间折算(见核心原则7), 每2-3步打一次, 含剩余训练用时 ETA
+            if step%2==0 or step==NUM_STEPS-1:
+                remain=(NUM_STEPS-1-step)*sps; eta=f"{remain/60:.1f}min" if remain>=60 else f"{remain:.0f}s"
+                print(f"{step:>4} {ls:>10.5f} {lr:.2e} {sps:>7.3f} {tps:>8.0f} {eta:>8}",flush=True)
         # 周期保存 resume ckpt（仅 RESUME=1 时，按时间基准：≤5 次、间隔 ≥15min）
         if RESUME and rank==0 and (time.time()-last_save_t>=_save_interval_s) and step<NUM_STEPS-1:
             m=model.module if is_ddp() else model

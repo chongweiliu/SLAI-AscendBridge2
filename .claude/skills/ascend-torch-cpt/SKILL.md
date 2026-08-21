@@ -17,7 +17,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
   或由 `run_env.sh` 的 `MODEL_DIR` 注入。本地没有则按需从 modelscope / hf-mirror 下载。
 - **训练数据集路径**（必填）：jsonl/json/parquet/csv 均可；`{"messages":[...]}` chat 格式或 `{"text":...}` 纯文本均自动识别转换。由 `DATA_FILE` 指定，缺失则按需下载。
 - 可选：seq_len、batch_size、步数、并行方式（单卡/DDP/FSDP2）、语料比例（如取 30%/60%）、是否评估。未指定者由技能自动择优。
-- 工作目录：默认以 **`<模型名>-cpt/`** 命名（无则新建），所有脚本与产物统一归档于此。模型名取权重路径最后一段（如 `/mnt/model/gemma-4-12B-it` → `gemma-4-12B-it-cpt/`）。
+- 工作目录：统一建在 **SLAI-AscendBridge2 仓库根目录下的 `training-ws/` 内**（`training-ws/` 无则新建，**位于仓库内部而非与仓库平行**），每个模型一个子目录 **`training-ws/<模型名>-cpt/`**。模型名取权重路径最后一段（如 `/mnt/model/gemma-4-12B-it` → `training-ws/gemma-4-12B-it-cpt/`）。所有脚本与产物统一归档于此，不散落到仓库根目录或其他位置。`run_env.sh` 的 `WS_DIR` 已自动指向该路径并 `mkdir -p`。
 
 ## 默认产出（loss 曲线 + 公网链接 为默认方式）
 每次训练**默认**产出 loss 曲线图（png）并尝试上传为**外部公网可访问直链**：
@@ -37,7 +37,9 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 5. **训练结束必须保存 ckpt。** CPT 的验收标准之一就是"训练前后对比评估"，因此训练脚本末尾必须落盘模型权重（`cpt_model_state.pt`），否则后续 PPL/acc/F1 评估无 ckpt 可用。DDP 用 `model.module.state_dict()`（每卡持全量，rank0 存即可）；FSDP2 用 `DTensor.full_tensor()` 聚合（见 references/pitfalls.md #20，否则只存到 1/N 分片）。
 6. **必须用昇腾 NPU 训练，禁止回退 CPU。** 继续预训练默认且只能跑在 Ascend NPU 上（`torch_npu`），不允许静默回退到 CPU 训练（如 `device='cpu'` 或 `torch.device('cpu')`）。若因算子缺失/环境异常确实必须回退 CPU，**必须先向用户说明原因并征得确认**后再进行。
 7. **后台长跑要有心跳输出。** 后台运行的脚本（训练/评估/下载）最长 **2–3 分钟**必须向 stdout 打印一次进度信息（step/loss/用时或"仍在运行"心跳），`print(..., flush=True)`，让人感知任务还在跑。不要在步数很少时才打印——打印间隔要按**时间**折算（如 50s/step 时每 2–3 步打一次），保证屏幕 ≤2–3 分钟必有输出。
-8. **所有产物统一归档到 `<模型名>-cpt/` 子目录。** 训练/评估全过程的脚本、代码、README、ckpt 权重、loss 曲线、日志、summary 等全部放进以"模型名-cpt"命名的子目录（见「产物目录约定」），不散落到仓库根目录或其他位置。
+8. **所有产物统一归档到 `training-ws/<模型名>-cpt/` 子目录。** 训练/评估全过程的脚本、代码、README、ckpt 权重、loss 曲线、日志、summary 等全部放进 SLAI-AscendBridge2 仓库根目录下 `training-ws/` 内以"模型名-cpt"命名的子目录（见「产物目录约定」），**不得**散落到仓库根目录、与仓库平行的目录、或其他位置。
+
+9. **全程实时用时表。** 整个 CPT 过程**必须**在屏幕上维护一张格式化用时表（见「用时表」节），让用户随时知道：每阶段预计/实际用时、整体总预估、以及剩余预估。每完成一阶段、训练每 N 步心跳、评估每模型切换时，都重新打印整张表（Markdown 表格，`print(..., flush=True)`）。阶段 0–1 勘察完即给出全程总预估；阶段 7 长跑期间据 `s/step × 剩余步数` 外推剩余训练用时并周期刷新。用 `scripts/timing_table.py.tmpl` 渲染（读 `outputs/timing.json`）。
 
 ## 工作流（9 阶段，每阶段都要在屏幕实时更新用时表）
 
@@ -46,7 +48,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - 确认：模型 id/路径、语料路径、seq_len、batch_size、步数、是否要 DDP/FSDP2、是否要评估。用户未指定的超参由本技能自动择优（见下）。
 
 ### 阶段 1 · 环境/依赖勘察
-探测并记录（写进 `train-ws/env_probe.json`）：
+探测并记录（写进 `${WS_DIR}/env_probe.json`，即 `training-ws/<模型名>-cpt/env_probe.json`）：
 - NPU：卡数、每卡显存（**以实际分配测试为准**，`mem_get_info` 的 free 可能为负，见 pitfalls #29）、CANN 版本、`npu-smi`/`/dev/davinci*`。
 - **卡间互联**：`hccn_tool -i <devid> -ip -g` 看是否配了 RoCE IP（报 "no ip was preset" = 只能走慢速 PCIe，见 pitfalls #23）；**真实 CPU 核数**用 `nproc --all`/`os.cpu_count()`（`nproc` 会受 OMP_NUM_THREADS 误导，见 pitfalls #22）。
 - torch / torch_npu / transformers 版本；解释器路径。
@@ -54,7 +56,9 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - 必设环境变量：`TORCH_DEVICE_BACKEND_AUTOLOAD=0`（规避 torch_npu autoload 崩，手动 import）、`TASK_QUEUE_ENABLE=1`（异步算子下发）、`PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`（减碎片，给融合优化器留空间）。
 - torchair 依赖（仅在走图模式时需要，见 references/fusion-api.md）：protobuf/scipy/attrs/decorator/cloudpickle/ml_dtypes/tornado，`setuptools<82`（≥82 移除 pkg_resources 破坏 GE init）。
 
-用 `scripts/run_env.sh.tmpl` 生成统一入口。
+用 `scripts/run_env.sh.tmpl` 生成统一入口（`WS_DIR` 已指向 `training-ws/<模型名>-cpt/` 并自动 `mkdir`）。
+
+> ⏱ **用时表初始化**：阶段 0–1 勘察完后，据模型参数量/可用卡数/目标步数/语料规模给出**全程总预估**（如 ~6 分钟或 ~2 小时），并填好 9 阶段各自的**预计用时**，写入 `outputs/timing.json` 后打印整张用时表。这是用户看到的第一个进度基准。
 
 ### 阶段 2 · 模型与数据集获取
 - 模型：本地有就用本地；否则从 modelscope（国内优先，`modelscope` CLI 或 git clone）或 `hf-mirror.com`（`git clone` + `git-lfs`）下载。`huggingface.co` 国内通常不可达。
@@ -114,6 +118,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 ### 阶段 7 · 正式训练 + loss 曲线 + 公网直链
 - 逐 step 记录 `step, loss, lr, elapsed, s/step, tok/s` 到 `logs/step_loss.jsonl` + stdout。
 - **心跳输出**：`print(..., flush=True)` 的间隔按**时间**折算（见核心原则 7），保证屏幕 ≤2–3 分钟必有输出（如 50s/step 时每 2–3 步打一次，而非固定每 5 步）。
+- **剩余用时外推**：训练期间每 ~30s 或每个心跳行，据已耗 step 数与 `s/step` 外推**剩余训练用时 ETA = (NUM_STEPS − step) × s_per_step**，连同当前 step/loss/已耗时长一并打印；并刷新用时表阶段 7 行为 `⏳doing`（如 `50/100步 ETA1.5min`）。可用 `timing_table.py --doing 7 "50/100步 ETA1.5min"`。
 - 训完出 `train_summary.json`。
 - **保存 CPT ckpt**（`cpt_model_state.pt`）供阶段 8 评估用（见核心原则 5；FSDP2 用 full_tensor 聚合）。
 - **保存 resume ckpt**（`ckpt_latest.pt`：模型+优化器+step）。断点续训开关 `RESUME=1` **默认关闭**；开启后按**时间基准**周期保存（间隔 `= max(15分钟, 预估总时长/5)`，训练期间 **≤5 次**、每次间隔 **≥15 分钟**），训练结束**总是**存一次最终 ckpt（见 `references/resume.md`）。
@@ -132,7 +137,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - **ckpt 转 HF 可复用目录**（可选）：若用户想用 `from_pretrained` 直接加载 CPT 模型做推理/当新 base，把 `cpt_model_state.pt` 存成 HF 目录（拷 config.json+tokenizer 到 `outputs/cpt_hf_model/` + 存权重为 `model.safetensors`）。否则评估用 `load_state_dict` 即可。
 
 ### 阶段 9 · 概要总结报告
-输出（Markdown）含：任务/模型/语料、并行策略、融合 API、超参表、loss 收敛(first5→last5, min, delta)、用时表(每阶段实际/预计)、公网直链、关键修正记录、复跑命令。全部归档到 `train-ws/`。
+输出（Markdown）含：任务/模型/语料、并行策略、融合 API、超参表、loss 收敛(first5→last5, min, delta)、用时表(每阶段实际/预计)、公网直链、关键修正记录、复跑命令。全部归档到 `${WS_DIR}/`（即 `training-ws/<模型名>-cpt/`）。
 
 ## 自动选型速查（写进脚本头注释）
 
@@ -147,11 +152,11 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 
 ## 产物目录约定
 
-所有产物统一归档到 **`<模型名>-cpt/`** 子目录（如 `gemma-4-12B-it-cpt/`），不散落到仓库根目录。
+所有产物统一归档到 SLAI-AscendBridge2 仓库根目录下 **`training-ws/<模型名>-cpt/`** 子目录（如 `training-ws/gemma-4-12B-it-cpt/`），**不得**散落到仓库根目录或与仓库平行的位置。`training-ws/` 无则新建。
 
 ```
-<模型名>-cpt/
-├── run_env.sh              # NPU 环境入口
+<REPO_ROOT>/training-ws/<模型名>-cpt/
+├── run_env.sh              # NPU 环境入口 (WS_DIR 指向本目录)
 ├── env_probe.json          # 软硬探测结果
 ├── prepare_data.py         # 语料转换打包
 ├── cpt_train.py            # 训练(单卡/DDP 按选型)
@@ -160,16 +165,43 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 ├── launch_ddp.sh           # DDP 启动(torchrun)
 ├── eval_cpt.py             # 前后评估
 ├── plot_loss.py            # 曲线+上传
+├── timing_table.py         # 全程用时表渲染器
 ├── README.md               # 总结报告
 ├── logs/{step_loss.jsonl, *_stdout.log}
 └── outputs/{input_ids.pt, losses.json, train_summary.json,
-            loss_curve.png, public_links.json,
+            timing.json, loss_curve.png, public_links.json,
             cpt_*_state.pt, eval_results.json, val_samples.json}
 ```
 
-## 用时表（每次执行全程实时更新）
+## 用时表（全程实时刷新，格式化输出）
 
-每完成一阶段就刷新下表（阶段/预计/实际/状态），让用户随时知道进度与剩余预估。
+整个 CPT 过程**必须**在屏幕上维护一张实时用时表（核心原则 9），让用户随时知道：每阶段预计/实际用时、整体总预估、剩余预估。用 `scripts/timing_table.py.tmpl` 渲染（读 `outputs/timing.json`）。
+
+### 要求
+- **整体预估**：阶段 0–1 勘察完后，据模型规模/卡数/目标步数/语料量给出**全程总预估**，写入 `timing.json` 的 `overall_estimate_s`，并填好 9 阶段各自 `est_s`，打印第一张完整用时表。
+- **每阶段**：进入阶段前确认预计用时；完成时记录**实际用时**（`--set <id> actual <s>` 自动置 done）。
+- **剩余预估**：阶段 7 长跑期间，据 `s/step × (NUM_STEPS − step)` 外推**剩余训练用时**，每 ~30s 或每个心跳行刷新阶段 7 为 `⏳doing` 并带 ETA 说明。
+- **刷新时机**：每完成一阶段、训练每 N 步、评估每模型切换时，重新打印整张表（Markdown，`print(..., flush=True)`）。
+
+### 表格格式（屏幕实时打印；列：阶段 / 预计 / 实际 / 状态 / 说明）
+
+```
+| 阶段 | 预计 | 实际 | 状态 | 说明 |
+|---|---|---|---|---|
+| 0 意图确认与路径核对 | 1.0min | 0.5min | ✅done | 路径已核对 |
+| 1 环境/依赖勘察 | 3.0min | 3.2min | ✅done | 8卡 Ascend910 64GB |
+| 2 模型与数据集获取 | 1.0min | 0.3min | ✅done | 本地有 |
+| 3 语料格式转换与打包 | 1.0min | 0.8min | ✅done | 800块 |
+| 4 训练方式选型 | 1.0min | 0.2min | ✅done | 单卡Eager |
+| 5 超参自动择优 | 1.0min | 0.1min | ✅done | lr1e-5 |
+| 6 生成脚本并smoke | 3.0min | 2.5min | ✅done | 2步smoke通过 |
+| 7 正式训练+曲线 | 6.0min | 2.9min | ⏳doing | 50/100步 ETA1.5min |
+| 8 训练前后评估 | 4.0min | — | ⏳pending | base+cpt |
+| 9 概要总结报告 | 1.0min | — | ⏳pending | README |
+| **合计** | **~22min** | **10.5min** | **进行中** | 剩余 ~11min |
+```
+
+长跑阶段（7）每次刷新可只追加一行 "当前 step / s·step / 剩余 ETA"；其余阶段完成后补 actual 列、状态置 ✅done。全程合计行始终显示"已实际 / 整体预估 / 剩余"。
 
 ## references（按需读）
 - `references/fusion-api.md` — torch_npu 融合 API 清单 + torchair 图模式 + 缺失 converter 补全（softplus/eye/softplus_backward 等）
@@ -182,4 +214,4 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - `references/multimodal-remap.md` — 多模态 checkpoint → 文本头权重重映射
 
 ## scripts（标准模板，新模型微调即用）
-见 `scripts/*.tmpl`。生成时复制到 `train-ws/` 并按当前模型/语料/选型替换占位。模板已规避多数踩坑（set_to_none=False、gradient_as_bucket_view=False、expandable_segments、autocast、grad-ckpt）。
+见 `scripts/*.tmpl`。生成时复制到 `${WS_DIR}/`（即 `training-ws/<模型名>-cpt/`）并按当前模型/语料/选型替换占位。模板已规避多数踩坑（set_to_none=False、gradient_as_bucket_view=False、expandable_segments、autocast、grad-ckpt）。其中 `run_env.sh.tmpl` 的 `WS_DIR` 已自动指向 `training-ws/<模型名>-cpt/` 并 `mkdir -p`；`timing_table.py.tmpl` 用于全程实时用时表（见核心原则 9）。
