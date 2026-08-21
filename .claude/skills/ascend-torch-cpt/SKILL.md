@@ -51,8 +51,9 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 探测并记录（写进 `${WS_DIR}/env_probe.json`，即 `training-ws/<模型名>-cpt/env_probe.json`）：
 - NPU：卡数、每卡显存（**以实际分配测试为准**，`mem_get_info` 的 free 可能为负，见 pitfalls #29）、CANN 版本、`npu-smi`/`/dev/davinci*`。
 - **卡间互联**：`hccn_tool -i <devid> -ip -g` 看是否配了 RoCE IP（报 "no ip was preset" = 只能走慢速 PCIe，见 pitfalls #23）；**真实 CPU 核数**用 `nproc --all`/`os.cpu_count()`（`nproc` 会受 OMP_NUM_THREADS 误导，见 pitfalls #22）。
-- torch / torch_npu / transformers 版本；解释器路径。
-- CANN env：`source /usr/local/Ascend/ascend-toolkit/set_env.sh`。
+- torch / torch_npu / transformers 版本；解释器路径。**注意 `torch==X.Y.Z+cpu` 不代表无 NPU**——昇腾镜像常用 +cpu build 配 torch_npu，NPU 后端由 torch_npu 注册，以 `torch.npu.is_available()` 为准（pitfalls #40）。
+- CANN env：`source /usr/local/Ascend/ascend-toolkit/set_env.sh`（**部分镜像该路径不存在或 env 已在 base 注入，需条件 source + `import torch_npu; torch.npu.is_available()` 验证**，pitfalls #41）。
+- **torchaudio 探测**（多模态模型才需要）：若 `import transformers.models.<mm>_xxx`（多模态文本头类）报 torchaudio `.so` 符号错配，用 `sys.meta_path` 桩掉（文本/视觉 CPT 不需音频，pitfalls #39）。模板已带防御版。
 - 必设环境变量：`TORCH_DEVICE_BACKEND_AUTOLOAD=0`（规避 torch_npu autoload 崩，手动 import）、`TASK_QUEUE_ENABLE=1`（异步算子下发）、`PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`（减碎片，给融合优化器留空间）。
 - torchair 依赖（仅在走图模式时需要，见 references/fusion-api.md）：protobuf/scipy/attrs/decorator/cloudpickle/ml_dtypes/tornado，`setuptools<82`（≥82 移除 pkg_resources 破坏 GE init）。
 
@@ -61,7 +62,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 > ⏱ **用时表初始化**：阶段 0–1 勘察完后，据模型参数量/可用卡数/目标步数/语料规模给出**全程总预估**（如 ~6 分钟或 ~2 小时），并填好 9 阶段各自的**预计用时**，写入 `outputs/timing.json` 后打印整张用时表。这是用户看到的第一个进度基准。
 
 ### 阶段 2 · 模型与数据集获取
-- 模型：本地有就用本地；否则从 modelscope（国内优先，`modelscope` CLI 或 git clone）或 `hf-mirror.com`（`git clone` + `git-lfs`）下载。`huggingface.co` 国内通常不可达。
+- 模型：本地有就用本地；否则从 modelscope（国内优先，`modelscope` CLI 或 git clone）或 `hf-mirror.com`（`git clone` + `git-lfs`）下载。`huggingface.co` 国内通常不可达。**大权重文件优先 ModelScope 的 `resolve/master/<file>` 直链（`wget -c`）**：新版 `hf` CLI 从 hf-mirror 拉大文件默认走 Xet 后端会 `401 Unauthorized`（`cas-server.xethub.hf.co`），且美区 CDN 慢；必须用 hf-mirror 时设 `HF_HUB_DISABLE_XET=1` 回退普通 LFS（pitfalls #38）。下完比对 `model.safetensors.index.json` 元数据字节数校验。
 - 语料：同上。`/mnt/share/...` 等用户给的理想路径不存在时，搜本机或下载。
 - 数据集若只有 train 分割、用户要“验证集”：用 `seed` 重建训练划分取 held-out（见 references/eval-metrics.md）。
 

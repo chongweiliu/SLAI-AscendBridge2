@@ -3,12 +3,17 @@
 # 工作目录约定: <REPO_ROOT>/training-ws/<模型名>-cpt/  (training-ws 位于仓库根目录下, 无则新建)
 # 用法: source <REPO_ROOT>/training-ws/<模型名>-cpt/run_env.sh
 export PYTHON=__PYTHON_BIN__                       # 如 /home/user/miniconda3/envs/X/bin/python
-source /usr/local/Ascend/ascend-toolkit/set_env.sh  # CANN
+# CANN env：部分镜像 set_env.sh 不在该路径、或 env 已在 base profile 注入，条件 source 避免报错（pitfalls #41）
+if [ -f /usr/local/Ascend/ascend-toolkit/set_env.sh ]; then
+  source /usr/local/Ascend/ascend-toolkit/set_env.sh
+fi
 export TORCH_DEVICE_BACKEND_AUTOLOAD=0             # 规避 torch_npu autoload 崩，手动 import
 export TASK_QUEUE_ENABLE=1                          # 异步算子下发
 export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True  # 减碎片，给融合优化器留空间
 export TOKENIZERS_PARALLELISM=false
 # 单卡时固定一卡（多卡/DDP 时改为 0,1,...,N-1 并由 torch.npu.set_device(local_rank)）
+# 注意：极少数机器 CANN env 已在 base 层做了设备映射，此时显式 export ASCEND_RT_VISIBLE_DEVICES
+#       反而致 aclInit 107001/Invalid device ID。若设了后 torch.npu.is_available()=False，注释掉这行重试。
 export ASCEND_RT_VISIBLE_DEVICES=0
 export WORLD_SIZE=${WORLD_SIZE:-1}                # 多卡训练(DDP/FSDP2)前 export WORLD_SIZE=N, prepare_data 据此算块数
 export HF_ENDPOINT=https://hf-mirror.com           # 国内下载
