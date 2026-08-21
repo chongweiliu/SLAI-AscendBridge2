@@ -187,3 +187,39 @@ if r == 0:
 - **症状**：照搬 tie=True 模型（如 0.8B）的重映射逻辑（依赖 `tie_weights()` 补 lm_head），到 tie=False 模型（如 9B）时 lm_head 真缺失 → 输出层随机，loss/评估异常。
 - **根因**：同族不同规格模型 tie 配置不同；tie=False 时 lm_head 是 ckpt 里独立的顶层张量。
 - **解法**：重映射前 `cat config.json` 看 `tie_word_embeddings`。tie=False 时**保留** ckpt 顶层 `lm_head.weight`（不 strip、不 drop），验证 `miss_lm_head=0`；tie=True 时 lm_head 缺失正常，调 `model.tie_weights()`。多模态 remap 见 references/multimodal-remap.md。
+
+## 37. eval 载 `cpt_model_state.pt` 也需 `weights_only=False`（扩展 #21）
+- **症状**：eval 阶段 `torch.load("cpt_model_state.pt")` 报 `UnpicklingError: Unsupported global: getattr was not an allowed global`。
+- **根因**：#21 只说了 resume ckpt（含 NPU optimizer state）需 `weights_only=False`，并断言"model 权重 ckpt（`cpt_model_state.pt`，纯 CPU tensor）不受影响"——**该断言过强**。部分架构（如 Qwen3.5 文本头）的 `model.state_dict()` 含非纯-tensor 全局（`getattr` 等），torch 2.6+ 默认 `weights_only=True` 同样拒载。
+- **解法**：eval 载 **任何本地自存的 cpt ckpt**（含 `cpt_model_state.pt`）一律 `torch.load(..., map_location='cpu', weights_only=False)`。本地自存可信，安全。`eval_cpt.py.tmpl` 已改。#21 的"纯 CPU tensor 不受影响"仅在 state_dict 确为纯 tensor 时成立，不能假设。
+
+## 38. hf-mirror 大文件 Xet 401 → 用 ModelScope 或禁 Xet
+- **症状**：用 `hf`（新版 huggingface_hub）/ `huggingface-cli` 从 `hf-mirror.com` 拉大文件（safetensors/分片），报 `RuntimeError: CAS Client Error: HTTP 401 Unauthorized, domain: cas-server.xethub.hf.co`；小文件正常。
+- **根因**：新版 `hf` 默认走 Xet 后端做大文件重组，经 `cas-server.xethub.hf.co` 鉴权，hf-mirror 不代理该 Xet 鉴权域 → 401。ModelScope 的 file resolve 是普通 HTTP 直链，无此问题且国内更快。
+- **解法**（按优先）：① 大权重文件优先 **ModelScope** `https://www.modelscope.cn/models/<id>/resolve/master/<file>`（`wget -c` 即可，国内 ~20MB/s，比 hf-mirror 美区 CDN ~0.8MB/s 快 ~25×）；② 必须用 hf-mirror 时设 `HF_HUB_DISABLE_XET=1`（或 `huggingface_hub<0.30`）回退普通 HTTP LFS；③ `git clone` + `git-lfs` 从 hf-mirror 整仓克隆也绕开单文件 Xet。校验：下完比对 `model.safetensors.index.json` 元数据字节数。
+
+## 39. 系统 torchaudio .so 符号错配，链式挡住 transformers 多模态文本头导入
+- **症状**：`from transformers.models.<mm>_xxx import XxxForCausalLM`（多模态模型的文本头类）报 `OSError: torchaudio/lib/_torchaudio.abi3.so: undefined symbol: torch_library_impl`；而 `from transformers import AutoModelForCausalLM` 正常。
+- **根因**：共享镜像里系统 torchaudio 按另一个 torch 版本编译，符号不匹配；transformers 多模态模型模块链式触发 `import torchaudio` 即崩（grep 源码未必直接引用，是间接加载）。纯文本 LM 不触发。
+- **解法**：文本/视觉 CPT 用不到音频，把 torchaudio 拦截成干净桩模块（带合法 `ModuleSpec`，可选依赖即跳过）。`sys.meta_path` 插 finder：
+```python
+import sys, types, importlib.abc, importlib.machinery
+class _StubFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == 'torchaudio' or fullname.startswith('torchaudio.'):
+            return importlib.machinery.ModuleSpec(fullname, self)
+    def create_module(self, spec): return types.ModuleType(spec.name)
+    def exec_module(self, module): module.__version__ = '0.0.0'; module.__file__ = '<stub>'
+sys.meta_path.insert(0, _StubFinder())
+```
+注意：桩模块必须带 `ModuleSpec`（仅设 `sys.modules['torchaudio']=ModuleType(...)` 会因 `__spec__ is None` 再报 `ValueError`）。模板 `cpt_train.py.tmpl`/`eval_cpt.py.tmpl` 顶部已加**带探测的防御版**（先 `try: import torchaudio`，坏了才桩，健康时 no-op）。同模式适用于 soundfile/librosa 等其它坏掉的音频可选依赖。
+
+## 40. torch 是 `+cpu` build 不代表没 NPU
+- **症状**：`torch.__version__ == '2.8.0+cpu'`，误以为该机器无 NPU 支持或装错 torch。
+- **根因**：昇腾镜像常用 `torch==2.8.0+cpu`（无 CUDA 扩展）配 `torch_npu`——NPU 后端由 `torch_npu` 在 import 时注册，不依赖 torch 的 CUDA build。`+cpu` 仅表示无 CUDA kernels，对 NPU 训练无影响。
+- **解法**：以 `torch.npu.is_available()` / `torch.npu.device_count()` 为准判断 NPU 可用性，别被 `+cpu` 后缀误导。版本匹配只需 `torch_npu` 版本与 `torch` 主次版本对齐（如 torch 2.8.0 ↔ torch_npu 2.8.0.post4）。
+
+## 41. `set_env.sh` 路径可能不存在 / CANN env 已注入 base
+- **症状**：`source /usr/local/Ascend/ascend-toolkit/set_env.sh` 报 `No such file or directory`；或该机器 `LD_LIBRARY_PATH`/`ASCEND_TOOLKIT_HOME` 已在 base profile 注入，根本不需要 source。
+- **根因**：不同镜像 CANN 安装路径不同（有的是 `ascend-toolkit/set_env.sh`，有的只有 `driver/`，有的 env 已在 `/etc/profile` 注入）。
+- **解法**：`run_env.sh` 里对 `set_env.sh` 做 `[ -f ]` 条件 source，不存在则跳过（env_probe 阶段先 `python -c "import torch_npu; print(torch.npu.is_available())"` 验证 env 是否已就绪）。不要硬 source。

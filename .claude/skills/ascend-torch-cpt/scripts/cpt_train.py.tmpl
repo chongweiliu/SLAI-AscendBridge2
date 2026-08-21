@@ -9,6 +9,20 @@
 import os, json, math, time, random
 import torch
 import torch_npu  # noqa: F401  必须，autoload=0 时手动注册
+# 防御：部分镜像系统 torchaudio .so 与 torch 符号错配，import 即崩；transformers 多模态文本头类
+# 会链式触发其加载。先 try 探测，坏了就用 sys.meta_path 拦成干净桩（带 ModuleSpec，文本/视觉 CPT 不需音频）。见 pitfalls #39。
+try:
+    import torchaudio  # noqa: F401
+except Exception:
+    import sys, types, importlib.abc, importlib.machinery
+    sys.modules.pop('torchaudio', None)
+    class _StubFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+        def find_spec(self, fullname, path, target=None):
+            if fullname == 'torchaudio' or fullname.startswith('torchaudio.'):
+                return importlib.machinery.ModuleSpec(fullname, self)
+        def create_module(self, spec): return types.ModuleType(spec.name)
+        def exec_module(self, module): module.__version__ = '0.0.0'; module.__file__ = '<stub>'
+    sys.meta_path.insert(0, _StubFinder())
 try:
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel as DDP

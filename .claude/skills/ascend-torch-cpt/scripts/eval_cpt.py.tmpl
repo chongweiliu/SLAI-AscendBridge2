@@ -7,6 +7,19 @@
 import os, json, random, math
 import torch
 import torch_npu  # noqa: F401
+# 防御：坏掉的 torchaudio 会挡住 transformers 多模态文本头导入；先探测，坏了桩掉。见 pitfalls #39。
+try:
+    import torchaudio  # noqa: F401
+except Exception:
+    import sys, types, importlib.abc, importlib.machinery
+    sys.modules.pop('torchaudio', None)
+    class _StubFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+        def find_spec(self, fullname, path, target=None):
+            if fullname == 'torchaudio' or fullname.startswith('torchaudio.'):
+                return importlib.machinery.ModuleSpec(fullname, self)
+        def create_module(self, spec): return types.ModuleType(spec.name)
+        def exec_module(self, module): module.__version__ = '0.0.0'; module.__file__ = '<stub>'
+    sys.meta_path.insert(0, _StubFinder())
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from safetensors.torch import load_file
 
@@ -21,7 +34,7 @@ def load_model(src, device):
     if REMAP: raise SystemExit("REMAP=1：按 references/multimodal-remap.md 填重映射")
     if src=='cpt':
         model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, torch_dtype=torch.float32, trust_remote_code=True)
-        sd=torch.load(CKPT,map_location='cpu')
+        sd=torch.load(CKPT,map_location='cpu',weights_only=False)  # 本地自存 cpt ckpt，部分架构含非-tensor 全局需 weights_only=False（pitfalls #37）
         model.load_state_dict(sd,strict=False)
     else:
         model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, torch_dtype=torch.float32, trust_remote_code=True)
