@@ -1,4 +1,4 @@
-# cannbot 协同适配使用指导
+# CANNBot协同适配使用指导
 
 > CANNBot 不内置、不全局常驻。只有 `team-lead` 明确触发算子缺口协同时，
 > 才运行 `scripts/sync_cannbot.sh --print-path` 检查并下载上游 `master` 最新版。
@@ -33,7 +33,7 @@ cannbot 协同适配是 SLAI-AscendBridge2 的算子缺口补齐机制：当模�
 ```
 适配 {model_id}，走 adapt→benchmark→optimize→business 全流程。
 
-该模型可能有 CUDA-only 算子缺口，遇缺口时走 cannbot 协同适配：
+该模型可能有 CUDA-only 算子缺口，遇缺口时走 CANNBot 协同适配：
 - adaptation 阶段：adapter 遇算子无法跑通 → 报 blocked_by_operator_gap
   → 你派 cannbot-adapter 走三段式判定+4 角色生成 Ascend C 算子
 - optimization 阶段：npu-optimizer 发现 CPU 回退算子是性能瓶颈 → 报 perf 缺口
