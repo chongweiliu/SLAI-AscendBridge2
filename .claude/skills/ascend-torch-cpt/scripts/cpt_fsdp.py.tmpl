@@ -7,7 +7,7 @@
 #  - NpuFusedAdamW 与 FSDP2 不兼容（FSDP2 用 meta tensor，npu.get_npu_format 无 fake impl）→ 用 torch.optim.AdamW
 #  - 融合路径靠 SDPA→npu fusion attention + TASK_QUEUE；bf16 靠 FSDP2 MixedPrecisionPolicy
 #  - 显存预算：每卡 ≈ 参数×16字节/N + 激活；9B 需 8 卡(~18GB/卡)，卡数不足会 OOM
-import os, json, math, time, random
+import os, json, math, time, random, sys, subprocess
 import torch, torch_npu  # noqa: F401
 import torch.distributed as dist
 from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy
@@ -68,6 +68,7 @@ def main():
     if r==0: open(lp,'a' if RESUME else 'w').close(); print(f"[train] {NUM_STEPS} steps bs/rank={BATCH_SIZE} global={BATCH_SIZE*w} seq={SEQ_LEN} lr={LR} grad_accum={GRAD_ACCUM}",flush=True)
     t0=time.time()
     last_save_t=t0
+    _last_table_t=0.0   # 用时表上次刷新时间(全程实时汇报, 见核心原则9)
     _save_interval_s=max(CKPT_MIN_INTERVAL_S, NUM_STEPS*EST_STEP_S/CKPT_MAX_SAVES)  # 周期保存间隔（时间基准）
     for step in range(start_step,NUM_STEPS):
         bi=step%nb; bidx=idxs[bi*BATCH_SIZE:(bi+1)*BATCH_SIZE]
@@ -84,7 +85,21 @@ def main():
         log.append({"step":step,"loss":ls,"lr":lr_at(step),"s_per_step":round(sps,3)})
         if r==0:
             with open(lp,'a') as f: f.write(json.dumps(log[-1])+'\n')
-            if step%5==0 or step==NUM_STEPS-1: print(f"{step:>4} {ls:>10.5f} {lr_at(step):.2e} {sps:>7.3f} {tps:>8.0f}",flush=True)
+            # 心跳: 按时间折算(核心原则7), 每2步打一次, 含剩余训练用时 ETA
+            if step%2==0 or step==NUM_STEPS-1:
+                remain=(NUM_STEPS-1-step)*sps; eta=f"{remain/60:.1f}min" if remain>=60 else f"{remain:.0f}s"
+                print(f"{step:>4} {ls:>10.5f} {lr_at(step):.2e} {sps:>7.3f} {tps:>8.0f} {eta:>8}",flush=True)
+            # 全程实时汇报用时表(核心原则9): 每~30s 调 timing_table.py --doing 重印整张表(自带print), 含阶段7 ETA
+            now=time.time()
+            if now-_last_table_t>=30 or step==NUM_STEPS-1:
+                _last_table_t=now
+                remain=(NUM_STEPS-1-step)*sps if sps>0 else 0
+                eta=f"{remain/60:.1f}min" if remain>=60 else f"{remain:.0f}s"
+                try:
+                    subprocess.run([sys.executable, os.path.join(WS_DIR,"timing_table.py"),
+                        "--doing","7",str(round(el,0)),f"{step+1}/{NUM_STEPS}步 ETA{eta} loss={ls:.3f}"],
+                        check=False)
+                except Exception: pass
         # 周期保存 resume ckpt（仅 RESUME=1 时，按时间基准：≤5 次、间隔 ≥15min；FSDP2 用 full_tensor 聚合）
         if RESUME and (time.time()-last_save_t>=_save_interval_s) and step<NUM_STEPS-1:
             from torch.distributed._tensor import DTensor
