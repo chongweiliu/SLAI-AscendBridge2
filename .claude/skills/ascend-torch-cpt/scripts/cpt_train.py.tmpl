@@ -6,7 +6,7 @@
 # 默认: AutoModelForCausalLM.from_pretrained（纯文本 LM 直接用）；
 #       多模态→文本头：设 REMAP=1 并填 TEXT_MODEL_CLASS（见 references/multimodal-remap.md）
 # 踩坑已规避: autoload=0, set_to_none=False, gradient_as_bucket_view=False, expandable_segments, grad-ckpt(use_reentrant=False), fp32+bf16 autocast
-import os, json, math, time, random
+import os, json, math, time, random, sys, subprocess
 import torch
 import torch_npu  # noqa: F401  必须，autoload=0 时手动注册
 # 防御：部分镜像系统 torchaudio .so 与 torch 符号错配，import 即崩；transformers 多模态文本头类
@@ -108,6 +108,7 @@ def main():
         print(f"{'step':>4} {'loss':>10} {'lr':>10} {'s/step':>7} {'tok/s':>8} {'ETA':>8}",flush=True)
     t0=time.time()
     last_save_t=t0
+    _last_table_t=0.0   # 用时表上次刷新时间(全程实时汇报, 见核心原则9)
     _save_interval_s=max(CKPT_MIN_INTERVAL_S, NUM_STEPS*EST_STEP_S/CKPT_MAX_SAVES)  # 周期保存间隔（时间基准）
     for step in range(start_step,NUM_STEPS):
         bi=step%nb; bidx=idxs[bi*BATCH_SIZE:(bi+1)*BATCH_SIZE]
@@ -131,6 +132,17 @@ def main():
             if step%2==0 or step==NUM_STEPS-1:
                 remain=(NUM_STEPS-1-step)*sps; eta=f"{remain/60:.1f}min" if remain>=60 else f"{remain:.0f}s"
                 print(f"{step:>4} {ls:>10.5f} {lr:.2e} {sps:>7.3f} {tps:>8.0f} {eta:>8}",flush=True)
+            # 全程实时汇报用时表(核心原则9): 每~30s 调 timing_table.py --doing 重印整张表(自带print), 含阶段7 ETA
+            now=time.time()
+            if now-_last_table_t>=30 or step==NUM_STEPS-1:
+                _last_table_t=now
+                remain=(NUM_STEPS-1-step)*sps if sps>0 else 0
+                eta=f"{remain/60:.1f}min" if remain>=60 else f"{remain:.0f}s"
+                try:
+                    subprocess.run([sys.executable, os.path.join(WS_DIR,"timing_table.py"),
+                        "--doing","7",str(round(el,0)),f"{step+1}/{NUM_STEPS}步 ETA{eta} loss={ls:.3f}"],
+                        check=False)
+                except Exception: pass
         # 周期保存 resume ckpt（仅 RESUME=1 时，按时间基准：≤5 次、间隔 ≥15min）
         if RESUME and rank==0 and (time.time()-last_save_t>=_save_interval_s) and step<NUM_STEPS-1:
             m=model.module if is_ddp() else model

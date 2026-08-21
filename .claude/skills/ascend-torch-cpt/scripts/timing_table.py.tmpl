@@ -6,7 +6,8 @@
 #       $PYTHON timing_table.py --set 7 actual 175 "100步完成"      # 记实际用时+置done+说明
 #       $PYTHON timing_table.py --set 7 est 360 ""                  # 设该阶段预计用时
 #       $PYTHON timing_table.py --overall 1320 "~22min"               # 更新整体预估
-#       $PYTHON timing_table.py --doing 7 "50/100步 ETA1.5min"         # 标记进行中+说明
+#       $PYTHON timing_table.py --doing 7 90 "50/200步 ETA1.5min loss2.3"  # 标记进行中+已耗时(可选)+说明, 重印整表
+#                                                                   (训练脚本每~30s调用, 实现全程实时刷新)
 import os, json, sys
 
 WS_DIR = os.environ.get("WS_DIR", os.getcwd())
@@ -113,10 +114,19 @@ def main():
                     p["note"] = note
         save(d); print(render(d), flush=True); return
     if args[0] == "--doing" and len(args) >= 2:
-        pid = int(args[1]); note = args[2] if len(args) >= 3 else ""
+        pid = int(args[1]); rest = args[2:]
+        # 第 2 个参数若可解析为浮点则作 actual_s(已耗时), 否则全部作 note
+        actual = None; note = ""
+        if rest:
+            try:
+                actual = float(rest[0]); note = " ".join(rest[1:])
+            except ValueError:
+                note = " ".join(rest)
         for p in d["phases"]:
             if p["id"] == pid:
                 p["status"] = "doing"; p["note"] = note
+                if actual is not None:
+                    p["actual_s"] = actual
         save(d); print(render(d), flush=True); return
     print(render(d), flush=True)
 
