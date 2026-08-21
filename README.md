@@ -38,7 +38,7 @@ Skill 与全部 references/scripts 位于 `.claude/skills/ascend-torch-cpt/`。�
 
 ### CANNBot 按需协同适配
 
-v2.2 新增 `cannbot-adapter` Agent、CANNBot 协同工作流和项目内同步脚本，用于处理普通框架适配无法覆盖的算子兼容与性能问题。
+v2.2 新增 `cannbot-adapter` Agent、CANNBot 协同工作流和项目内同步脚本，用于处理AscendBridge自动适配调优无法覆盖的算子兼容与性能问题。
 
 - 采用四级决策顺序：优先使用可在 Ascend 上直接执行的标准 PyTorch 算子；标准实现存在功能缺口或经 profiling 确认性能不达标时，再尝试 `torch_npu` 提供的昇腾专用接口或优化实现；随后复用 GitCode 上 CANN 与昇腾社区的已有方案；只有这些路径均不可行时，才调用 CANNBot 生成 Ascend C 自定义算子
 - 仅在真正进入第四级方案时执行 `scripts/sync_cannbot.sh --print-path`；脚本每次都会检查 `https://gitcode.com/cann/cannbot-skills.git` 的 `master` 最新版本
