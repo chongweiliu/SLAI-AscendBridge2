@@ -54,6 +54,9 @@ def load_benchmark_texts() -> tuple[list[str], str]:
     if wikitext_path.exists():
         print(f"[benchmark] loading dataset from {wikitext_path}")
         ds = load_from_disk(str(wikitext_path))
+        # load_from_disk 可能返回 DatasetDict（多 split），取 test split
+        if hasattr(ds, "keys"):
+            ds = ds["test"]
         texts = sorted([sample["text"] for sample in ds if sample.get("text", "").strip()])
         print(f"[benchmark] loaded {len(texts)} samples from wikitext")
         return texts, "wikitext"
@@ -63,6 +66,8 @@ def load_benchmark_texts() -> tuple[list[str], str]:
     if cnn_path.exists():
         print(f"[benchmark] loading dataset from {cnn_path}")
         ds = load_from_disk(str(cnn_path))
+        if hasattr(ds, "keys"):
+            ds = ds["test"]
         texts = sorted([sample[DATASET_TEXT_FIELD] for sample in ds if sample[DATASET_TEXT_FIELD].strip()])
         print(f"[benchmark] loaded {len(texts)} samples from cnn_dailymail")
         return texts, "cnn_dailymail"
@@ -72,6 +77,8 @@ def load_benchmark_texts() -> tuple[list[str], str]:
     if imdb_path.exists():
         print(f"[benchmark] loading dataset from {imdb_path}")
         ds = load_from_disk(str(imdb_path))
+        if hasattr(ds, "keys"):
+            ds = ds["test"]
         texts = sorted([sample["text"] for sample in ds if sample["text"].strip()])
         print(f"[benchmark] loaded {len(texts)} samples from imdb")
         return texts, "imdb"
@@ -323,9 +330,11 @@ def setup_model(use_pretrained: bool, device, cache_dir: str):
 
     if use_pretrained:
         # Tier2: 加载预训练权重；失败直接抛错（禁止 silent fallback 到 config）
+        # 单卡加载，禁用 device_map="auto" 避免跨卡 ACL 错误
         model = AutoModelForCausalLM.from_pretrained(
-            MODEL_ID, trust_remote_code=True, torch_dtype="auto", cache_dir=cache_dir, device_map="auto"
+            MODEL_ID, trust_remote_code=True, torch_dtype="auto", cache_dir=cache_dir
         )
+        model = model.to(device)
     else:
         # Tier1: 随机权重。用 bf16 初始化（与真实权重 dtype 一致），降低 HBM 占用。
         old_dtype = torch.get_default_dtype()
@@ -389,7 +398,7 @@ def run_step1(model, tokenizer, first_device, device_short, device_ids, mode_str
         "mode": mode_str,
         "dataset": dataset_name,
         "dtype": dtype_str,
-        "output_type": "generated_text",
+        "output_type": "logits",
         "packages": get_package_versions(),
     }
     metrics_path.write_text(json.dumps(metrics, indent=2))
@@ -408,17 +417,16 @@ def run_step1(model, tokenizer, first_device, device_short, device_ids, mode_str
 
 
 def run_step2(model, tokenizer, first_device, device_short, mode_str, adapt_dir: Path, dataset_name: str, texts: list[str], max_samples: int = 250):
-    """Step 2: 全样本推理 -> outputs_*.pt + TTFT/TPOT 统计 (CausalLM)
+    """Step 2: 全样本 teacher-forcing 推理 -> outputs_*.pt + Logits + PPL
 
-    使用 TextIteratorStreamer 流式生成，测量 TTFT 和 TPOT。
-    同时捕获每个样本最后一个 token 的 logits（用于算子精度验证）。
-    计算每个样本的 perplexity（PPL）。
+    对每个样本做单次 forward，捕获 last_token_logits 和 perplexity。
+    不做自回归生成，减少噪声并加速 baseline。
 
     Returns:
-        tuple: (outputs_path, ttft_avg, tpot_avg, avg_sample_latency_s)
+        tuple: (outputs_path, avg_sample_latency_s, wall_clock_s)
     """
     print("\n" + "=" * 60)
-    print("Step 2: 全样本推理 (精度测试 + TTFT/TPOT + Logits + PPL)")
+    print("Step 2: 全样本 teacher-forcing 推理 (Logits + PPL)")
     print("=" * 60)
 
     model_dtype = next(model.parameters()).dtype
@@ -430,29 +438,18 @@ def run_step2(model, tokenizer, first_device, device_short, mode_str, adapt_dir:
     texts = texts[:max_samples]
     print(f"[benchmark] {len(texts)} samples to process (max {max_samples})")
 
-    all_outputs = []
-    all_logits = []  # 保存 logits
+    all_logits = []  # 保存 last_token_logits
     all_ppl = []  # 保存 perplexity
-    all_ttft = []
-    all_tpot = []
-    all_sample_latency = []  # 每样本端到端耗时（forward + 生成）
+    all_sample_latency = []  # 每样本前向耗时
 
-    # 生成线程内重新绑定 NPU 设备（aclrtSetDevice 为线程局部，避免工作线程落到错误卡）
-    gen_device_index = first_device.index if first_device.type == "npu" else None
-
-    def _generate_worker(kwargs):
-        if gen_device_index is not None:
-            import torch_npu  # noqa: F401
-
-            torch.npu.set_device(gen_device_index)
-        model.generate(**kwargs)
+    wall_start = time.perf_counter()
 
     with torch.no_grad():
         for i, text in enumerate(texts):
             sample_start = time.perf_counter()
             inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512).to(first_device)
 
-            # 先做一次 forward 获取 logits（单步推理，用于算子精度验证）
+            # forward 获取 logits
             logits_output = model(**inputs)
             last_token_logits = logits_output.logits[0, -1, :].cpu()  # [vocab_size]
             all_logits.append(last_token_logits)
@@ -467,39 +464,6 @@ def run_step2(model, tokenizer, first_device, device_short, mode_str, adapt_dir:
             ppl = torch.exp(loss).item()
             all_ppl.append(ppl)
 
-            # 使用 TextIteratorStreamer 流式生成
-            streamer = TextIteratorStreamer(
-                tokenizer,
-                skip_prompt=True,
-                skip_special_tokens=True,
-            )
-
-            generation_kwargs = dict(
-                **inputs,
-                max_new_tokens=64,
-                do_sample=False,
-                temperature=1.0,  # 显式设置（do_sample=False 时实际不起作用，但确保确定性）
-                top_p=1.0,  # 显式设置
-                top_k=50,  # 显式设置
-                streamer=streamer,
-                pad_token_id=tokenizer.eos_token_id,  # 显式设置避免警告
-            )
-
-            # 在独立线程中运行生成
-            thread = Thread(target=_generate_worker, args=(generation_kwargs,))
-            generation_start_time = time.perf_counter()
-            thread.start()
-
-            # 收集生成的 token 并测量时间
-            generated_text, ttft_ms, tpot_ms = measure_streaming_generation(streamer, generation_start_time)
-
-            thread.join()
-
-            all_outputs.append(generated_text)
-            if ttft_ms is not None:
-                all_ttft.append(ttft_ms)
-            if tpot_ms is not None:
-                all_tpot.append(tpot_ms)
             all_sample_latency.append(time.perf_counter() - sample_start)
 
             del inputs, logits_output
@@ -515,34 +479,30 @@ def run_step2(model, tokenizer, first_device, device_short, mode_str, adapt_dir:
             elif (i + 1) % 8 == 0:
                 print(f"[benchmark] processed {i + 1}/{len(texts)} samples")
 
-    # 保存 outputs（包含 generated_text、logits 和 perplexity）
+    wall_clock_s = time.perf_counter() - wall_start
+
+    # 保存 outputs（logits 和 perplexity）
     output_data = {
-        "generated_text": all_outputs,
         "logits": all_logits,
         "perplexity": all_ppl,
     }
     torch.save(output_data, outputs_path)
 
-    # 计算 TTFT/TPOT 平均值
-    ttft_avg = round(sum(all_ttft) / len(all_ttft), 3) if all_ttft else None
-    tpot_avg = round(sum(all_tpot) / len(all_tpot), 3) if all_tpot else None
-
     # 计算 PPL 统计
     ppl_avg = round(sum(all_ppl) / len(all_ppl), 2) if all_ppl else None
 
-    # 平均样本端到端延迟（forward + 生成），作为 metrics 的 latency_s
+    # 平均样本前向延迟
     avg_sample_latency_s = round(sum(all_sample_latency) / len(all_sample_latency), 6) if all_sample_latency else None
 
     print(f"[benchmark] outputs saved to {outputs_path}")
-    print(f"[benchmark]   - generated_text: {len(all_outputs)} samples")
     if all_logits:
         print(f"[benchmark]   - logits: {len(all_logits)} samples, shape: {all_logits[0].shape}")
     if all_ppl:
         print(f"[benchmark]   - perplexity: avg={ppl_avg}, min={min(all_ppl):.2f}, max={max(all_ppl):.2f}")
-    print(f"[benchmark] TTFT avg: {ttft_avg} ms, TPOT avg: {tpot_avg} ms")
     print(f"[benchmark] avg per-sample latency: {avg_sample_latency_s} s")
+    print(f"[benchmark] wall clock: {wall_clock_s:.6f} s")
 
-    return outputs_path, ttft_avg, tpot_avg, avg_sample_latency_s
+    return outputs_path, avg_sample_latency_s, wall_clock_s
 
 
 def main():
@@ -599,17 +559,34 @@ def main():
     # Step 1: 单样本 -> trace + metrics
     trace_path, metrics_path, start_time = run_step1(model, processor, first_device, device_short, device_ids, mode_str, ADAPT_DIR, dataset_name, texts, num_samples)
 
-    # Step 2: 全样本 -> outputs + TTFT/TPOT
-    outputs_path, ttft_avg, tpot_avg, avg_sample_latency_s = run_step2(model, processor, first_device, device_short, mode_str, ADAPT_DIR, dataset_name, texts, args.max_samples)
+    # Warmup: 3 次前向推理预热 NPU 算子编译缓存（与 perf 对称）
+    WARMUP_ITERATIONS = 3
+    print(f"\n[benchmark] warmup {WARMUP_ITERATIONS} iterations...")
+    warmup_text = texts[0] if texts else "Hello, warmup."
+    warmup_inputs = processor(warmup_text, return_tensors="pt", truncation=True, max_length=512).to(first_device)
+    with torch.no_grad():
+        for i in range(WARMUP_ITERATIONS):
+            t0 = time.perf_counter()
+            _ = model(**warmup_inputs)
+            if device_short == "npu":
+                torch.npu.synchronize()
+            elif device_short == "cuda":
+                torch.cuda.synchronize()
+            print(f"[benchmark] warmup iter {i+1}/{WARMUP_ITERATIONS}: {time.perf_counter() - t0:.6f}s")
+    del warmup_inputs
+    print("[benchmark] warmup complete")
 
-    # 更新 metrics 文件（end_time、ttft_ms、tpot_ms，并用 Step2 全样本平均延迟覆盖 latency_s）
+    # Step 2: 全样本 -> outputs + Logits + PPL
+    outputs_path, avg_sample_latency_s, wall_clock_s = run_step2(model, processor, first_device, device_short, mode_str, ADAPT_DIR, dataset_name, texts, args.max_samples)
+
+    # 更新 metrics 文件（end_time、wall_clock_s，并用 Step2 全样本平均延迟覆盖 latency_s）
     end_time = datetime.now().isoformat()
     with open(metrics_path, "r") as f:
         metrics = json.load(f)
 
     metrics["end_time"] = end_time
-    metrics["ttft_ms"] = ttft_avg
-    metrics["tpot_ms"] = tpot_avg
+    metrics["wall_clock_s"] = round(wall_clock_s, 6)
+    metrics["warmup_iterations"] = WARMUP_ITERATIONS
     if avg_sample_latency_s is not None:
         metrics["latency_s"] = avg_sample_latency_s
     metrics["num_samples"] = num_samples
@@ -622,9 +599,8 @@ def main():
     print("=" * 60)
     print(f"  trace: {trace_path}")
     print(f"  metrics: {metrics_path}")
-    print(f"  outputs: {outputs_path} (含 generated_text + logits + perplexity)")
-    if ttft_avg is not None:
-        print(f"  TTFT avg: {ttft_avg} ms, TPOT avg: {tpot_avg} ms")
+    print(f"  outputs: {outputs_path} (含 logits + perplexity)")
+    print(f"  wall_clock_s: {wall_clock_s:.6f}")
 
     print(f"\nTo analyze NPU fallback, run:")
     print(f"   uv run python benchmark/scripts/benchmark_tool.py trace {trace_path.name}")
