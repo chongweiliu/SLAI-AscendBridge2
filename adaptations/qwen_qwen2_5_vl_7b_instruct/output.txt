@@ -1,0 +1,25 @@
+The image processor of type `Qwen2VLImageProcessor` is now loaded as a fast processor by default, even if the model checkpoint was saved with a slow processor. This is a breaking change and may produce slightly different outputs. To continue using the slow processor, instantiate this class with `use_fast=False`. Note that this behavior will be extended to all models in a future release.
+`torch_dtype` is deprecated! Use `dtype` instead!
+Setting `pad_token_id` to `eos_token_id`:151645 for open-end generation.
+/mnt/workspace/SLAI-AscendBridge2/adaptations/qwen_qwen2_5_vl_7b_instruct/.venv/lib/python3.12/site-packages/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py:377: UserWarning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (Triggered internally at ../torch_npu/csrc/aten/common/TensorFactories.cpp:340.)
+  pad_h = vit_merger_window_size - llm_grid_h % vit_merger_window_size
+[Setup] Model cache: /mnt/workspace/SLAI-AscendBridge2/adaptations/qwen_qwen2_5_vl_7b_instruct/models
+[Device] Huawei Ascend NPU detected.
+[Device] NPU count: 2
+[Device] npu:0 free=65.4GB / total=65.8GB
+[Device] npu:1 free=65.6GB / total=65.8GB
+[Setup] Using device: npu:1
+[Setup] Loading processor for Qwen/Qwen2.5-VL-7B-Instruct...
+[Setup] Config loaded: model_type=qwen2_5_vl, layers=28, vision_depth=32
+[Setup] DRY RUN MODE ENABLED: Initializing model with RANDOM weights.
+[Setup] Shrunk num_hidden_layers: 28 -> 2
+[Setup] Shrunk vision_config.depth: 32 -> 2
+[Setup] Random-weight model created and moved to device.
+[Setup] Model on device: npu:1
+[Run] Input: image (448, 448) (RGB gradient + red square) + text: Describe this image briefly.
+[Run] Processed inputs: input_ids=(1, 282), pixel_values present=True
+[Run] Generating...
+[Run] Generated 32 new tokens
+[Run] Output:  peripherals Suffolk verk玃 BellevoldingMYSQL.ImageAlign unwillingAGINGDrvquiry$data convince.pieceL🚇aokeDrv phrases [\Drv玃 Norwegian sprites Laws(hero clanยะ兼任 عبدال猩
+[Run] Generation time: 0.6781 seconds
+[Success] Demo completed.

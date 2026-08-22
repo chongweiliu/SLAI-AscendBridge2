@@ -1,0 +1,25 @@
+The image processor of type `Qwen2VLImageProcessor` is now loaded as a fast processor by default, even if the model checkpoint was saved with a slow processor. This is a breaking change and may produce slightly different outputs. To continue using the slow processor, instantiate this class with `use_fast=False`. Note that this behavior will be extended to all models in a future release.
+`torch_dtype` is deprecated! Use `dtype` instead!
+[Setup] Model cache: /mnt/workspace/SLAI-AscendBridge2/adaptations/qwen_qwen2_5_vl_7b_instruct/models
+[Device] Huawei Ascend NPU detected.
+[Device] NPU count: 2
+[Device] npu:0 free=65.4GB / total=65.8GB
+[Device] npu:1 free=65.6GB / total=65.8GB
+[Setup] Using device: npu:1
+[Setup] Loading processor for Qwen/Qwen2.5-VL-7B-Instruct...
+[Setup] Config loaded: model_type=qwen2_5_vl, layers=28, vision_depth=32
+[Setup] Attempting to load pre-trained weights...
+Fetching 5 files:   0%|          | 0/5 [00:00<?, ?it/s]Fetching 5 files:  20%|██        | 1/5 [01:45<07:02, 105.65s/it]Fetching 5 files:  40%|████      | 2/5 [05:05<07:38, 152.89s/it]Fetching 5 files:  60%|██████    | 3/5 [05:07<03:24, 102.33s/it]Fetching 5 files:  80%|████████  | 4/5 [05:14<01:18, 78.62s/it] Fetching 5 files: 100%|██████████| 5/5 [05:29<00:00, 65.97s/it]Fetching 5 files: 100%|██████████| 5/5 [05:29<00:00, 65.97s/it]
+Loading checkpoint shards:   0%|          | 0/5 [00:00<?, ?it/s]Loading checkpoint shards: 100%|██████████| 5/5 [00:00<00:00, 83.97it/s]
+The following generation flags are not valid and may be ignored: ['temperature']. Set `TRANSFORMERS_VERBOSITY=info` for more details.
+/mnt/workspace/SLAI-AscendBridge2/adaptations/qwen_qwen2_5_vl_7b_instruct/.venv/lib/python3.12/site-packages/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py:377: UserWarning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (Triggered internally at ../torch_npu/csrc/aten/common/TensorFactories.cpp:340.)
+  pad_h = vit_merger_window_size - llm_grid_h % vit_merger_window_size
+[Setup] Pre-trained weights loaded
+[Setup] Model on device: npu:1
+[Run] Input: image (448, 448) (RGB gradient + red square) + text: Describe this image briefly.
+[Run] Processed inputs: input_ids=(1, 282), pixel_values present=True
+[Run] Generating...
+[Run] Generated 32 new tokens
+[Run] Output: The image is a colorful abstract composition featuring a central red square surrounded by eight triangular sections, each with a gradient of colors transitioning from one to another. The triangles
+[Run] Generation time: 1.6077 seconds
+[Success] Demo completed.
