@@ -1,0 +1,31 @@
+{
+  "start_time": "2026-08-22T14:10:45.920598",
+  "latency_s": 0.10609,
+  "step1_forward_latency_s": 0.10609,
+  "peak_memory_mb": 42.41,
+  "num_samples": 250,
+  "device": "npu:1",
+  "device_model": "Ascend910_9362",
+  "mode": "config",
+  "dataset": "random",
+  "dtype": "fp32",
+  "output_type": "class_labels",
+  "packages": {
+    "torch": "2.8.0",
+    "timm": "1.0.28",
+    "torch_npu": "2.8.0.post4",
+    "numpy": "2.5.2",
+    "datasets": "5.0.1",
+    "torchvision": "0.23.0"
+  },
+  "end_time": "2026-08-22T14:10:50.964892",
+  "ttft_ms": null,
+  "tpot_ms": null,
+  "top1_top5_profile": {
+    "top1_logit_avg": 0.0021,
+    "top1_logit_min": 0.0019,
+    "top1_logit_max": 0.0023,
+    "top5_spread_avg": 0.0004,
+    "unique_top1_classes": 3
+  }
+}
