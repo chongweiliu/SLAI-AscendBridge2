@@ -1,12 +1,12 @@
 {
-  "start_time": "2026-08-22T14:10:45.920598",
-  "latency_s": 0.10609,
-  "step1_forward_latency_s": 0.10609,
+  "start_time": "2026-08-22T16:17:41.455915",
+  "latency_s": 0.00492,
+  "step1_forward_latency_s": 0.11569,
   "peak_memory_mb": 42.41,
-  "num_samples": 250,
+  "num_samples": 50,
   "device": "npu:1",
   "device_model": "Ascend910_9362",
-  "mode": "config",
+  "mode": "pretrained",
   "dataset": "random",
   "dtype": "fp32",
   "output_type": "class_labels",
@@ -18,14 +18,16 @@
     "datasets": "5.0.1",
     "torchvision": "0.23.0"
   },
-  "end_time": "2026-08-22T14:10:50.964892",
+  "end_time": "2026-08-22T16:17:45.578738",
   "ttft_ms": null,
   "tpot_ms": null,
+  "wall_clock_s": 0.246007,
+  "warmup_iterations": 3,
   "top1_top5_profile": {
-    "top1_logit_avg": 0.0021,
-    "top1_logit_min": 0.0019,
-    "top1_logit_max": 0.0023,
-    "top5_spread_avg": 0.0004,
-    "unique_top1_classes": 3
+    "top1_logit_avg": 3.8163,
+    "top1_logit_min": 2.3575,
+    "top1_logit_max": 4.6978,
+    "top5_spread_avg": 0.8924,
+    "unique_top1_classes": 6
   }
 }

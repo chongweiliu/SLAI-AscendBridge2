@@ -1,0 +1,83 @@
+{
+  "measurement_contract_version": 3,
+  "optimizations": "runtime_only: warmup(3x) + TASK_QUEUE_ENABLE=1 + batched_inference(bs=8)",
+  "optimization_kind": "runtime_only",
+  "code_modified": false,
+  "selected_npus": [
+    "1"
+  ],
+  "device_topology": "single die 1",
+  "parallel_mode": "single_device",
+  "results": [
+    {
+      "dtype": "fp32",
+      "mode": "pretrained",
+      "dataset": "random",
+      "output_type": "class_labels",
+      "baseline_artifact": "benchmark_metrics_npu_fp32_pretrained_random.json",
+      "perf_artifact": "benchmark_metrics_npu_fp32_pretrained_random_perf.json",
+      "num_samples": 50,
+      "baseline_latency_s": 0.00492,
+      "perf_latency_s": 0.002275,
+      "baseline_wall_clock_s": 0.246007,
+      "perf_wall_clock_s": 0.113726,
+      "wall_clock_source": "artifact_explicit_field",
+      "baseline_warmup_iterations": 3,
+      "perf_warmup_iterations": 3,
+      "warmup_policy": "symmetric",
+      "perf_memory_mb": 0.0,
+      "speedup_ratio": 2.163155,
+      "latency_reduction_pct": 53.76,
+      "cosine_similarity": 1.0,
+      "text_match_rate": 1.0,
+      "optimization_items": [
+        "warmup",
+        "TASK_QUEUE_ENABLE",
+        "batched_inference"
+      ],
+      "optimization_kind": "runtime_only",
+      "task_queue_enable": true,
+      "batch_size": 8,
+      "comparison_method": "independent_baseline_artifact",
+      "comparison_scope": "steady_state",
+      "validation_note": "\u72ec\u7acb baseline \u5de5\u4ef6\u5bf9\u6bd4\uff0c\u975e self-baseline\uff1b\u5bf9\u79f0 warmup(3x) \u540e\u7684 steady_state \u6d4b\u91cf\uff1b\u975e\u51b7\u542f\u52a8\u5bf9\u70ed\u542f\u52a8\u3002",
+      "steady_state_baseline_latency_s": 0.00492,
+      "steady_state_perf_latency_s": 0.002275
+    }
+  ],
+  "best_result": {
+    "dtype": "fp32",
+    "mode": "pretrained",
+    "dataset": "random",
+    "output_type": "class_labels",
+    "baseline_artifact": "benchmark_metrics_npu_fp32_pretrained_random.json",
+    "perf_artifact": "benchmark_metrics_npu_fp32_pretrained_random_perf.json",
+    "num_samples": 50,
+    "baseline_latency_s": 0.00492,
+    "perf_latency_s": 0.002275,
+    "baseline_wall_clock_s": 0.246007,
+    "perf_wall_clock_s": 0.113726,
+    "wall_clock_source": "artifact_explicit_field",
+    "baseline_warmup_iterations": 3,
+    "perf_warmup_iterations": 3,
+    "warmup_policy": "symmetric",
+    "perf_memory_mb": 0.0,
+    "speedup_ratio": 2.163155,
+    "latency_reduction_pct": 53.76,
+    "cosine_similarity": 1.0,
+    "text_match_rate": 1.0,
+    "optimization_items": [
+      "warmup",
+      "TASK_QUEUE_ENABLE",
+      "batched_inference"
+    ],
+    "optimization_kind": "runtime_only",
+    "task_queue_enable": true,
+    "batch_size": 8,
+    "comparison_method": "independent_baseline_artifact",
+    "comparison_scope": "steady_state",
+    "validation_note": "\u72ec\u7acb baseline \u5de5\u4ef6\u5bf9\u6bd4\uff0c\u975e self-baseline\uff1b\u5bf9\u79f0 warmup(3x) \u540e\u7684 steady_state \u6d4b\u91cf\uff1b\u975e\u51b7\u542f\u52a8\u5bf9\u70ed\u542f\u52a8\u3002",
+    "steady_state_baseline_latency_s": 0.00492,
+    "steady_state_perf_latency_s": 0.002275
+  }
+}

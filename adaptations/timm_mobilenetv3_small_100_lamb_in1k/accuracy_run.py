@@ -418,8 +418,9 @@ def run_step2(model, first_device, device_short, mode_str, adapt_dir: Path, data
     print(f"[benchmark]   - top-1 logit avg/min/max: {profile_stats['top1_logit_avg']}/{profile_stats['top1_logit_min']}/{profile_stats['top1_logit_max']}")
     print(f"[benchmark]   - top-5 spread avg: {profile_stats['top5_spread_avg']}")
     print(f"[benchmark] avg per-sample forward time: {avg_sample_s:.6f} s")
+    print(f"[benchmark] wall clock: {step2_elapsed:.6f} s")
 
-    return outputs_path, None, None, avg_sample_s, profile_stats
+    return outputs_path, None, None, avg_sample_s, profile_stats, step2_elapsed
 
 
 def main():
@@ -469,19 +470,37 @@ def main():
     # Step 1: 单样本 -> trace + metrics
     trace_path, metrics_path, start_time = run_step1(model, first_device, device_short, device_ids, mode_str, adapt_dir, dataset_name, images)
 
-    # Step 2: 全样本 -> outputs + top-1/top-5 画像 (Vision 不测量 TTFT/TPOT)
-    outputs_path, ttft_avg, tpot_avg, avg_sample_s, profile_stats = run_step2(model, first_device, device_short, mode_str, adapt_dir, dataset_name, images, args.max_samples)
+    # Warmup: 3 次前向推理预热 NPU 算子编译缓存（与 perf 对称）
+    WARMUP_ITERATIONS = 3
+    print(f"\n[benchmark] warmup {WARMUP_ITERATIONS} iterations...")
+    warmup_x = normalize_imagenet(images[0].unsqueeze(0)).to(first_device) if images else torch.rand(1, *INPUT_SIZE).to(first_device)
+    with torch.no_grad():
+        for i in range(WARMUP_ITERATIONS):
+            t0 = time.perf_counter()
+            _ = model(warmup_x)
+            if device_short == "npu":
+                torch.npu.synchronize()
+            elif device_short == "cuda":
+                torch.cuda.synchronize()
+            print(f"[benchmark] warmup iter {i+1}/{WARMUP_ITERATIONS}: {time.perf_counter() - t0:.6f}s")
+    del warmup_x
+    print("[benchmark] warmup complete")
 
-    # 更新 metrics 文件（end_time + ttft/tpot=null + latency_s 用 Step2 每样本均值覆盖）
+    # Step 2: 全样本 -> outputs + top-1/top-5 画像 (Vision 不测量 TTFT/TPOT)
+    outputs_path, ttft_avg, tpot_avg, avg_sample_s, profile_stats, wall_clock_s = run_step2(model, first_device, device_short, mode_str, adapt_dir, dataset_name, images, args.max_samples)
+
+    # 更新 metrics 文件（end_time + wall_clock_s + latency_s = wall_clock_s/num_samples）
     end_time = datetime.now().isoformat()
     with open(metrics_path, "r") as f:
         metrics = json.load(f)
 
+    num_samples = len(images)
     metrics["end_time"] = end_time
     metrics["ttft_ms"] = ttft_avg  # Vision 非生成式：null
     metrics["tpot_ms"] = tpot_avg  # Vision 非生成式：null
-    if avg_sample_s is not None:
-        metrics["latency_s"] = round(max(float(metrics.get("latency_s", 0.0)), float(avg_sample_s)), 6)
+    metrics["wall_clock_s"] = round(wall_clock_s, 6)
+    metrics["warmup_iterations"] = WARMUP_ITERATIONS
+    metrics["latency_s"] = round(wall_clock_s / num_samples, 6) if num_samples > 0 else None
     metrics["top1_top5_profile"] = profile_stats
 
     with open(metrics_path, "w") as f:
@@ -494,6 +513,7 @@ def main():
     print(f"  ✅ metrics: {metrics_path}")
     print(f"  ✅ outputs: {outputs_path} (含 class_labels + top5_ids + top5_scores)")
     print(f"  📊 top-1/top-5 profile: {profile_stats}")
+    print(f"  wall_clock_s: {wall_clock_s:.6f}")
 
     print(f"\n💡 To analyze NPU fallback, run:")
     print(f"   uv run python benchmark/scripts/benchmark_tool.py trace {trace_path.name}")

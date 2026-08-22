@@ -15,6 +15,7 @@ import torch
 
 MODEL_ID = "cross-encoder/ms-marco-MiniLM-L6-v2"
 DATASET_NAME = "builtin"
+WARMUP_ITERATIONS = 3
 
 # 60 条 (query, relevant_passage, irrelevant_passage) 内置样本，满足 completed gate num_samples>=50
 EVAL_PAIRS = [
@@ -183,6 +184,13 @@ def main():
             trace_path.write_text(json.dumps({"fallback": str(e)}))
     print(f"[benchmark] step1 latency: {step1_latency:.4f}s, trace: {trace_path.exists()}")
 
+    # Warmup
+    print(f"[benchmark] warming up ({WARMUP_ITERATIONS} iterations)...")
+    for _ in range(WARMUP_ITERATIONS):
+        score_batch([pairs[0][0], pairs[0][0]], [pairs[0][1], pairs[0][2]])
+    if hasattr(torch, "npu"):
+        torch.npu.synchronize()
+
     # Step2: all samples
     all_scores = []
     all_logits = []
@@ -226,6 +234,8 @@ def main():
         "dtype": dtype_str,
         "ranking_accuracy": round(correct / len(pairs), 4),
         "packages": {"torch": torch.__version__, "torch_npu": getattr(__import__("torch_npu"), "__version__", "n/a")},
+        "wall_clock_s": round(total_latency, 6),
+        "warmup_iterations": WARMUP_ITERATIONS,
         "end_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     met_name = f"benchmark_metrics_npu_{dtype_str}_{mode_str}_{dataset_name}.json"
