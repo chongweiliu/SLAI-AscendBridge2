@@ -1,0 +1,45 @@
+{
+  "model_id": "openai-community/gpt2",
+  "status": "completed",
+  "adapter_id": "adapter-5",
+  "started_at": "2026-08-22T10:13:40",
+  "updated_at": "2026-08-22T10:16:20",
+  "stages": {
+    "directory_setup": {
+      "status": "completed",
+      "timestamp": "2026-08-22T10:13:40",
+      "notes": "创建适配目录，缓存目录固定为 adaptations/openai_community_gpt2/models"
+    },
+    "environment": {
+      "status": "completed",
+      "timestamp": "2026-08-22T10:16:20",
+      "notes": "uv sync --extra ascend 完成：torch==2.8.0+cpu, torch-npu==2.8.0.post4, transformers==5.15.1, accelerate==1.14.0 (Python 3.12 venv)"
+    },
+    "code_generation": {
+      "status": "completed",
+      "timestamp": "2026-08-22T10:13:40",
+      "notes": "demo.py / README.md / pyproject.toml 生成完成"
+    },
+    "dry_run": {
+      "status": "completed",
+      "timestamp": "2026-08-22T10:16:20",
+      "device": "npu:1",
+      "npu_detected": true,
+      "cuda_detected": false,
+      "model_loaded": true,
+      "inference_completed": true,
+      "output": "[Setup] Model cache: /mnt/workspace/SLAI-AscendBridge2/adaptations/openai_community_gpt2/models\n[Device] NPU 0: free HBM 60.9 GiB\n[Device] NPU 1: free HBM 61.1 GiB\n[Device] Huawei Ascend NPU detected, selected npu:1\n[Setup] Using device: npu:1\n[Setup] Loading tokenizer for openai-community/gpt2...\n[Setup] Config loaded: model_type=gpt2, layers=12\n[Setup] DRY RUN MODE ENABLED: Initializing model with RANDOM weights.\n[Setup] Shrunk num_hidden_layers: 12 -> 2\n[Setup] Using minimal config for fast dry-run (reduced layers).\n[Setup] Model on device: npu:1\n[Run] Input: Hello, this is a test run on Huawei Ascend NPU.\n[Run] Generating...\n[Run] Generated 33 tokens\n[Run] Output: Hello, this is a test run on Huawei Ascend NPU. Added Added Added Added kit kit kit kit kit kit kit kit kit Rye Rye Rye Rye Grab Grab Grab\n[Run] Generation time: 0.3707 seconds\n[Success] Demo completed.\n"
+    },
+    "full_run": {
+      "status": "completed",
+      "timestamp": "2026-08-22T10:16:20",
+      "device": "npu:1",
+      "notes": "真实权重加载成功（148 tensors），NPU 上生成连贯文本，见 full_run_output.txt"
+    }
+  },
+  "final_result": {
+    "status": "completed",
+    "timestamp": "2026-08-22T10:16:20",
+    "notes": "Dry run 与 full run 均在 Ascend NPU (npu:1) 上通过；缓存固定于 adaptations/openai_community_gpt2/models"
+  }
+}
