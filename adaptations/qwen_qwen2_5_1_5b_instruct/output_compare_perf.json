@@ -1,0 +1,19 @@
+{
+  "baseline_artifact": "benchmark_metrics_npu_bf16_pretrained_wikitext.json",
+  "perf_artifact": "benchmark_metrics_npu_1_bf16_pretrained_wikitext_perf.json",
+  "cosine_similarity": 0.999879,
+  "min_cosine": 0.999629,
+  "max_abs_error": 0.484375,
+  "ppl_avg_rel_diff_pct": 1.0632,
+  "text_match_rate": 1.0,
+  "baseline_samples": 50,
+  "perf_samples": 50,
+  "total_samples": 50,
+  "cuda_samples": 50,
+  "ascend_samples": 50,
+  "speedup_ratio": 3.162332,
+  "baseline_wall_clock_s": 1.871411,
+  "perf_wall_clock_s": 0.591782,
+  "baseline_latency_s": 0.564251,
+  "perf_latency_s": 0.638423
+}
