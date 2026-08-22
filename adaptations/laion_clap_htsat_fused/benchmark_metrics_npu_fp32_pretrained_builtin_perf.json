@@ -1,0 +1,47 @@
+{
+  "start_time": "2026-08-22T16:28:45",
+  "end_time": "2026-08-22T16:28:45",
+  "wall_clock_s": 0.171761,
+  "latency_s": 0.003435,
+  "peak_memory_mb": 678.0,
+  "num_samples": 50,
+  "device": "npu:1",
+  "device_model": "Ascend910",
+  "mode": "pretrained",
+  "output_type": "audio_text_similarity",
+  "dataset": "builtin",
+  "dtype": "fp32",
+  "optimization_kind": "runtime_only",
+  "warmup_iterations": 3,
+  "task_queue_enable": "1",
+  "batch_size": 30,
+  "selected_npu": 1,
+  "selected_npus": [
+    1
+  ],
+  "device_topology": "1d:1",
+  "parallel_mode": "single",
+  "packages": {
+    "torch": "2.8.0",
+    "transformers": "4.57.6",
+    "torch_npu": "2.8.0.post4",
+    "numpy": "2.5.2"
+  },
+  "output_compare": {
+    "cosine_similarity": 0.9999999403953552,
+    "max_abs_error": 3.2782554626464844e-07,
+    "baseline_samples": 50,
+    "perf_samples": 50,
+    "cuda_samples": 50,
+    "ascend_samples": 50,
+    "baseline_wall_clock_s": 0.300473,
+    "perf_wall_clock_s": 0.171761,
+    "speedup_ratio": 1.749367,
+    "baseline_latency_s": 0.006009,
+    "perf_latency_s": 0.003435,
+    "latency_reduction_pct": 42.84,
+    "baseline_warmup_iterations": 3,
+    "perf_warmup_iterations": 3,
+    "output_type": "audio_text_similarity"
+  }
+}

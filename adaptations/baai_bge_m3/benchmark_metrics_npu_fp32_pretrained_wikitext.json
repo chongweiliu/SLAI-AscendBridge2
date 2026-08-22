@@ -1,13 +1,13 @@
 {
-  "start_time": "2026-08-22T14:27:06.255941",
-  "latency_s": 0.014615,
-  "step1_forward_latency_s": 0.362997,
-  "peak_memory_mb": 2182.62,
-  "num_samples": 60,
+  "start_time": "2026-08-22T16:24:33.192259",
+  "latency_s": 0.015049,
+  "step1_forward_latency_s": 0.363274,
+  "peak_memory_mb": 2183.22,
+  "num_samples": 50,
   "device": "npu:1",
   "device_model": "Ascend910_9362",
   "mode": "pretrained",
-  "dataset": "builtin",
+  "dataset": "wikitext",
   "dtype": "fp32",
   "output_type": "cls_embeddings",
   "packages": {
@@ -17,7 +17,9 @@
     "numpy": "2.5.2",
     "datasets": "5.0.1"
   },
-  "end_time": "2026-08-22T14:27:11.314432",
+  "end_time": "2026-08-22T16:24:38.130400",
   "ttft_ms": null,
-  "tpot_ms": null
+  "tpot_ms": null,
+  "wall_clock_s": 0.752434,
+  "warmup_iterations": 3
 }

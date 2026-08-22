@@ -1,12 +1,14 @@
 {
-  "start_time": "2026-08-22T14:56:01",
+  "start_time": "2026-08-22T16:28:21",
   "step1_forward_latency_s": 0.0,
-  "latency_s": 0.005082,
+  "latency_s": 0.006009,
+  "wall_clock_s": 0.300473,
+  "warmup_iterations": 3,
   "peak_memory_mb": 678.0,
-  "num_samples": 60,
+  "num_samples": 50,
   "device": "npu:1",
   "device_model": "Ascend910",
-  "mode": "config",
+  "mode": "pretrained",
   "output_type": "audio_text_similarity",
   "dataset": "builtin",
   "dtype": "fp32",
@@ -15,5 +17,5 @@
     "torch_npu": "2.8.0.post4",
     "numpy": "2.5.2"
   },
-  "end_time": "2026-08-22T14:56:01"
+  "end_time": "2026-08-22T16:28:21"
 }

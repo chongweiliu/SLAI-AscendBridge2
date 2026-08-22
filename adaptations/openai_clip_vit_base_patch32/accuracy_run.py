@@ -14,6 +14,7 @@ import torch
 
 MODEL_ID = "openai/clip-vit-base-patch32"
 DATASET_NAME = "builtin"
+WARMUP_ITERATIONS = 3
 
 # 60 条候选文本（与合成图像做图文匹配），满足 completed gate num_samples>=50
 CANDIDATE_TEXTS = [
@@ -153,15 +154,24 @@ def main():
             trace_path.write_text(json.dumps({"fallback": str(e)}))
     print(f"[benchmark] step1 latency: {step1_latency:.4f}s, trace: {trace_path.exists()}")
 
+    # Warmup
+    print(f"[benchmark] warming up ({WARMUP_ITERATIONS} iterations)...")
+    for _ in range(WARMUP_ITERATIONS):
+        encode_batch(image, texts[:8])
+    if hasattr(torch, "npu"):
+        torch.npu.synchronize()
+
     # Step2: all texts in chunks
     all_sims = []
-    t_all = time.time()
+    t_all = time.perf_counter()
     with torch.no_grad():
         for i in range(0, n, 16):
             chunk = texts[i : i + 16]
             sims = encode_batch(image, chunk).tolist()
             all_sims.extend(sims)
-    total_latency = time.time() - t_all
+    if hasattr(torch, "npu"):
+        torch.npu.synchronize()
+    total_latency = time.perf_counter() - t_all
     peak_mem = 0.0
     try:
         if hasattr(torch, "npu"):
@@ -192,6 +202,8 @@ def main():
         "dataset": dataset_name,
         "dtype": dtype_str,
         "packages": {"torch": torch.__version__, "torch_npu": getattr(__import__("torch_npu"), "__version__", "n/a")},
+        "wall_clock_s": round(total_latency, 6),
+        "warmup_iterations": WARMUP_ITERATIONS,
         "end_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
     met_name = f"benchmark_metrics_npu_{dtype_str}_{mode_str}_{dataset_name}.json"

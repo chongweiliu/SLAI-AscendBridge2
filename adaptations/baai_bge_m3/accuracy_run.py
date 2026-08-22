@@ -75,6 +75,9 @@ def load_benchmark_texts() -> tuple[list[str], str]:
     if wikitext_path.exists():
         print(f"[benchmark] loading dataset from {wikitext_path}")
         ds = load_from_disk(str(wikitext_path))
+        if hasattr(ds, "keys"):
+            split_name = "test" if "test" in ds else ("validation" if "validation" in ds else "train")
+            ds = ds[split_name]
         texts = sorted([sample["text"] for sample in ds if sample.get("text", "").strip()])
         print(f"[benchmark] loaded {len(texts)} samples from wikitext")
         return texts, "wikitext"
@@ -84,6 +87,9 @@ def load_benchmark_texts() -> tuple[list[str], str]:
     if cnn_path.exists():
         print(f"[benchmark] loading dataset from {cnn_path}")
         ds = load_from_disk(str(cnn_path))
+        if hasattr(ds, "keys"):
+            split_name = "test" if "test" in ds else ("validation" if "validation" in ds else "train")
+            ds = ds[split_name]
         texts = sorted([sample[DATASET_TEXT_FIELD] for sample in ds if sample[DATASET_TEXT_FIELD].strip()])
         print(f"[benchmark] loaded {len(texts)} samples from cnn_dailymail")
         return texts, "cnn_dailymail"
@@ -93,6 +99,9 @@ def load_benchmark_texts() -> tuple[list[str], str]:
     if imdb_path.exists():
         print(f"[benchmark] loading dataset from {imdb_path}")
         ds = load_from_disk(str(imdb_path))
+        if hasattr(ds, "keys"):
+            split_name = "test" if "test" in ds else "train"
+            ds = ds[split_name]
         texts = sorted([sample["text"] for sample in ds if sample["text"].strip()])
         print(f"[benchmark] loaded {len(texts)} samples from imdb")
         return texts, "imdb"
@@ -505,6 +514,17 @@ def run_step2(model, tokenizer, first_device, device_short, mode_str, adapt_dir:
     all_embeddings = []
     all_sample_latency = []  # 每样本编码延迟（含 tokenize + forward + pooling）
 
+    # Warmup: 3 iterations to match perf script's warmup policy (symmetric)
+    print("[benchmark] warmup 3 iterations...")
+    warmup_text = texts[0] if texts else "Hello, benchmark."
+    with torch.no_grad():
+        for _ in range(3):
+            _ = encode_texts(model, tokenizer, [warmup_text], first_device)
+    if device_short == "npu":
+        torch.npu.synchronize()
+    print("[benchmark] warmup done")
+
+    step2_start = time.perf_counter()
     with torch.no_grad():
         for i, text in enumerate(texts):
             sample_start = time.perf_counter()
@@ -523,6 +543,11 @@ def run_step2(model, tokenizer, first_device, device_short, mode_str, adapt_dir:
 
             elif (i + 1) % 8 == 0:
                 print(f"[benchmark] processed {i + 1}/{len(texts)} samples")
+
+    if device_short == "npu":
+        torch.npu.synchronize()
+    step2_wall_clock = time.perf_counter() - step2_start
+    wall_clock_s = round(step2_wall_clock, 6)
 
     # 语义相似度画像（句向量模型评测画像：语义对相似度断言）
     with torch.no_grad():
@@ -543,8 +568,9 @@ def run_step2(model, tokenizer, first_device, device_short, mode_str, adapt_dir:
     print(f"[benchmark]   - embeddings: {len(all_embeddings)} samples, dim={all_embeddings[0].shape[-1]}")
     print(f"[benchmark]   - similarity_profile: {len(similarity_profile['pairs'])} pairs, all_margins_positive={similarity_profile['all_margins_positive']}")
     print(f"[benchmark] avg per-sample latency: {avg_latency_s} s")
+    print(f"[benchmark] wall_clock_s: {wall_clock_s}")
 
-    return outputs_path, None, None, avg_latency_s
+    return outputs_path, None, None, avg_latency_s, wall_clock_s
 
 
 def main():
@@ -599,9 +625,9 @@ def main():
     trace_path, metrics_path, start_time = run_step1(model, processor, first_device, device_short, device_ids, mode_str, ADAPT_DIR, dataset_name, texts)
 
     # Step 2: 全样本 -> outputs + 相似度画像
-    outputs_path, ttft_avg, tpot_avg, avg_latency_s = run_step2(model, processor, first_device, device_short, mode_str, ADAPT_DIR, dataset_name, texts, args.use_pretrained, args.max_samples)
+    outputs_path, ttft_avg, tpot_avg, avg_latency_s, wall_clock_s = run_step2(model, processor, first_device, device_short, mode_str, ADAPT_DIR, dataset_name, texts, args.use_pretrained, args.max_samples)
 
-    # 更新 metrics 文件（添加 end_time, ttft_ms, tpot_ms；用 Step2 全样本平均延迟覆盖 latency_s）
+    # 更新 metrics 文件（添加 end_time, ttft_ms, tpot_ms, wall_clock_s, warmup_iterations）
     # 句向量模型无生成过程，ttft_ms / tpot_ms 为 null
     end_time = datetime.now().isoformat()
     with open(metrics_path, "r") as f:
@@ -610,8 +636,12 @@ def main():
     metrics["end_time"] = end_time
     metrics["ttft_ms"] = ttft_avg
     metrics["tpot_ms"] = tpot_avg
-    if avg_latency_s is not None:
-        metrics["latency_s"] = avg_latency_s
+    metrics["wall_clock_s"] = wall_clock_s
+    metrics["warmup_iterations"] = 3
+    # Set latency_s = wall_clock_s / num_samples for gate alignment
+    num_samples_actual = len(texts)
+    if num_samples_actual > 0 and wall_clock_s > 0:
+        metrics["latency_s"] = round(wall_clock_s / num_samples_actual, 6)
 
     with open(metrics_path, "w") as f:
         json.dump(metrics, indent=2, fp=f)

@@ -1,0 +1,92 @@
+{
+  "measurement_contract_version": 3,
+  "optimizations": "batched_inference(all_texts_one_batch) + warmup(3x) + TASK_QUEUE_ENABLE=1",
+  "results": [
+    {
+      "dtype": "fp32",
+      "mode": "pretrained",
+      "dataset": "builtin",
+      "output_type": "image_text_similarity",
+      "baseline_artifact": "benchmark_metrics_npu_fp32_pretrained_builtin.json",
+      "perf_artifact": "benchmark_metrics_npu_fp32_pretrained_builtin_perf.json",
+      "num_samples": 60,
+      "baseline_latency_s": 0.001143,
+      "perf_latency_s": 0.000304,
+      "baseline_wall_clock_s": 0.068561,
+      "perf_wall_clock_s": 0.018229,
+      "wall_clock_source": "artifact_explicit_field",
+      "baseline_warmup_iterations": 3,
+      "perf_warmup_iterations": 3,
+      "warmup_policy": "symmetric",
+      "baseline_memory_mb": 668.0,
+      "perf_memory_mb": 666.0,
+      "speedup_ratio": 3.761095,
+      "latency_reduction_pct": 73.412,
+      "cosine_similarity": 1.0,
+      "max_abs_error": 2.09808e-05,
+      "optimization_items": [
+        "batched_inference",
+        "warmup",
+        "TASK_QUEUE_ENABLE"
+      ],
+      "optimization_kind": "runtime_only",
+      "task_queue_enable": true,
+      "batch_size": 60,
+      "selected_npu": 1,
+      "selected_npus": [
+        1
+      ],
+      "device_topology": "single-die:1",
+      "parallel_mode": "single_card",
+      "comparison_method": "independent_baseline_artifact",
+      "comparison_scope": "steady_state",
+      "precision_method": "cosine_similarity",
+      "validation_note": "Independent baseline artifact (benchmark_metrics_npu_fp32_pretrained_builtin.json) vs perf artifact (benchmark_metrics_npu_fp32_pretrained_builtin_perf.json). Symmetric warmup (3x). Cosine=1.0000000000, max_abs_error=0.0000209808.",
+      "steady_state_baseline_latency_s": 0.001143,
+      "steady_state_perf_latency_s": 0.000304
+    }
+  ],
+  "best_result": {
+    "dtype": "fp32",
+    "mode": "pretrained",
+    "dataset": "builtin",
+    "output_type": "image_text_similarity",
+    "baseline_artifact": "benchmark_metrics_npu_fp32_pretrained_builtin.json",
+    "perf_artifact": "benchmark_metrics_npu_fp32_pretrained_builtin_perf.json",
+    "num_samples": 60,
+    "baseline_latency_s": 0.001143,
+    "perf_latency_s": 0.000304,
+    "baseline_wall_clock_s": 0.068561,
+    "perf_wall_clock_s": 0.018229,
+    "wall_clock_source": "artifact_explicit_field",
+    "baseline_warmup_iterations": 3,
+    "perf_warmup_iterations": 3,
+    "warmup_policy": "symmetric",
+    "baseline_memory_mb": 668.0,
+    "perf_memory_mb": 666.0,
+    "speedup_ratio": 3.761095,
+    "latency_reduction_pct": 73.412,
+    "cosine_similarity": 1.0,
+    "max_abs_error": 2.09808e-05,
+    "optimization_items": [
+      "batched_inference",
+      "warmup",
+      "TASK_QUEUE_ENABLE"
+    ],
+    "optimization_kind": "runtime_only",
+    "task_queue_enable": true,
+    "batch_size": 60,
+    "selected_npu": 1,
+    "selected_npus": [
+      1
+    ],
+    "device_topology": "single-die:1",
+    "parallel_mode": "single_card",
+    "comparison_method": "independent_baseline_artifact",
+    "comparison_scope": "steady_state",
+    "precision_method": "cosine_similarity",
+    "validation_note": "Independent baseline artifact (benchmark_metrics_npu_fp32_pretrained_builtin.json) vs perf artifact (benchmark_metrics_npu_fp32_pretrained_builtin_perf.json). Symmetric warmup (3x). Cosine=1.0000000000, max_abs_error=0.0000209808.",
+    "steady_state_baseline_latency_s": 0.001143,
+    "steady_state_perf_latency_s": 0.000304
+  }
+}

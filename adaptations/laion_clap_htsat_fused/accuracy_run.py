@@ -145,8 +145,18 @@ def main():
             trace_path.write_text(json.dumps({"fallback": str(e)}))
     print(f"[benchmark] step1 latency: {step1_latency:.4f}s, trace: {trace_path.exists()}")
 
+    # warmup: 3 iterations (not counted in timing)
+    warmup_iterations = 3
+    print(f"[benchmark] warmup {warmup_iterations} iterations...")
+    with torch.no_grad():
+        for _ in range(warmup_iterations):
+            _ = encode(texts[:8])
+    if hasattr(torch, "npu"):
+        torch.npu.synchronize()
+    print(f"[benchmark] warmup done")
+
     all_sims = []
-    t_all = time.time()
+    t_all = time.perf_counter()
     with torch.no_grad():
         for i in range(0, n, 16):
             chunk = texts[i : i + 16]
@@ -154,7 +164,10 @@ def main():
             a = torch.nn.functional.normalize(a, dim=-1)
             t = torch.nn.functional.normalize(t, dim=-1)
             all_sims.extend((a @ t.T).squeeze(0).tolist())
-    total_latency = time.time() - t_all
+    if hasattr(torch, "npu"):
+        torch.npu.synchronize()
+    total_latency = time.perf_counter() - t_all
+    wall_clock_s = round(total_latency, 6)
     peak_mem = 0.0
     try:
         if hasattr(torch, "npu"):
@@ -172,6 +185,8 @@ def main():
         "start_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "step1_forward_latency_s": round(step1_latency, 6),
         "latency_s": round(total_latency / max(n, 1), 6),
+        "wall_clock_s": wall_clock_s,
+        "warmup_iterations": warmup_iterations,
         "peak_memory_mb": round(peak_mem, 2),
         "num_samples": n,
         "device": device,
