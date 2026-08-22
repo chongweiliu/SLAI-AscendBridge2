@@ -1,0 +1,45 @@
+{
+  "model_id": "openai/clip-vit-base-patch32",
+  "status": "completed",
+  "adapter_id": "adapter-5",
+  "started_at": "2026-08-22T10:35:09",
+  "updated_at": "2026-08-22T10:40:03",
+  "stages": {
+    "directory_setup": {
+      "status": "completed",
+      "timestamp": "2026-08-22T10:35:09",
+      "notes": "创建适配目录，缓存目录固定为 adaptations/openai_clip_vit_base_patch32/models"
+    },
+    "environment": {
+      "status": "completed",
+      "timestamp": "2026-08-22T10:40:03",
+      "notes": "uv sync --extra ascend 完成：torch==2.8.0, torch-npu==2.8.0.post4, transformers==5.15.1, pillow (Python 3.12 venv)"
+    },
+    "code_generation": {
+      "status": "completed",
+      "timestamp": "2026-08-22T10:35:09",
+      "notes": "demo.py (CLIP 双塔图文匹配) / README.md / pyproject.toml 生成完成"
+    },
+    "dry_run": {
+      "status": "completed",
+      "timestamp": "2026-08-22T10:40:03",
+      "device": "npu:0",
+      "npu_detected": true,
+      "cuda_detected": false,
+      "model_loaded": true,
+      "inference_completed": true,
+      "output": "[Setup] Model cache: /mnt/workspace/SLAI-AscendBridge2/adaptations/openai_clip_vit_base_patch32/models\n[Device] NPU 0: free HBM 60.8 GiB\n[Device] NPU 1: free HBM 58.9 GiB\n[Device] Huawei Ascend NPU detected, selected npu:0\n[Setup] Using device: npu:0\n[Setup] Loading processor for openai/clip-vit-base-patch32...\n[Setup] Config loaded: model_type=clip, vision_layers=12, text_layers=12\n[Setup] DRY RUN MODE ENABLED: Initializing model with RANDOM weights.\n[Setup] Shrinking text_config:\n[Setup] Shrunk num_hidden_layers: 12 -> 2\n[Setup] Shrinking vision_config:\n[Setup] Shrunk num_hidden_layers: 12 -> 2\n[Setup] Using minimal config for fast dry-run (reduced layers).\n[Setup] Model on device: npu:0\n[Run] Input: synthetic image (red square on white background, 224x224)\n[Run] Candidate texts: ['a solid red square', 'a solid blue square', 'a photo of a mountain landscape']\n[Run] Encoding image and texts...\n[Run] score('a solid red square') = -0.1210\n[Run] score('a solid blue square') = -0.1099\n[Run] score('a photo of a mountain landscape') = -0.0539\n[Run] Output: best match = 'a photo of a mountain landscape' (score=-0.0539)\n[Run] Matching time: 0.2428 seconds\n[Run] Dry-run: random weights, scores are meaningless (path validation only).\n[Success] Demo completed.\n"
+    },
+    "full_run": {
+      "status": "completed",
+      "timestamp": "2026-08-22T10:40:03",
+      "device": "npu:0",
+      "notes": "真实权重图文匹配正确：score(red)=0.3192 > score(blue)=0.2848 > score(landscape)=0.2034，见 full_run_output.txt"
+    }
+  },
+  "final_result": {
+    "status": "completed",
+    "timestamp": "2026-08-22T10:40:03",
+    "notes": "Dry run 与 full run 均在 Ascend NPU 上通过；transformers 5.x get_*_features 返回对象需取 pooler_output（已兼容处理）；缓存固定于 adaptations/openai_clip_vit_base_patch32/models"
+  }
+}

@@ -1,0 +1,24 @@
+[Setup] Model cache: /mnt/workspace/SLAI-AscendBridge2/adaptations/openai_clip_vit_base_patch32/models
+[Device] NPU 0: free HBM 60.8 GiB
+[Device] NPU 1: free HBM 58.9 GiB
+[Device] Huawei Ascend NPU detected, selected npu:0
+[Setup] Using device: npu:0
+[Setup] Loading processor for openai/clip-vit-base-patch32...
+[Setup] Config loaded: model_type=clip, vision_layers=12, text_layers=12
+[Setup] DRY RUN MODE ENABLED: Initializing model with RANDOM weights.
+[Setup] Shrinking text_config:
+[Setup] Shrunk num_hidden_layers: 12 -> 2
+[Setup] Shrinking vision_config:
+[Setup] Shrunk num_hidden_layers: 12 -> 2
+[Setup] Using minimal config for fast dry-run (reduced layers).
+[Setup] Model on device: npu:0
+[Run] Input: synthetic image (red square on white background, 224x224)
+[Run] Candidate texts: ['a solid red square', 'a solid blue square', 'a photo of a mountain landscape']
+[Run] Encoding image and texts...
+[Run] score('a solid red square') = -0.1210
+[Run] score('a solid blue square') = -0.1099
+[Run] score('a photo of a mountain landscape') = -0.0539
+[Run] Output: best match = 'a photo of a mountain landscape' (score=-0.0539)
+[Run] Matching time: 0.2428 seconds
+[Run] Dry-run: random weights, scores are meaningless (path validation only).
+[Success] Demo completed.
