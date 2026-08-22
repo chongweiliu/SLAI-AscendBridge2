@@ -1,0 +1,25 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+`generation_config` default values have been modified to match model-specific defaults: {'begin_suppress_tokens': [220, 50256]}. If this is not desired, please set these values explicitly.
+The attention mask is not set and cannot be inferred from input because pad token is same as eos token. As a consequence, you may observe unexpected behavior. Please pass your input's `attention_mask` to obtain reliable results.
+A custom logits processor of type <class 'transformers.generation.logits_process.SuppressTokensAtBeginLogitsProcessor'> has been passed to `.generate()`, but it was also created in `.generate()`, given its parameterization. The custom <class 'transformers.generation.logits_process.SuppressTokensAtBeginLogitsProcessor'> will take precedence. Please check the docstring of <class 'transformers.generation.logits_process.SuppressTokensAtBeginLogitsProcessor'> to see related `.generate()` flags.
+[Setup] Model cache: /mnt/workspace/SLAI-AscendBridge2/adaptations/openai_whisper_large_v3_turbo/models
+[Device] Huawei Ascend NPU detected.
+[Device] NPU count: 2
+[Device] npu:0 free=65.4GB / total=65.8GB
+[Device] npu:1 free=65.6GB / total=65.8GB
+[Setup] Using device: npu:1
+[Setup] Loading processor for openai/whisper-large-v3-turbo...
+[Setup] Config loaded: model_type=whisper, encoder_layers=32, decoder_layers=4
+[Setup] DRY RUN MODE ENABLED: Initializing model with RANDOM weights.
+[Setup] Shrunk encoder_layers: 32 -> 2
+[Setup] Shrunk decoder_layers: 4 -> 2
+[Setup] Random-weight model created and moved to device.
+[Setup] Model on device: npu:1
+[Run] Input: synthetic waveform 64000 samples @ 16000Hz (silence + 440Hz tone + sweep + silence)
+[Run] Processed inputs: input_features=(1, 128, 3000) (dtype=torch.float16)
+[Run] Generating (transcribing)...
+[Setup] Patched outdated generation_config (is_multilingual/lang_to_id/task_to_id)
+[Run] Generated 64 tokens
+[Run] Output: bek fists fists fists fists fists fists fists fists fists fists fists fists fists énormément énormément énormément énormément énormément énormément énormément énormément énormément énormément énormémenthdhdhdhdhdhdhdhdhdhdhdhdhdhdhdhd май май май май май май май май май май май май май май май май май май май май май май май
+[Run] Generation time: 0.6448 seconds
+[Success] Demo completed.

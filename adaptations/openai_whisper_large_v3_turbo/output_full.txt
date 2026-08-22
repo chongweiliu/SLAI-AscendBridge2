@@ -1,0 +1,22 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+The attention mask is not set and cannot be inferred from input because pad token is same as eos token. As a consequence, you may observe unexpected behavior. Please pass your input's `attention_mask` to obtain reliable results.
+/mnt/workspace/SLAI-AscendBridge2/adaptations/openai_whisper_large_v3_turbo/.venv/lib/python3.12/site-packages/transformers/pytorch_utils.py:345: UserWarning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (Triggered internally at ../torch_npu/csrc/aten/common/TensorFactories.cpp:340.)
+  return torch.isin(elements, test_elements)
+[Setup] Model cache: /mnt/workspace/SLAI-AscendBridge2/adaptations/openai_whisper_large_v3_turbo/models
+[Device] Huawei Ascend NPU detected.
+[Device] NPU count: 2
+[Device] npu:0 free=65.4GB / total=65.8GB
+[Device] npu:1 free=65.6GB / total=65.8GB
+[Setup] Using device: npu:1
+[Setup] Loading processor for openai/whisper-large-v3-turbo...
+[Setup] Config loaded: model_type=whisper, encoder_layers=32, decoder_layers=4
+[Setup] Attempting to load pre-trained weights...
+[Setup] Pre-trained weights loaded
+[Setup] Model on device: npu:1
+[Run] Input: synthetic waveform 64000 samples @ 16000Hz (silence + 440Hz tone + sweep + silence)
+[Run] Processed inputs: input_features=(1, 128, 3000) (dtype=torch.float16)
+[Run] Generating (transcribing)...
+[Run] Generated 1 tokens
+[Run] Output: .
+[Run] Generation time: 0.3372 seconds
+[Success] Demo completed.
