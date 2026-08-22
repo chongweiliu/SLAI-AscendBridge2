@@ -1,0 +1,33 @@
+[project]
+name = "qwen-qwen2-5-1-5b-instruct-ascend"
+version = "0.1.0"
+description = "Ascend NPU adaptation for Qwen/Qwen2.5-1.5B-Instruct"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "accelerate>=0.26.0",
+    "transformers>=4.45,<5.0",
+    "safetensors>=0.4",
+    "tiktoken>=0.7",
+]
+
+[project.optional-dependencies]
+# 两路统一锁 torch==2.8.0：与 torch-npu==2.8.0.post4 ABI 匹配（本机验证组合）。
+# x86_64 上 PyPI 的 torch 2.8.0 自带 CUDA 运行时；aarch64 为 CPU 构建，配合 torch_npu 使用。
+cuda = ["torch==2.8.0"]
+ascend = ["torch==2.8.0", "torch-npu==2.8.0.post4"]
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "aliyun"
+url = "https://mirrors.aliyun.com/pypi/simple"
+default = true
+
+[[tool.uv.index]]
+name = "ascend-repo"
+url = "https://repo.huaweicloud.com/repository/pypi/simple"
+explicit = true
+
+[tool.uv.sources]
+torch-npu = [{ index = "ascend-repo", extra = "ascend" }]
