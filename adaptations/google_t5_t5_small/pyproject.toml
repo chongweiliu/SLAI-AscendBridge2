@@ -1,0 +1,47 @@
+[project]
+name = "google-t5-t5-small-ascend"
+version = "0.1.0"
+description = "Ascend NPU adaptation for google-t5/t5-small"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "accelerate>=0.20",
+    "torch>=2.0",
+    "transformers>=4.40",
+    "safetensors>=0.4",
+    # T5 tokenizer (SentencePiece 后端) 需要
+    "sentencepiece",
+    "protobuf",
+]
+
+[project.optional-dependencies]
+cuda = ["torch>=2.6.0"]
+# 与本机系统环境验证过的组合保持一致：torch 2.8.0 + torch_npu 2.8.0.post4 (CANN 25.5.5)
+ascend = ["torch==2.8.0", "torch-npu==2.8.0.post4"]
+
+[tool.uv]
+# 虚拟项目：adaptation 目录本身不作为包安装，避免把 models/ 缓存打进 wheel
+package = false
+index-strategy = "unsafe-best-match"
+conflicts = [[{ extra = "cuda" }, { extra = "ascend" }]]
+
+[[tool.uv.index]]
+name = "aliyun"
+url = "https://mirrors.aliyun.com/pypi/simple/"
+default = true
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[[tool.uv.index]]
+name = "ascend-repo"
+url = "https://repo.huaweicloud.com/repository/pypi/simple"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu124", extra = "cuda" },
+    { index = "ascend-repo", extra = "ascend" },
+]
+torch-npu = [{ index = "ascend-repo", extra = "ascend" }]

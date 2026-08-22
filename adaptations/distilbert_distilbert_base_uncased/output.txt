@@ -1,0 +1,63 @@
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/utils/_error_code.py:103: SyntaxWarning: invalid escape sequence '\['
+  self.npu_exception = "\[ERROR\] [0-9\-\:]* \(PID:\d*, Device:\-?\d*, RankID:\-?\d*\) ERR\d{5}"
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/optim/npu_fused_rmsprop.py:16: SyntaxWarning: invalid escape sequence '\s'
+  learning rate is thus :math:`\alpha/(\sqrt{v} + \epsilon)` where :math:`\alpha`
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/profiler/analysis/prof_view/prof_db_parse/_basic_db_parser.py:46: SyntaxWarning: invalid escape sequence '\d'
+  db_patten = '^msprof_\d+\.db$'
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:132: SyntaxWarning: invalid escape sequence '\e'
+  公式1: fast_gelu(x)=$$\frac{x}{1+e^{-1.702\begin{vmatrix}x\end{vmatrix}}}e^{0.851x(x-\begin{vmatrix}x\end{vmatrix})
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:1655: SyntaxWarning: invalid escape sequence '\_'
+  softmax_layout: string类型，可选参数，用于控制TND场景下softmax的输出（softmax_max和softmax_sum）的数据排布方式。当前仅在input\_layout=“TND”时进行配置，仅支持传入“TND”。默认情况下，softmax的输出排布为NTD排布；传入TND时，softmax的输出排布为TND排布。
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:1870: SyntaxWarning: invalid escape sequence '\_'
+  softmax_layout: string类型，可选参数，用于控制TND场景下softmax的输出（softmax_max和softmax_sum）的数据排布方式。当前仅在input\_layout=“TND”时进行配置，仅支持传入“TND”。默认情况下，softmax的输出排布为NTD排布；传入TND时，softmax的输出排布为TND排布。
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:3461: SyntaxWarning: invalid escape sequence '\e'
+  $$rotate = diag(rotate1, rotate2, rotate3) = \begin{pmatrix}rotate1&0&0\\0&rotate2&0\\0&0&rotate3\\\end{pmatrix}$$
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:4150: SyntaxWarning: invalid escape sequence '\('
+  outputs = swiglu\(x, dim = -1) = swish(A) * B = A * sigmoid(A) * B
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:4264: SyntaxWarning: invalid escape sequence '\o'
+  x_{l+1} = (H_{l}^{res})^{T} \times x_l + h_{l}^{out} \otimes H_{t}^{post}
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:6423: SyntaxWarning: invalid escape sequence '\s'
+  令 $B$ 表示batch size，$L_i$ 表示第i个序列的长度，$T=\sum_i^B L_i$ 表示累积序列长度。$N_k$ 表示key的头数，$N_v$ 表示value的头数，$D_k$ 表示key向量的维度，$D_v$ 表示value向量的维度。
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:6503: SyntaxWarning: invalid escape sequence '\s'
+  令 $B$ 表示batch size，$L_i$ 表示第i个序列的长度，$T=\sum_i^B L_i$ 表示累积序列长度。$N_k$ 表示key的头数，$N_v$ 表示value的头数，$D_k$ 表示key向量的维度，$D_v$ 表示value向量的维度。
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:7392: SyntaxWarning: invalid escape sequence '\s'
+  scale_value: float类型, 代表缩放系数, 用来约束梯度, 其默认值为1.0, 典型值为$\frac{1}{\sqrt{D}}$; 数据类型为float32.
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:7887: SyntaxWarning: invalid escape sequence '\_'
+  sparse模式支持sparse\_mode=4且传入mask；当sparse\_mode=4时，要求preTokens >= -actual\_seq\_qlen、nextTokens >= -actual\_seq\_kvlen、preTokens + nextTokens >= 0；
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:8420: SyntaxWarning: invalid escape sequence '\_'
+  sparse模式支持sparse\_mode=4且传入mask；当sparse\_mode=4时，要求preTokens >= -actual\_seq\_qlen、nextTokens >= -actual\_seq\_kvlen、preTokens + nextTokens >= 0；
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:10292: SyntaxWarning: invalid escape sequence '\s'
+  out(i,j)=skip1_{i,j}+skip2Optional_{i,j}+\sum_{k=0}^{K}(scales_{i,k}*(expandPermutedRows_{expandedSrcToDstRow_{i+k*num_rows},j}+bias_{expertid,j}))
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:11247: SyntaxWarning: invalid escape sequence '\>'
+  >-   H：表示嵌入向量的长度，取值\>0。
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:11595: SyntaxWarning: invalid escape sequence '\['
+  gamma: Device侧的Tensor类型，表示数据缩放因子；shape支持1-8维度，数据格式支持ND。shape需要满足gamma_shape = input_shape\[n:\], n < input_shape.dims()。数据类型支持FLOAT32、FLOAT16、BFLOAT16，与input数据类型保持一致。
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:11695: SyntaxWarning: invalid escape sequence '\['
+  gamma：Device侧的Tensor类型，数据缩放因子。shape支持1-8维，数据格式支持ND，数据类型支持FLOAT16、BFLOAT16。shape需要满足gamma_shape = x_shape\[n:\], n < x_shape.dims()。数据类型、数据格式需要与入参x1保持一致。不支持空tensor。
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:12878: SyntaxWarning: invalid escape sequence '\~'
+  - B（batchsize）：取值范围为1\~65536。
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:13563: SyntaxWarning: invalid escape sequence '\_'
+  v=8*ks\_max
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:14526: SyntaxWarning: invalid escape sequence '\q'
+  (1)\qquad f_t &=\sigma(W_f[h_{t-1}, x_t] + b_f) \\
+/mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/.venv/lib/python3.12/site-packages/torch_npu/_op_plugin_docs.py:14660: SyntaxWarning: invalid escape sequence '\m'
+  | 输入拼接 | $\mathbf{z}_t = \begin{bmatrix} \mathbf{h}_{t-1} \\ \mathbf{x}_t \end{bmatrix}$ |
+[Setup] Model cache: /mnt/workspace/SLAI-AscendBridge2/adaptations/distilbert_distilbert_base_uncased/models
+[Device] Huawei Ascend NPU detected.
+[Device] NPU count: 2
+[Setup] Using device: npu:1
+[Setup] Loading tokenizer for distilbert/distilbert-base-uncased...
+[Setup] Config loaded: model_type=distilbert, layers=6
+[Setup] DRY RUN MODE ENABLED: Initializing model with RANDOM weights.
+[Setup] Shrunk num_hidden_layers: 6 -> 2
+[Setup] Using minimal config for fast dry-run (reduced layers).
+[Setup] Model placed on npu:1
+[Setup] Model on device: npu:1
+[Run] Input: The capital of France is [MASK].
+[Run] Forward pass (masked LM)...
+[Run] Logits shape: (1, 9, 30522) (batch, seq, vocab), all finite
+[Run] Output: The capital of France is burned.
+[Run] Top-5 predictions for [MASK]: ['burned', '##hide', 'thieves', '2012', '##lane']
+[Run] Forward time: 0.1592 seconds
+[Run] Note: dry-run uses random weights, predicted token is meaningless by design.
+[Success] Demo completed.
