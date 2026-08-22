@@ -11,6 +11,9 @@ dependencies = [
     # T5 tokenizer (SentencePiece 后端) 需要
     "sentencepiece",
     "protobuf",
+    # benchmark accuracy_run.py 需要 (R2)
+    "datasets>=2.14",
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]

@@ -7,6 +7,8 @@ dependencies = [
     "accelerate>=0.26.0",
     "transformers>=4.45,<5.0",
     "safetensors>=0.4",
+    "datasets>=2.14",
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]
