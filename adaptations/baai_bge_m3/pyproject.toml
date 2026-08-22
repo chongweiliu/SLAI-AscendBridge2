@@ -9,6 +9,8 @@ dependencies = [
     "transformers>=4.51,<5.0",
     "safetensors>=0.4",
     "sentencepiece",
+    "datasets",
+    "numpy",
 ]
 
 [project.optional-dependencies]
