@@ -8,6 +8,8 @@ dependencies = [
     "transformers>=4.45,<5.0",
     "safetensors>=0.4",
     "tiktoken>=0.7",
+    "datasets>=2.14",
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]
