@@ -1,0 +1,15 @@
+{
+  "cosine_similarity": 0.9999999891,
+  "min_cosine": 0.9999998212,
+  "max_abs_error": 2.24113e-05,
+  "avg_max_abs_error": 3.5395e-06,
+  "baseline_samples": 60,
+  "perf_samples": 60,
+  "cuda_samples": 60,
+  "ascend_samples": 60,
+  "total_samples": 60,
+  "baseline_wall_clock_s": 0.488696,
+  "perf_wall_clock_s": 0.130594,
+  "speedup_ratio": 3.742101,
+  "wall_clock_speedup_ratio": 3.742101
+}
