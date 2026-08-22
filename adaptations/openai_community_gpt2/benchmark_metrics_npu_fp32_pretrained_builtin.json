@@ -1,15 +1,15 @@
 {
-  "start_time": "2026-08-22T11:47:41.085583",
-  "latency_s": 0.621936,
-  "step1_forward_latency_s": 0.245961,
+  "start_time": "2026-08-22T15:48:31.168840",
+  "latency_s": 0.01054,
+  "step1_forward_latency_s": 0.247159,
   "peak_memory_mb": 497.15,
-  "num_samples": 55,
-  "device": "npu:0",
+  "num_samples": 50,
+  "device": "npu:1",
   "device_model": "Ascend910_9362",
   "mode": "pretrained",
   "dataset": "builtin",
   "dtype": "fp32",
-  "output_type": "generated_text",
+  "output_type": "logits",
   "packages": {
     "torch": "2.8.0",
     "transformers": "5.15.1",
@@ -17,7 +17,7 @@
     "numpy": "2.5.2",
     "datasets": "5.0.1"
   },
-  "end_time": "2026-08-22T11:48:19.242766",
-  "ttft_ms": 15.227,
-  "tpot_ms": 9.307
+  "end_time": "2026-08-22T15:48:35.586866",
+  "wall_clock_s": 0.52702,
+  "warmup_iterations": 3
 }
