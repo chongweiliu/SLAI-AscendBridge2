@@ -13,6 +13,8 @@ dependencies = [
     "pillow>=10.0.0",
     # Qwen2.5-VL vision tower uses einops
     "einops>=0.8.0",
+    "datasets>=2.14",
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]
