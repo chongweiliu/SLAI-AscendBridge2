@@ -1,0 +1,39 @@
+{
+  "model_id": "laion/clap-htsat-fused",
+  "status": "completed",
+  "adapter_id": "adapter-4",
+  "started_at": "2026-08-22T10:45:28.174513",
+  "updated_at": "2026-08-22T11:04:19.968510",
+  "stages": {
+    "directory_setup": {
+      "status": "completed",
+      "timestamp": "2026-08-22T10:45:28.174513",
+      "notes": "创建适配目录 adaptations/laion_clap_htsat_fused（含 models/ 缓存目录）"
+    },
+    "environment": {
+      "status": "completed",
+      "timestamp": "2026-08-22T11:04:19.968510",
+      "notes": "pyproject.toml 重建为本机已验证模式（两路 pin torch==2.8.0 + ascend 加 torch-npu==2.8.0.post4，无 conflicts 分桶，aliyun 默认 + ascend-repo explicit）；uv.lock 重新锁定，.venv 实测 torch 2.8.0+cpu / torch_npu 2.8.0.post4 / transformers 4.57.6，torch.npu.is_available()=True"
+    },
+    "code_generation": {
+      "status": "completed",
+      "timestamp": "2026-08-22T11:04:19.968510",
+      "notes": "demo.py（numpy 合成 440Hz 正弦波 + ClapProcessor，纯 numpy mel 特征，无 torchaudio/librosa/scipy；复合配置 shrink：文本 12->2 层、音频 depths [2,2,6,2]->[1,1,1,1]；mem_get_info 自动选空闲卡，严禁 ASCEND_RT_VISIBLE_DEVICES；flush+os._exit(0) 规避退出挂死）与 README.md 生成完成"
+    },
+    "dry_run": {
+      "status": "completed",
+      "timestamp": "2026-08-22T11:04:19.968510",
+      "device": "npu:1",
+      "npu_detected": true,
+      "cuda_detected": false,
+      "model_loaded": true,
+      "inference_completed": true,
+      "output": "[Setup] Model cache: /mnt/workspace/SLAI-AscendBridge2/adaptations/laion_clap_htsat_fused/models\n[Device] Huawei Ascend NPU detected.\n[Device] NPU count: 2\n[Device] NPU 0: free HBM 60.9 GiB / total 61.3 GiB\n[Device] NPU 1: free HBM 61.1 GiB / total 61.3 GiB\n[Device] Selected NPU device: npu:1\n[Setup] Using device: npu:1\n[Setup] Loading processor for laion/clap-htsat-fused...\n[Setup] Audio sampling_rate: 48000 Hz\n[Setup] Config loaded: model_type=clap, text_layers=12, audio_depths=[2, 2, 6, 2]\n[Setup] DRY RUN MODE ENABLED: Initializing model with RANDOM weights.\n[Setup] Shrunk text_config.num_hidden_layers: 12 -> 2\n[Setup] Shrunk audio_config.depths: [2, 2, 6, 2] -> [1, 1, 1, 1]\n[Setup] Using minimal config for fast dry-run.\n[Setup] Model placed on npu:1\n[Setup] Model on device: npu:1\n[Setup] Model params: 66.1M\n[Run] Input texts: ['the sound of a bell ringing', 'a pure tone beep', 'a dog barking']\n[Run] Input audio: synthetic sine wave, 48000 samples @ 48000 Hz\n[Run] Forward pass (audio + text encoders)...\n[Run] audio_embeds: (1, 512), text_embeds: (3, 512), all finite\n[Run] Cosine similarity per text: [-0.0477, -0.0441, -0.0467]\n[Run] Output: Top-1 matched text index=1 -> 'a pure tone beep'\n[Run] Forward time: 0.2631 seconds\n[Run] Note: dry-run uses random weights, similarities are meaningless by design.\n[Success] Demo completed.\n"
+    }
+  },
+  "final_result": {
+    "status": "completed",
+    "timestamp": "2026-08-22T11:04:19.968510",
+    "notes": "Dry Run 在 Ascend NPU (npu:1) 通过：audio_embeds (1,512)/text_embeds (3,512) 全有限，余弦相似度与 Top-1 输出，[Success]；check_adaptation.py 通过。目录内另有真实权重 full_run_output.txt 作为额外证据（Top-1 正确匹配 'a pure tone beep'，相似度 0.2426）。此前 adapter-3（已停用）曾覆盖本目录文件，已按 team-lead 指示以 adapter-4 产出为准重建（保留其选卡/退出挂死规避/音频分支缩层思路）。"
+  }
+}

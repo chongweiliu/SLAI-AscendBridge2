@@ -1,0 +1,26 @@
+[Setup] Model cache: /mnt/workspace/SLAI-AscendBridge2/adaptations/laion_clap_htsat_fused/models
+[Device] Huawei Ascend NPU detected.
+[Device] NPU count: 2
+[Device] NPU 0: free HBM 60.9 GiB / total 61.3 GiB
+[Device] NPU 1: free HBM 61.1 GiB / total 61.3 GiB
+[Device] Selected NPU device: npu:1
+[Setup] Using device: npu:1
+[Setup] Loading processor for laion/clap-htsat-fused...
+[Setup] Audio sampling_rate: 48000 Hz
+[Setup] Config loaded: model_type=clap, text_layers=12, audio_depths=[2, 2, 6, 2]
+[Setup] DRY RUN MODE ENABLED: Initializing model with RANDOM weights.
+[Setup] Shrunk text_config.num_hidden_layers: 12 -> 2
+[Setup] Shrunk audio_config.depths: [2, 2, 6, 2] -> [1, 1, 1, 1]
+[Setup] Using minimal config for fast dry-run.
+[Setup] Model placed on npu:1
+[Setup] Model on device: npu:1
+[Setup] Model params: 66.1M
+[Run] Input texts: ['the sound of a bell ringing', 'a pure tone beep', 'a dog barking']
+[Run] Input audio: synthetic sine wave, 48000 samples @ 48000 Hz
+[Run] Forward pass (audio + text encoders)...
+[Run] audio_embeds: (1, 512), text_embeds: (3, 512), all finite
+[Run] Cosine similarity per text: [-0.0477, -0.0441, -0.0467]
+[Run] Output: Top-1 matched text index=1 -> 'a pure tone beep'
+[Run] Forward time: 0.2631 seconds
+[Run] Note: dry-run uses random weights, similarities are meaningless by design.
+[Success] Demo completed.
