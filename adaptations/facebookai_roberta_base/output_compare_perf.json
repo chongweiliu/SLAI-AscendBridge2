@@ -1,0 +1,18 @@
+{
+  "cosine_similarity": 0.9999999177455902,
+  "min_cosine_similarity": 0.9999992847442627,
+  "max_abs_error": 2.956390380859375e-05,
+  "baseline_samples": 50,
+  "perf_samples": 50,
+  "cuda_samples": 50,
+  "ascend_samples": 50,
+  "baseline_wall_clock_s": 0.388319,
+  "perf_wall_clock_s": 0.102878,
+  "speedup_ratio": 3.774558,
+  "baseline_latency_s": 0.007766,
+  "perf_latency_s": 0.002058,
+  "latency_reduction_pct": 73.5,
+  "baseline_warmup_iterations": 3,
+  "perf_warmup_iterations": 3,
+  "output_type": "logits"
+}

@@ -1,0 +1,36 @@
+{
+  "start_time": "2026-08-22T15:57:48.161596",
+  "end_time": "2026-08-22T15:57:48.496592",
+  "latency_s": 0.005583,
+  "wall_clock_s": 0.334982,
+  "peak_memory_mb": 289.62,
+  "num_samples": 60,
+  "device": "npu:1",
+  "device_model": "Ascend910_9362",
+  "mode": "pretrained",
+  "dataset": "builtin",
+  "dtype": "fp32",
+  "output_type": "logits",
+  "warmup_iterations": 3,
+  "packages": {
+    "torch": "2.8.0",
+    "transformers": "5.15.1",
+    "torch_npu": "2.8.0.post4",
+    "numpy": "2.5.2",
+    "datasets": "5.0.1"
+  },
+  "optimization_items": [
+    "npu_rms_norm",
+    "batched_inference",
+    "warmup",
+    "TASK_QUEUE_ENABLE"
+  ],
+  "optimization_kind": "fusion_operator",
+  "task_queue_enable": true,
+  "batch_size": 4,
+  "selected_npu": 1,
+  "selected_npus": [
+    1
+  ],
+  "device_topology": "single-die:1"
+}
