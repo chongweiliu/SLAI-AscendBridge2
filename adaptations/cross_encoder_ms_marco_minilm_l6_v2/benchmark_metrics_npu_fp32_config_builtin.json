@@ -1,0 +1,19 @@
+{
+  "start_time": "2026-08-22T14:25:25",
+  "step1_forward_latency_s": 0.0,
+  "latency_s": 0.002306,
+  "peak_memory_mb": 122.0,
+  "num_samples": 118,
+  "device": "npu:1",
+  "device_model": "Ascend910",
+  "mode": "config",
+  "output_type": "rerank_scores",
+  "dataset": "builtin",
+  "dtype": "fp32",
+  "ranking_accuracy": 0.5763,
+  "packages": {
+    "torch": "2.8.0+cpu",
+    "torch_npu": "2.8.0.post4"
+  },
+  "end_time": "2026-08-22T14:25:25"
+}
