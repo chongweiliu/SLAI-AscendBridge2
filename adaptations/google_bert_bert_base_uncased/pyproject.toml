@@ -1,0 +1,37 @@
+[project]
+name = "google_bert_bert_base_uncased-ascend"
+version = "0.1.0"
+description = "Ascend NPU adaptation for google-bert/bert-base-uncased"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "accelerate>=0.26",
+    "torch>=2.6.0,<2.9",
+    "transformers>=4.51,<5.0",
+    "safetensors>=0.4",
+]
+
+[project.optional-dependencies]
+cuda = ["torch>=2.6.0,<2.9"]
+ascend = ["torch>=2.6.0,<2.9", "torch-npu>=2.6.0,<2.9"]
+
+[tool.uv]
+package = false
+index-strategy = "unsafe-best-match"
+conflicts = [[{ extra = "cuda" }, { extra = "ascend" }]]
+
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[[tool.uv.index]]
+name = "ascend-repo"
+url = "https://repo.huaweicloud.com/repository/pypi/simple"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu124", extra = "cuda" },
+    { index = "ascend-repo", extra = "ascend" },
+]
+torch-npu = [{ index = "ascend-repo", extra = "ascend" }]

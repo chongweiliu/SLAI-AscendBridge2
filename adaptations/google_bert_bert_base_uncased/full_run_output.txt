@@ -1,0 +1,28 @@
+`torch_dtype` is deprecated! Use `dtype` instead!
+Some weights of the model checkpoint at google-bert/bert-base-uncased were not used when initializing BertForMaskedLM: ['bert.pooler.dense.bias', 'bert.pooler.dense.weight', 'cls.seq_relationship.bias', 'cls.seq_relationship.weight']
+- This IS expected if you are initializing BertForMaskedLM from the checkpoint of a model trained on another task or with another architecture (e.g. initializing a BertForSequenceClassification model from a BertForPreTraining model).
+- This IS NOT expected if you are initializing BertForMaskedLM from the checkpoint of a model that you expect to be exactly identical (initializing a BertForSequenceClassification model from a BertForSequenceClassification model).
+[Setup] Model cache: /mnt/workspace/SLAI-AscendBridge2/adaptations/google_bert_bert_base_uncased/models
+[Device] Huawei Ascend NPU detected.
+[Device] NPU count: 2
+[Device] NPU 0: free HBM 60.8 GiB / total 61.3 GiB
+[Device] NPU 1: free HBM 61.1 GiB / total 61.3 GiB
+[Device] Selected NPU device: npu:1
+[Setup] Using device: npu:1
+[Setup] Loading tokenizer for google-bert/bert-base-uncased...
+[Setup] Config loaded: model_type=bert, layers=12
+[Setup] Attempting to load pre-trained weights...
+[Setup] Pre-trained weights loaded
+[Setup] Model on device: npu:1
+[Run] Input: The capital of France is [MASK].
+[Run] Forward pass + masked token prediction...
+[Run] Logits shape OK: (1, 9, 30522)
+[Run] Top-5 predictions for [MASK]:
+[Run]   1. 'paris' (logit=12.3340)
+[Run]   2. 'lille' (logit=10.5776)
+[Run]   3. 'lyon' (logit=10.4509)
+[Run]   4. 'marseille' (logit=10.1027)
+[Run]   5. 'tours' (logit=9.7127)
+[Run] Output: The capital of France is paris.
+[Run] Forward time: 0.1268 seconds
+[Success] Demo completed.
