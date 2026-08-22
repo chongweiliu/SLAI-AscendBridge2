@@ -31,14 +31,17 @@
 
 ## 详细内容
 
-当前目录刚建立，后续专题可按需要补充到同目录，例如：
+专题文件：
+
+- [dependency-pinning.md](dependency-pinning.md) — 本机已验证的 torch==2.8.0+torch_npu==2.8.0.post4 (cp312/aarch64) 组合、镜像索引选择、虚拟项目写法
+- [demo-patterns.md](demo-patterns.md) — transformers 5.x demo.py 要点：from_config 只在 Auto 类、CLIP get_*_features 取 pooler_output、复合 config 收缩、合成输入验证
+
+后续可按需补充：
 
 - `device-selection.md` - 设备选择与 CUDA/NPU 双栈兼容经验
 - `custom-repos.md` - 自定义模型库与源码 vendor 处理
-- `dependency-pinning.md` - adaptation 级依赖 pin 与兼容性修复
-- `demo-patterns.md` - 不同模型类型的 demo.py 模板经验
 
-在专题文件沉淀前，以本文件摘要、`agents/adapter.md` 和相关 skills 为准。
+其余以本文件摘要、`agents/adapter.md` 和相关 skills 为准。
 
 ## ⚠️ nopua skill — 遇到困境必须调用
 
@@ -49,3 +52,15 @@
 **正确用法**：1. 停止当前循环 2. 查询 board.db 获取真实状态 3. 根据状态决定下一步 4. 写教训到 MEMORY。
 
 **反面教训**：adapter 若连续重试仍报错，应立即查 adaptation 目录实际状态和 board.db，而非反复重试。
+
+## 专题文件
+
+- [uv-torch-abi-trap.md](uv-torch-abi-trap.md) — uv conflicts 分桶误装新版 torch 致 torch_npu undefined symbol；本机验证组合 torch==2.8.0 + torch-npu==2.8.0.post4
+- [qwen3_ascend_stack_verified.md](qwen3_ascend_stack_verified.md) — 2026-08-22 Qwen3-8B 一次通过的可复现依赖区间、选卡模式与 check 用法（裸名）
+- [torch_npu_exit_hang.md](torch_npu_exit_hang.md) — [Success] 后进程挂死（futex/线程不退出）的诊断与 flush+os._exit(0) 修法（bge-m3 实案）
+- [vlm-demo-pattern.md](vlm-demo-pattern.md) — VLM demo.py 输入路径（apply_chat_template+process_vision_info）；qwen_vl_utils 需 torchvision；transformers>=4.57 from_config→_from_config
+- [asr-whisper-pattern.md](asr-whisper-pattern.md) — Whisper ASR：免 torchaudio 合成波形；fp16 mel dtype 对齐；transformers4.57 generation_config 补丁（lang_to_id key 须为 <|en|>），forced_decoder_ids 已废弃
+- [diffusers-sdxl-pattern.md](diffusers-sdxl-pattern.md) — SDXL/diffusers：dry-run 从 config 随机权重组装 pipeline；diffusers0.39 to() 静默忽略 torch_dtype=（用位置参数 to(device, dtype)）；单卡整管线
+- [cv-timm-pattern.md](cv-timm-pattern.md) — timm 图像分类模型适配模板：import timm 依赖 torchvision，torch==2.8.0↔torchvision==0.23.0 配套，随机图像前向取 Top-1
+- [audio-numpy-pattern.md](audio-numpy-pattern.md) — CLAP 类音频-文本对比模型：免 torchaudio（numpy 合成正弦波 + 纯 numpy mel），复合 config 音频分支按 depths 缩层
+- [model-families.md](model-families.md) — qwen3_5 族（Qwen3.5/3.8）：transformers>=5.15.1 硬要求、AutoModelForImageTextToText、免 torchaudio、layer_types 截断缩层、27B 跨卡

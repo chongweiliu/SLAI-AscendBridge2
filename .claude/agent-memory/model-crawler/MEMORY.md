@@ -3,11 +3,19 @@
 ## 状态摘要
 
 **首次启动时间**: 2026-02-20
-**最近活动**: 2026-02-21 抓取 Qwen3-OMNI 系列模型
-**当前团队**: qwen3-adaptation
+**最近活动**: 2026-08-22 抓取 HF 热榜 20 个主流模型（清板后重建）
+**当前团队**: session-862c3d3c
 **状态**: 等待 team-lead 发送抓取指令
 
 ## 最近完成任务
+
+### 2026-08-22: HF 热榜 20 模型抓取（board.db 清空后重建）
+
+- **指令**: count=20, source=huggingface（downloads+trending 双榜各取 60 候选）
+- **结果**: 注册恰好 20 个模型，全部 adaptation_status=pending，全部非 gated，全部 <=30B
+- **筛选要点**: 排除全部 GGUF/MLX/NVFP4/CoreML 量化与单文件模型（含 Comfy-Org/stable-diffusion-v1-5-archive，其标签为 diffusion-single-file 非 diffusers 格式）；排除 >100B（DeepSeek-V4/Kimi-K3/MiniMax-H3）；排除 Uncensored/abliterated 类；文生图仅保留 1 个（SDXL）
+- **模型列表**: Qwen3-0.6B, Qwen3-8B, Qwen2.5-7B-Instruct, Qwen2.5-1.5B-Instruct, gpt2, Qwen2.5-VL-7B-Instruct, Qwen3.5-9B, Qwen3.8-27B, t5-small, bert-base-uncased, distilbert-base-uncased, roberta-base, all-MiniLM-L6-v2, bge-m3, ms-marco-MiniLM-L6-v2, mobilenetv3_small_100.lamb_in1k, clip-vit-base-patch32, whisper-large-v3-turbo, clap-htsat-fused, stable-diffusion-xl-base-1.0
+- **经验**: 新版 HF API 不再接受 `sort=trending`，需用 `sort='trendingScore'`；`list_models(library=...)` 参数已移除，改用 `filter='diffusers'`
 
 ### 2026-02-21: Qwen3-OMNI 模型抓取
 
@@ -54,6 +62,8 @@ $PROJECT_ROOT/.venv/bin/python $PROJECT_ROOT/scripts/list_hf_models.py --sort do
 
 ## 注意事项
 
+- **网络（2026-08-22 起强制）**: 本机 huggingface.co 直连不通（会挂死），所有 HF 调用必须 `export HF_ENDPOINT=https://hf-mirror.com` **且** `export HF_HUB_DISABLE_XET=1`（xet 后端会连 huggingface.co 导致超时）；Python 中显式 `HfApi(endpoint='https://hf-mirror.com')`；list_hf_models.py 用系统 python3 跑，跑前也要 export 这两个变量
+- **HF API 兼容性**: 新版 huggingface_hub 不再接受 `sort=trending`（用 `sort='trendingScore'`）；`list_models(library=...)` 已移除（用 `filter='diffusers'` 等）
 - PROJECT_ROOT 必须由当前仓库根目录动态解析，不要写死绝对路径
 - board.db 路径: `$PROJECT_ROOT/board.db`（在项目根目录，不是 data 子目录）
 - 表名: `models`（不是 adaptation_tasks）
