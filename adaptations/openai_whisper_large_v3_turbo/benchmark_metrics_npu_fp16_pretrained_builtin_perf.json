@@ -1,0 +1,32 @@
+{
+  "start_time": "2026-08-22T16:30:58.925668",
+  "end_time": "2026-08-22T16:31:01.402062",
+  "latency_s": 0.049528,
+  "wall_clock_s": 2.476393,
+  "warmup_iterations": 3,
+  "peak_memory_mb": 1998.0,
+  "num_samples": 50,
+  "device": "npu:1",
+  "device_model": "Ascend910",
+  "mode": "pretrained",
+  "output_type": "transcription",
+  "dataset": "builtin",
+  "dtype": "fp16",
+  "task_queue_enable": true,
+  "batch_size": 4,
+  "optimization_kind": "runtime_only",
+  "selected_npu": 1,
+  "packages": {
+    "torch": "2.8.0+cpu",
+    "torch_npu": "2.8.0.post5",
+    "numpy": "2.5.2"
+  },
+  "ttft_ms": 0.0,
+  "output_compare": {
+    "text_match_rate": 1.0,
+    "baseline_samples": 50,
+    "perf_samples": 50,
+    "total_samples": 50
+  },
+  "wall_clock_speedup_ratio": 1.887319
+}

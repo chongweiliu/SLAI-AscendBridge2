@@ -7,6 +7,7 @@ config 模式（随机权重，转录无意义但 encoder→decoder→generate �
 """
 import json
 import os
+import random
 import sys
 import time
 from pathlib import Path
@@ -16,6 +17,7 @@ import torch
 
 MODEL_ID = "openai/whisper-large-v3-turbo"
 DATASET_NAME = "builtin"
+WARMUP_ITERATIONS = 3
 
 # 复用 demo 中已验证的音频合成与 generation_config 兼容 patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -70,6 +72,12 @@ def main():
     parser.add_argument("--max-samples", type=int, default=250, help="Max samples (default 250)")
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference")
     args = parser.parse_args()
+
+    SEED = 42
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    torch.use_deterministic_algorithms(True, warn_only=True)
 
     cache_dir = (Path(__file__).resolve().parent / "models").as_posix()
     os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
@@ -136,11 +144,19 @@ def main():
             trace_path.write_text(json.dumps({"fallback": str(e)}))
     print(f"[benchmark] step1 latency: {step1_latency:.4f}s, trace: {trace_path.exists()}")
 
+    # Warmup: 3 次推理预热 NPU 算子编译缓存（与 perf 对称）
+    print(f"\n[benchmark] warmup {WARMUP_ITERATIONS} iterations...")
+    for i in range(WARMUP_ITERATIONS):
+        t0 = time.perf_counter()
+        _ = transcribe(audios[0])
+        print(f"[benchmark] warmup iter {i+1}/{WARMUP_ITERATIONS}: {time.perf_counter()-t0:.6f}s")
+    print("[benchmark] warmup complete")
+
     texts = []
-    t_all = time.time()
+    wall_start = time.perf_counter()
     for a in audios:
         texts.append(transcribe(a))
-    total_latency = time.time() - t_all
+    wall_clock_s = time.perf_counter() - wall_start
     peak_mem = 0.0
     try:
         if hasattr(torch, "npu"):
@@ -156,7 +172,9 @@ def main():
     metric = {
         "start_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "step1_forward_latency_s": round(step1_latency, 6),
-        "latency_s": round(total_latency / max(n, 1), 6),
+        "latency_s": round(wall_clock_s / max(n, 1), 6),
+        "wall_clock_s": round(wall_clock_s, 6),
+        "warmup_iterations": WARMUP_ITERATIONS,
         "peak_memory_mb": round(peak_mem, 2),
         "num_samples": n,
         "device": device,
