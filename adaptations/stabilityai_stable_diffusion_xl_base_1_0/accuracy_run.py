@@ -131,12 +131,25 @@ def main():
     n = len(prompts)
     print(f"[benchmark] {n} prompts, {steps} step(s) {height}x{width}")
 
-    def gen_one(prompt):
-        out = pipe(prompt, num_inference_steps=steps, height=height, width=width)
+    def gen_one(prompt, idx=0):
+        # 固定 seed 保证 baseline/perf 可复现对比
+        generator = torch.Generator(device="cpu").manual_seed(42 + idx)
+        out = pipe(prompt, num_inference_steps=steps, height=height, width=width, generator=generator)
         img = out.images[0]
         import numpy as np
         arr = np.asarray(img, dtype=np.float32) / 255.0
         return {"mean": float(arr.mean()), "std": float(arr.std()), "min": float(arr.min()), "max": float(arr.max())}
+
+    # Warmup (3 iterations) — 对称 warmup 确保 baseline/perf 测量口径一致
+    print("[benchmark] warmup 3 iterations...")
+    warmup_iters = 3
+    for i in range(warmup_iters):
+        gen = torch.Generator(device="cpu").manual_seed(42)
+        with torch.no_grad():
+            _ = pipe(prompts[0], num_inference_steps=steps, height=height, width=width, generator=gen)
+    if hasattr(torch, "npu"):
+        torch.npu.synchronize()
+    print("[benchmark] warmup done")
 
     trace_path = Path(__file__).resolve().parent / f"trace_npu_{dtype_str}_{mode_str}_{dataset_name}.json"
     try:
@@ -144,11 +157,11 @@ def main():
         from torch_npu.profiler import profile as npu_profile
         with npu_profile(activities=[NPUActivity.CPU, NPUActivity.NPU]) as prof:
             t0 = time.time()
-            _ = gen_one(prompts[0] if prompts else "a photo of a cat")
+            _ = gen_one(prompts[0] if prompts else "a photo of a cat", 0)
             if hasattr(torch, "npu"):
                 torch.npu.synchronize()
             step1_latency = time.time() - t0
-        prof.export_trace(str(trace_path))
+        prof.export_chrome_trace(str(trace_path))
     except Exception as e:
         step1_latency = 0.0
         if not trace_path.exists():
@@ -157,8 +170,12 @@ def main():
 
     stats = []
     t_all = time.time()
-    for p in prompts:
-        stats.append(gen_one(p))
+    first_sample_latency = 0.0
+    for idx, p in enumerate(prompts):
+        t0 = time.time()
+        stats.append(gen_one(p, idx))
+        if idx == 0:
+            first_sample_latency = time.time() - t0
     total_latency = time.time() - t_all
     peak_mem = 0.0
     try:
@@ -176,6 +193,7 @@ def main():
         "start_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "step1_forward_latency_s": round(step1_latency, 6),
         "latency_s": round(total_latency / max(n, 1), 6),
+        "wall_clock_s": round(total_latency, 6),
         "peak_memory_mb": round(peak_mem, 2),
         "num_samples": n,
         "device": device,
@@ -184,9 +202,10 @@ def main():
         "output_type": "diffusion_latency",
         "dataset": dataset_name,
         "dtype": dtype_str,
+        "warmup_iterations": warmup_iters,
         "packages": {"torch": torch.__version__, "torch_npu": getattr(__import__("torch_npu"), "__version__", "n/a"), "diffusers": __import__("diffusers").__version__},
         "end_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "ttft_ms": round(step1_latency * 1000, 3),
+        "ttft_ms": round(total_latency / max(n, 1) * 1000, 3),
     }
     met_name = f"benchmark_metrics_npu_{dtype_str}_{mode_str}_{dataset_name}.json"
     json.dump(metric, open(Path(__file__).resolve().parent / met_name, "w"), indent=2, ensure_ascii=False)

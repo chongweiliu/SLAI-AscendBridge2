@@ -1,0 +1,17 @@
+{
+  "baseline_artifact": "benchmark_metrics_npu_fp16_pretrained_builtin.json",
+  "perf_artifact": "benchmark_metrics_npu_1_fp16_pretrained_builtin_perf.json",
+  "cosine_similarity": 1.0,
+  "min_cosine": 1.0,
+  "max_abs_error": 0.0,
+  "baseline_samples": 50,
+  "perf_samples": 50,
+  "total_samples": 50,
+  "cuda_samples": 50,
+  "ascend_samples": 50,
+  "speedup_ratio": 1.130449,
+  "baseline_wall_clock_s": 9.169886,
+  "perf_wall_clock_s": 8.111722,
+  "baseline_latency_s": 0.183398,
+  "perf_latency_s": 0.162234
+}
