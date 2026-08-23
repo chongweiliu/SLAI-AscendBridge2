@@ -1,0 +1,10 @@
+{
+  "cosine_similarity": 0.99992611,
+  "min_cosine_similarity": 0.99984121,
+  "max_abs_error": 0.78125,
+  "avg_max_abs_error": 0.19134766,
+  "ppl_avg_rel_diff_pct": 0.278349,
+  "baseline_samples": 50,
+  "perf_samples": 50,
+  "total_samples": 50
+}

@@ -1,82 +1,56 @@
 #!/usr/bin/env python3
-"""Benchmark for Qwen/Qwen2.5-VL-7B-Instruct (multimodal qwen3_5, text-only generation path).
+"""Benchmark for Qwen/Qwen2.5-VL-7B-Instruct (text-only teacher-forcing path).
 
-产出 outputs_*.pt / benchmark_metrics_*.json / trace_*.json。config 模式随机权重（bf16）。
-仅验证文本主干 generate 全链路（encoder/decoder/mrope/混合注意力），不加载视觉输入。
+Produces outputs_*.pt / benchmark_metrics_*.json / trace_*.json.
+Teacher-forcing: forward pass on text, extract last-token logits + perplexity.
 """
+import argparse
 import json
 import os
-import sys
+import random
 import time
+from datetime import datetime
 from pathlib import Path
 
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+import numpy as np
 import torch
+from datasets import load_from_disk
+from transformers import AutoConfig, AutoTokenizer
+from transformers import set_seed as transformers_set_seed
 
 MODEL_ID = "Qwen/Qwen2.5-VL-7B-Instruct"
-DATASET_NAME = "builtin"
+WARMUP_ITERATIONS = 3
+DATASET_DIR = Path(__file__).resolve().parent.parent.parent / "datasets"
 
-PROMPTS = [
-    "Hello, this is a test run on Huawei Ascend NPU.",
-    "Explain what a neural network is in one sentence.",
-    "Write a short poem about the ocean.",
-    "What is the capital of France?",
-    "Summarize the theory of relativity briefly.",
-    "Describe a sunset over the mountains.",
-    "How does photosynthesis work?",
-    "Translate 'good morning' to French.",
-    "What are the primary colors?",
-    "Explain recursion in programming.",
-    "Name a famous scientist and their contribution.",
-    "What is the meaning of life?",
-    "Describe the process of making coffee.",
-    "What is machine learning?",
-    "Write a haiku about autumn.",
-    "What is the speed of light?",
-    "Explain gravity in simple terms.",
-    "What is democracy?",
-    "Describe the water cycle.",
-    "What is a black hole?",
-    "How do computers store data?",
-    "What is climate change?",
-    "Explain the concept of supply and demand.",
-    "What is the largest planet?",
-    "Describe the structure of an atom.",
-    "What is artificial intelligence?",
-    "How does the human heart work?",
-    "What is the Pythagorean theorem?",
-    "Explain the theory of evolution.",
-    "What is a database?",
-    "Describe the process of digestion.",
-    "What is the difference between RAM and ROM?",
-    "Explain the concept of通货膨胀.",
-    "What is a rainbow?",
-    "How do airplanes fly?",
-    "What is quantum mechanics?",
-    "Describe the life cycle of a butterfly.",
-    "What is the internet?",
-    "Explain the greenhouse effect.",
-    "What is a prime number?",
-    "Describe the function of the liver.",
-    "What is the freezing point of water?",
-    "Explain how a microscope works.",
-    "What is the largest ocean?",
-    "Describe the process of respiration.",
-    "What is a synonym?",
-    "Explain the concept of gravity waves.",
-    "What is the boiling point of water?",
-    "Describe the structure of DNA.",
-    "What is a continent?",
-    "Explain how a telescope works.",
-    "What is the tallest mountain?",
-    "Describe the process of mitosis.",
-    "What is a metaphor?",
-    "Explain the concept of entropy.",
-    "What is the smallest unit of life?",
-    "Describe the water treatment process.",
-    "What is the periodic table?",
-    "Explain how a battery works.",
-    "What is a constellation?",
-]
+
+def load_benchmark_texts() -> tuple[list[str], str]:
+    """Load benchmark texts from wikitext dataset, return (texts, dataset_name)."""
+    wikitext_path = DATASET_DIR / "wikitext___wikitext-2-raw-v1"
+    if wikitext_path.exists():
+        print(f"[benchmark] loading dataset from {wikitext_path}")
+        ds = load_from_disk(str(wikitext_path))
+        if hasattr(ds, "keys"):
+            ds = ds["test"]
+        texts = sorted([sample["text"] for sample in ds if sample.get("text", "").strip()])
+        print(f"[benchmark] loaded {len(texts)} samples from wikitext")
+        return texts, "wikitext"
+    # fallback builtin
+    print("[benchmark] using built-in benchmark texts")
+    builtin_texts = [
+        "Hello, this is a benchmark run on an Ascend NPU.",
+        "The quick brown fox jumps over the lazy dog.",
+        "Machine learning is a subset of artificial intelligence.",
+        "Natural language processing enables computers to understand human language.",
+        "Transformers have revolutionized the field of deep learning.",
+        "PyTorch is an open-source machine learning framework.",
+        "The attention mechanism allows models to focus on relevant parts of input.",
+        "Language models can generate coherent and contextually relevant text.",
+        "Huawei Ascend NPUs are designed for AI workloads.",
+        "Benchmarking measures the latency and throughput of inference systems.",
+    ]
+    return builtin_texts, "builtin"
 
 
 def select_idle_npu() -> int:
@@ -115,22 +89,63 @@ def get_dtype_str(dtype: torch.dtype) -> str:
     return m.get(dtype, str(dtype).replace("torch.", ""))
 
 
-def main():
-    import argparse
-    from transformers import AutoConfig, AutoTokenizer
+def get_package_versions() -> dict:
+    import importlib.metadata
 
+    packages = ["torch", "transformers", "torch_npu", "numpy", "datasets"]
+    versions = {}
+    for pkg in packages:
+        try:
+            versions[pkg] = importlib.metadata.version(pkg)
+        except importlib.metadata.PackageNotFoundError:
+            versions[pkg] = "not_installed"
+    return versions
+
+
+def run_warmup(model, tokenizer, device, n_iterations: int = WARMUP_ITERATIONS):
+    """Warmup: n forward passes to prime NPU operator compilation cache."""
+    device_type = device.type if hasattr(device, "type") else str(device).split(":")[0]
+    print(f"[benchmark] warmup {n_iterations} iterations...")
+    warmup_text = "Warmup: Hello, this is a warmup forward pass."
+    warmup_inputs = tokenizer(warmup_text, return_tensors="pt", truncation=True, max_length=512).to(device)
+    with torch.no_grad():
+        for i in range(n_iterations):
+            t0 = time.perf_counter()
+            _ = model(**warmup_inputs)
+            if device_type == "npu":
+                torch.npu.synchronize()
+            elif device_type == "cuda":
+                torch.cuda.synchronize()
+            dt = time.perf_counter() - t0
+            print(f"[benchmark] warmup iter {i+1}/{n_iterations}: {dt:.6f}s")
+    del warmup_inputs
+    print("[benchmark] warmup complete")
+
+
+def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--use-pretrained", action="store_true", help="Tier2: load pretrained weights")
     parser.add_argument("--max-samples", type=int, default=250, help="Max samples (default 250)")
     parser.add_argument("--cpu", action="store_true", help="Force CPU inference")
     args = parser.parse_args()
 
+    SEED = 42
+    random.seed(SEED)
+    np.random.seed(SEED)
+    torch.manual_seed(SEED)
+    transformers_set_seed(SEED)
+
     cache_dir = (Path(__file__).resolve().parent / "models").as_posix()
-    os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
     os.environ.setdefault("HF_HUB_DISABLE_XET", "1")
     device = get_device(force_cpu=args.cpu)
-    assert device.startswith(("npu", "cuda")), f"Need NPU or CUDA, got device={device}"
+    if not args.cpu:
+        assert device.startswith(("npu", "cuda")), f"Need NPU or CUDA, got device={device}"
     print(f"[Setup] Using device: {device}")
+
+    if device.startswith("npu"):
+        torch.npu.manual_seed_all(SEED)
+    elif device.startswith("cuda"):
+        torch.cuda.manual_seed_all(SEED)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_ID, trust_remote_code=True, cache_dir=cache_dir)
     config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True, cache_dir=cache_dir)
@@ -145,48 +160,74 @@ def main():
         model = AutoModelCls.from_pretrained(MODEL_ID, trust_remote_code=True, torch_dtype="auto", cache_dir=cache_dir)
     else:
         print("[Setup] DRY/config mode: random weights (full text backbone)")
-        model = AutoModelCls.from_config(config, trust_remote_code=True, torch_dtype=torch.bfloat16)
+        old_dtype = torch.get_default_dtype()
+        torch.set_default_dtype(torch.bfloat16)
+        try:
+            model = AutoModelCls.from_config(config, trust_remote_code=True)
+        finally:
+            torch.set_default_dtype(old_dtype)
     model = model.to(device)
     model.eval()
-    dtype_str = get_dtype_str(next(model.parameters()).dtype)
-    mode_str = "pretrained" if args.use_pretrained else "config"
-    dataset_name = DATASET_NAME
-    print(f"[Setup] dtype: {dtype_str}, mode={mode_str}, params={sum(p.numel() for p in model.parameters())/1e9:.2f}B")
 
     import torch_npu  # noqa: F401
 
-    prompts = PROMPTS[: args.max_samples] if args.max_samples <= len(PROMPTS) else PROMPTS
-    n = len(prompts)
-    print(f"[benchmark] {n} prompts")
+    dtype_str = get_dtype_str(next(model.parameters()).dtype)
+    mode_str = "pretrained" if args.use_pretrained else "config"
+    texts, dataset_name = load_benchmark_texts()
+    num_samples = min(len(texts), args.max_samples)
+    texts = texts[:num_samples]
+    print(f"[Setup] dtype: {dtype_str}, mode={mode_str}, params={sum(p.numel() for p in model.parameters())/1e9:.2f}B")
+    print(f"[benchmark] {num_samples} samples from {dataset_name}")
 
-    def generate_one(prompt):
-        ids = tokenizer(prompt, return_tensors="pt").input_ids.to(device)
-        with torch.no_grad():
-            out = model.generate(input_ids=ids, max_new_tokens=16, do_sample=False)
-        return tokenizer.decode(out[0], skip_special_tokens=True)
+    # Warmup (symmetric with perf script)
+    run_warmup(model, tokenizer, device, WARMUP_ITERATIONS)
 
-    trace_path = Path(__file__).resolve().parent / f"trace_npu_{dtype_str}_{mode_str}_{dataset_name}.json"
-    try:
-        from torch_npu.profiler import ProfilerActivity as NPUActivity
-        from torch_npu.profiler import profile as npu_profile
-        with npu_profile(activities=[NPUActivity.CPU, NPUActivity.NPU]) as prof:
-            t0 = time.time()
-            _ = generate_one(prompts[0] if prompts else "hello")
-            if hasattr(torch, "npu"):
-                torch.npu.synchronize()
-            step1_latency = time.time() - t0
-        prof.export_trace(str(trace_path))
-    except Exception as e:
-        step1_latency = 0.0
-        if not trace_path.exists():
-            trace_path.write_text(json.dumps({"fallback": str(e)}))
-    print(f"[benchmark] step1 latency: {step1_latency:.4f}s, trace: {trace_path.exists()}")
+    # Teacher-forcing forward pass (sequential, bs=1)
+    all_logits = []
+    all_ppl = []
 
-    gen_texts = []
-    t_all = time.time()
-    for p in prompts:
-        gen_texts.append(generate_one(p))
-    total_latency = time.time() - t_all
+    wall_start = time.perf_counter()
+    start_time = datetime.now().isoformat()
+
+    with torch.no_grad():
+        for idx, text in enumerate(texts):
+            enc = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+            input_ids = enc["input_ids"].to(device)
+            attention_mask = enc["attention_mask"].to(device)
+
+            out = model(input_ids=input_ids, attention_mask=attention_mask)
+            logits = out.logits  # [1, seq_len, vocab]
+
+            seq_len = attention_mask.sum().item()
+            last_token_logits = logits[0, seq_len - 1, :].cpu()
+            all_logits.append(last_token_logits)
+
+            # Perplexity on real tokens
+            real_logits = logits[0, :seq_len, :]
+            real_labels = input_ids[0, :seq_len]
+            shift_logits = real_logits[:-1, :].contiguous()
+            shift_labels = real_labels[1:].contiguous()
+            loss_fct = torch.nn.CrossEntropyLoss(reduction="mean")
+            loss = loss_fct(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+            ppl = torch.exp(loss).item()
+            all_ppl.append(ppl)
+
+            del input_ids, attention_mask, out, logits
+            if (idx + 1) % 16 == 0:
+                if hasattr(torch, "npu"):
+                    torch.npu.empty_cache()
+                print(f"[benchmark] processed {idx+1}/{num_samples} samples")
+
+    wall_clock_s = time.perf_counter() - wall_start
+    end_time = datetime.now().isoformat()
+
+    # Save outputs
+    outputs = {"logits": all_logits, "perplexity": all_ppl}
+    out_name = f"outputs_npu_{dtype_str}_{mode_str}_{dataset_name}.pt"
+    torch.save(outputs, Path(__file__).resolve().parent / out_name)
+    print(f"[benchmark] outputs saved: {out_name}")
+
+    # Peak memory
     peak_mem = 0.0
     try:
         if hasattr(torch, "npu"):
@@ -194,31 +235,40 @@ def main():
     except Exception:
         pass
 
-    outputs = {"prompts": prompts, "generated_text": gen_texts}
-    out_name = f"outputs_npu_{dtype_str}_{mode_str}_{dataset_name}.pt"
-    torch.save(outputs, Path(__file__).resolve().parent / out_name)
-    print(f"[benchmark] outputs saved: {out_name}")
+    device_short = device.split(":")[0] if ":" in device else device
+    device_model = "unknown"
+    if device_short == "npu":
+        dev_idx = int(device.split(":")[1]) if ":" in device else 0
+        device_model = torch.npu.get_device_name(dev_idx)
+    elif device_short == "cuda":
+        device_model = torch.cuda.get_device_name(0)
+
+    per_sample_latency_s = round(wall_clock_s / max(num_samples, 1), 6)
+    ppl_avg = round(sum(all_ppl) / len(all_ppl), 2) if all_ppl else None
 
     metric = {
-        "start_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "step1_forward_latency_s": round(step1_latency, 6),
-        "latency_s": round(total_latency / max(n, 1), 6),
+        "start_time": start_time,
+        "end_time": end_time,
+        "latency_s": per_sample_latency_s,
+        "wall_clock_s": round(wall_clock_s, 6),
         "peak_memory_mb": round(peak_mem, 2),
-        "num_samples": n,
+        "num_samples": num_samples,
         "device": device,
-        "device_model": "Ascend910",
+        "device_model": device_model,
         "mode": mode_str,
-        "output_type": "generated_text",
+        "output_type": "logits",
         "dataset": dataset_name,
         "dtype": dtype_str,
-        "packages": {"torch": torch.__version__, "torch_npu": getattr(__import__("torch_npu"), "__version__", "n/a")},
-        "end_time": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "ttft_ms": round(step1_latency * 1000, 3),
+        "warmup_iterations": WARMUP_ITERATIONS,
+        "packages": get_package_versions(),
     }
     met_name = f"benchmark_metrics_npu_{dtype_str}_{mode_str}_{dataset_name}.json"
     json.dump(metric, open(Path(__file__).resolve().parent / met_name, "w"), indent=2, ensure_ascii=False)
     print(f"[benchmark] metrics saved: {met_name}")
-    print(f"[benchmark] DONE: {n} samples")
+    print(f"[benchmark] wall_clock_s: {wall_clock_s:.6f}")
+    print(f"[benchmark] avg per-sample latency: {per_sample_latency_s}s")
+    print(f"[benchmark] perplexity: avg={ppl_avg}")
+    print(f"[benchmark] DONE: {num_samples} samples")
 
 
 if __name__ == "__main__":

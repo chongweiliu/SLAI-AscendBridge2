@@ -9,6 +9,8 @@ dependencies = [
     # Qwen3.8 属 qwen3_5 架构，需要 transformers 5.15+（4.57.x 无 qwen3_5 定义）
     "transformers>=5.15.1,<6",
     "safetensors>=0.4",
+    "datasets>=2.14",
+    "numpy>=1.24",
 ]
 
 [project.optional-dependencies]

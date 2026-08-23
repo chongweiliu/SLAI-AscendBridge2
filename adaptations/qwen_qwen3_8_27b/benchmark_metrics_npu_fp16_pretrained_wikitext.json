@@ -1,0 +1,22 @@
+{
+  "start_time": "2026-08-23T08:54:45.093872",
+  "latency_s": 0.516334,
+  "peak_memory_mb": 52374.38,
+  "num_samples": 50,
+  "device": "npu:0",
+  "device_model": "Ascend910_9362",
+  "mode": "pretrained",
+  "dataset": "wikitext",
+  "dtype": "fp16",
+  "output_type": "logits",
+  "packages": {
+    "torch": "2.8.0",
+    "transformers": "5.15.1",
+    "torch_npu": "2.8.0.post5",
+    "numpy": "2.5.2",
+    "datasets": "5.0.1"
+  },
+  "end_time": "2026-08-23T08:55:34.448506",
+  "wall_clock_s": 25.816701,
+  "warmup_iterations": 3
+}
