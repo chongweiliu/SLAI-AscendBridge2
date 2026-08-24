@@ -45,6 +45,11 @@ metadata:
 - 提交内容：ascend-torch-cpt skill 优化（pitfalls #42-45 + 模板 stub/map_location + SKILL.md + agent-memory），见 [[ascend-cpt-env-pitfalls]]。
 - 合并后 main 已含，本地已同步。
 
+## 实战记录（2026-08-24 晚，950PR CPT 实战）
+- 分支 `feat/cpt-cgroup-remap-pitfall`，commit `f7e3084`，MR `!21`，merge commit `10e5ea6`。
+- 提交内容：950PR 单卡 CPT Qwen3.5-4B 实战踩坑沉淀——多模态 remap 在 CPU 三份叠加（model+ckpt+sd fp32 副本≈43GB）撞容器 cgroup 32GB 限制致 OOM 137。新增 pitfalls #46（#44 的 remap 变体，整个 remap 搬 NPU），SKILL.md 阶段1 强制查 cgroup 别信 free，agent-memory [[cpt-950pr-32gb-cgroup]]。
+- **令牌发现**：之前已用 `git config --global credential.helper store` + `~/.git-credentials`（mode 600，格式 `https://oauth2:<TOKEN>@gitcode.com`）存过令牌。push 直接走凭据存储自动鉴权；v5 API 用 `grep -oP 'oauth2:\K[^@]+' ~/.git-credentials` 提取令牌到 shell 变量（不回显），用完 `unset`。**令牌在凭据存储文件里，不在 agent-memory/对话/日志**——符合红线。见 [[gitcode-mr-workflow]]。
+
 ## 复用命令骨架（下次直接改分支名/文件/标题）
 ```bash
 cd /workspace/SLAI-AscendBridge2
