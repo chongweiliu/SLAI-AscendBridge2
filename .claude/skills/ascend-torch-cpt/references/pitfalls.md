@@ -291,3 +291,39 @@ sys.meta_path.insert(0, _StubFinder())
   关键三点：①`with torch.device(device)` 让模型构造落在 NPU（不是 CPU 建完再 `.to(device)`，那一步 CPU 仍持 16.8GB）；②`load_file(device=device)` 分片直加载 NPU，不在 CPU 暂存全量 ckpt；③逐分片 `load_state_dict(strict=False)` 累积写入 + 立即 `del + empty_cache`，NPU 峰值≈模型(16.8GB)+单分片(~5GB)，CPU 峰值≈0。
 - **eval 同理**：加载 `cpt_model_state.pt`（16.8GB fp32 全量 state_dict）用 `torch.load(CKPT, map_location='npu:0', weights_only=False)`，别 `map_location='cpu'`；NPU 上建模型 + NPU 上 load，再 `load_state_dict`。
 - **判定要点**：exit 137 + 无 traceback + remap/load_model 阶段即死 + `free` 显示充足 = **第一时间查 cgroup**：`cat /sys/fs/cgroup/memory.max`(v2) / `memory.limit_in_bytes`(v1)。**永远先 `cat /sys/fs/cgroup/memory.max`，不要信 `free`。** 950PR 机器实测：cgroup=32GB，宿主=754GB，Qwen3.5-4B remap 三份 43GB 必中此坑。本条已验证解法（搬 NPU 后 smoke 一次通过，200 步训练正常）。
+
+## 47. MLX(Apple Silicon) 格式扩散模型 → NPU 无法加载，换同源 PyTorch 基座
+- **症状**：用户给 `FastVideo/FastMetal-1.3B-QAD` 等模型，`ls` 看到 `mlx_dit.json`/`mlx_dit.safetensors`（而非 `config.json`+标准 safetensors），README/library_name 标 `mlx`，tags 含 `int8/quantization/apple-silicon`。直接当 diffusers/transformers 加载失败或加载到错误架构。
+- **根因**：MLX 是 Apple Silicon 专有格式（`format_version`+`_class_name` 的 json + MLX 约定 safetensors），torch_npu/torch 无法用标准 `from_pretrained` 加载；且常带 int8 量化，权重无法直接塞回 fp16/fp32 PyTorch 模型。
+- **解法**：找**同源 PyTorch 基座**。FastMetal 是 `FastWan2.1-T2V-1.3B-Diffusers` 的 MLX 量化版 → 改用该 PyTorch 基座的 `transformer/`（`WanTransformer3DModel` 标准 diffusers 加载）。判定基座：看模型的 `BaseModel`/`base_model` 字段或 README "based on"。**FastMetal 特定 finetune 权重(MLX)无法继承**，须在 README 注明用同源 PyTorch 基座替换。
+- **判定要点**：出现 `mlx_*.json/safetensors` 或 `library_name=mlx` → MLX。阶段 0 范式判定时必查此点（核心原则 10），否则后续全错。
+
+## 48. hf_hub snapshot_download 在 flaky 连接上对大文件死亡螺旋 → 改 wget -c
+- **症状**：`snapshot_download` 下一个 >2GB 文件，`.incomplete` 长到 ~4.98GB 后**突然回到 52MB 从头重下**，反复如此，永远下不完；日志 `Fetching N files` 进度卡在某个文件，ETA 飙到 1 小时+。
+- **根因**：hf_hub 下载到 `.incomplete`，flaky 连接中断后**校验失败即丢弃整个文件从头重下**（不复用已下字节）。大文件 + flaky = 死亡螺旋。与 #38(Xet 401)不同：这是普通 LFS 连接中断重下。
+- **解法**：停 hf_hub，改 **`wget -c --tries=0 --timeout=30 --retry-connrefused --waitretry=3 -q <url> -O <path>`**——`-c` 断点续传，连接断从断点续，不重头；`--tries=0` 无限重试。大文件分片可并行多 wget（各分片独立 `-c`）。`wget` 通常已装（无 aria2c 时用 wget）。URL 用 `https://hf-mirror.com/<repo>/resolve/main/<path>`。
+- **判定要点**：`.incomplete` 大小忽大忽小（从 GB 回到 MB）= 确认死亡螺旋，立即换 wget -c。
+
+## 49. 扩散 VAE 编码输入 layout [B,C,T,H,W]，不是 [B,T,C,H,W]
+- **症状**：`vae.encode(video)` 报 `RuntimeError: expected input to have 3 channels, but got 21 channels`（21=T 被当成 channels）。
+- **根因**：decord `get_batch` 返回 `[T,H,W,3]`，转 tensor 后常见误成 `[B,T,C,H,W]`；Wan/diffusers VAE 的 conv3d 权重是 `[out,C,kt,kh,kw]`，要求输入 dim1 = C。
+- **解法**：`[T,3,H,W]` → `permute(1,0,2,3).unsqueeze(0)` 得 `[1,3,T,H,W]`（视频）。图片同理 `[1,3,H,W]`。VAE 编码全在 NPU 上做（CPU 撞 cgroup 32GB，#44/#46）。
+- **判定要点**："got T channels, expected 3" → layout 错，permute 成 [B,C,T,H,W]。
+
+## 50. text_encoder 巨大(11-23GB) → 预计算缓存 embedding 后释放 / 零嵌入兜底
+- **症状**：扩散模型的 text_encoder（UMT5-XXL 等）下载 11GB+ 耗时极长（flaky 下几十分钟到 1 小时+），阻塞训练启动；或加载占满显存。
+- **根因**：T2V/T2I 的条件编码器本身是另一个大模型（UMT5-XXL ~5.7B），与 DiT 同量级，下载/加载成本高。
+- **解法（三选一，按优先级）**：
+  1. **预计算+缓存+释放**（首选）：编码完全部 caption → cache emb 到磁盘 → `del text_encoder; empty_cache()` → 训练只用缓存 emb，省 11GB 显存、不再依赖 TE。
+  2. **换同族 bf16 版**：基座 text_encoder 常是 fp32(23GB)，同族量化版(如 FastMetal 的 text_encoder bf16 ~12GB)省一半，下载/加载都快。
+  3. **零嵌入近似无条件兜底**（TE 完全不可得时）：`torch.zeros(1,L,D)` 作 text emb，DiT 流匹配 velocity 预测仍正常学习视频分布，loss 正常下降；代价是无文本条件对齐，**须 README 注明**。TE 可后台继续下载，就绪后重跑带真实 caption 版。
+- **判定要点**：TE 下载 ETA > 训练+评估总时长 → 用方案 2/3 不阻塞；TE 分片不全(`len(shards)<5`)→ 自动退零嵌入（`prepare_generative_data.py.tmpl` 已内置此判定）。
+
+## 51. 扩散 DiT forward 返回 tensor|dict 兼容 + 组件分离 smoke 顺序
+- **症状A**：`out = transformer(...)` 后 `out.sample` 报错（tensor 无 .sample）或 `out[0]` 把 `[1,16,...]` 索引成 `[16,...]` 丢 batch 维 → 后续 loss/shape 全错。
+- **根因A**：diffusers 不同版本/不同 Transformer 类的 forward 返回类型不一致——可能直接是 tensor，可能是 dict(`out['sample']`)，可能是 dataclass(`out.sample`)。
+- **解法A**：`out = dit(hidden_states=, timestep=, encoder_hidden_states=, return_dict=True); if isinstance(out,dict): pred=out['sample']; elif hasattr(out,'sample'): pred=out.sample; else: pred=out`。**绝不**无脑 `out[0]`。
+- **症状B**：直接合练 2 步报 NPU 算子错（3D conv / 某 attention 算子不支持/fallback），不知是 DiT 还是 VAE 的问题。
+- **根因B**：扩散 pipeline 有 VAE(3D conv 重)+DiT(attention)+text_encoder 三个独立大组件，NPU 算子支持问题可能出在任一处，合练时定位难。
+- **解法B**：**先单组件 dummy smoke**：①DiT 前向反向用 `dummy latent [1,C,Tl,Hl,Wl]` + `dummy emb [1,L,D]`；②VAE encode 用 `dummy [1,3,T,H,W]`。各自通过再合练。早抓算子问题（如 Wan DiT attention + VAE 3D conv 在 950PR 实测都通过）。
+- **判定要点**：扩散 CPT 的 smoke 必须组件级，不能跳到合练。

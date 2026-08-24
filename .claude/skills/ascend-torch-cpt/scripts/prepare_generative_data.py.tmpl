@@ -1,0 +1,101 @@
+#!/usr/bin/env python
+# prepare_generative_data.py.tmpl — 扩散生成式(文生视频/文生图) CPT 数据预处理
+# 解码(视频decord/图片PIL) → VAE编码(NPU) → 文本编码(可选) → 缓存 latent+emb
+# 规避 cgroup(#44/#46): VAE/UMT5 加载与编码全在 NPU；CPU 仅解码(帧小)。
+# 占位: MODEL_DIR, DATA_FILE, WS_DIR 由 run_env.sh 注入；N_FRAMES/VID_H/VID_W/MAX_LEN 可 env 覆盖
+import os, json, glob, time
+os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD","0")
+os.environ.setdefault("TASK_QUEUE_ENABLE","1")
+os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF","expandable_segments:True")
+import torch, torch_npu
+torch.npu.set_device(0); DEV="npu:0"
+# 依赖: pip install diffusers decord imageio-ffmpeg (decord 自带 ffmpeg)
+try:
+    import decord  # 视频
+except Exception:
+    decord=None
+from PIL import Image  # 图片
+import numpy as np
+
+MODEL_DIR=os.environ["MODEL_DIR"]; WS_DIR=os.environ["WS_DIR"]
+N_FRAMES=int(os.environ.get("N_FRAMES","21"))   # 满足 VAE 时间压缩因子 k: (T-1)%k==0 (Wan k=4)
+H=int(os.environ.get("VID_H","480")); W=int(os.environ.get("VID_W","832"))
+MAX_LEN=int(os.environ.get("MAX_LEN","77"))
+# backbone 子目录名: Wan=transformer, SD/CogVideoX 等=unet/transformer
+BK_DIR=os.environ.get("BACKBONE_DIR","transformer")
+VAE_DIR=os.environ.get("VAE_DIR","vae")
+TE_DIR=os.environ.get("TEXT_ENCODER_DIR","text_encoder")
+
+def load_vae():
+    from diffusers import AutoencoderKLWan  # Wan; 其它模型用对应 VAE 类(见 generative-diffusion-cpt.md)
+    vae=AutoencoderKLWan.from_pretrained(f"{MODEL_DIR}/{VAE_DIR}", torch_dtype=torch.bfloat16).to(DEV).eval()
+    for p in vae.parameters(): p.requires_grad=False
+    return vae
+
+def load_text_encoder():
+    """可选: TE 分片不全则返回 (None,None) → 零嵌入兜底(#50)。"""
+    shards=glob.glob(f"{MODEL_DIR}/{TE_DIR}/model-*.safetensors")
+    if len(shards)<1:
+        print(f"[text] TE 无分片，零嵌入近似无条件(#50)", flush=True); return None,None
+    try:
+        tok=__import__("transformers").AutoTokenizer.from_pretrained(f"{MODEL_DIR}/tokenizer")
+        # UMT5 用 T5EncoderModel; CLIP 用 CLIPTextModel — 据模型改
+        from transformers import T5EncoderModel
+        te=T5EncoderModel.from_pretrained(f"{MODEL_DIR}/{TE_DIR}", torch_dtype=torch.bfloat16).to(DEV).eval()
+        for p in te.parameters(): p.requires_grad=False
+        print("[text] TE 已加载，真实 caption 编码", flush=True); return tok,te
+    except Exception as e:
+        print(f"[text] TE 加载失败({e})，零嵌入(#50)", flush=True); return None,None
+
+def decode_video(path):
+    """decord → [T,3,H,W] float [-1,1]。layout 修正见 #49。"""
+    vr=decord.VideoReader(path, width=W, height=H); n=len(vr)
+    idx=list(range(0, n, max(1,n//N_FRAMES)))[:N_FRAMES]
+    while len(idx)<N_FRAMES: idx.append(idx[-1] if idx else 0)
+    fr=vr.get_batch(idx).asnumpy()  # [T,H,W,3] uint8
+    return torch.from_numpy(fr).float().permute(0,3,1,2)/127.5-1.0  # [T,3,H,W]
+
+def decode_image(path):
+    """PIL → [3,H,W] float [-1,1]。"""
+    im=Image.open(path).convert("RGB").resize((W,H))
+    return torch.from_numpy(np.array(im)).float().permute(2,0,1)/127.5-1.0  # [3,H,W]
+
+def encode_vae(vae, vid):
+    """VAE 编码 [T,3,H,W] → latent [1,C,Tl,Hl,Wl]。输入 [B,C,T,H,W](#49)。"""
+    v=vid.permute(1,0,2,3).unsqueeze(0).to(DEV, dtype=torch.bfloat16) if vid.dim()==4 else vid.unsqueeze(0).to(DEV,dtype=torch.bfloat16)
+    with torch.no_grad():
+        out=vae.encode(v)
+        if hasattr(out,"latent_dist"): lat=out.latent_dist.sample()
+        elif hasattr(out,"latents"): lat=out.latents
+        else: lat=out
+    return lat
+
+def encode_text(tok, te, cap):
+    ids=tok(cap, max_length=MAX_LEN, padding="max_length", truncation=True, return_tensors="pt").input_ids.to(DEV)
+    with torch.no_grad(): return te(input_ids=ids).last_hidden_state  # [1,L,D]
+
+def main():
+    vae=load_vae(); tok,te=load_text_encoder(); use_text=te is not None
+    print(f"[init] VAE on {DEV}; text_encoder={'ON' if use_text else 'OFF(零嵌入,#50)'}", flush=True)
+    # DATA_FILE: 视频用 jsonl/video2caption.json(每条{path,cap}) 或目录; 图片同理
+    items=__import__("json").load(open(os.environ["DATA_FILE"]))
+    if isinstance(items,dict): items=items.get("data",items.get("train",[]))
+    vdir=os.environ.get("VIDEO_DIR", os.path.dirname(os.environ["DATA_FILE"]))
+    latents=[]; embs=[]; caps=[]; t0=time.time()
+    for i,item in enumerate(items):
+        p=item.get("path",item.get("file","")); fn=os.path.basename(p)
+        vp=os.path.join(vdir, fn) if not os.path.isabs(p) else p
+        if not os.path.exists(vp): print(f"[skip] {fn}",flush=True); continue
+        try:
+            vid=decode_video(vp) if (decord and fn.endswith((".mp4",".avi",".mov"))) else decode_image(vp).unsqueeze(0)
+            lat=encode_vae(vae, vid)
+            emb=encode_text(tok,te,item["cap"]) if use_text else torch.zeros(1,MAX_LEN,lat.shape[1] if lat.dim()>3 else 4096, dtype=torch.bfloat16)
+            # D 由 DiT config 定; 零嵌入时 D 需读 transformer config — 简化: 训练脚本按 cached shape 处理
+            latents.append(lat.cpu()); embs.append(emb.cpu() if use_text else torch.zeros(1,MAX_LEN,4096,dtype=torch.bfloat16)); caps.append(item.get("cap","")[:60])
+            if (i+1)%4==0: print(f"[encode] {i+1}/{len(items)} lat={tuple(lat.shape)} {time.time()-t0:.0f}s",flush=True)
+        except Exception as e:
+            print(f"[FAIL] {fn}: {type(e).__name__} {str(e)[:120]}",flush=True)
+    torch.save({"latents":latents,"embs":embs,"captions":caps}, f"{WS_DIR}/outputs/video_latents.pt")
+    print(f"[done] cached {len(latents)} samples {time.time()-t0:.0f}s",flush=True)
+
+if __name__=="__main__": main()

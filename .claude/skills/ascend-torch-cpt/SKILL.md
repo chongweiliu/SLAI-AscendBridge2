@@ -7,9 +7,14 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 
 ## 这是什么
 
-把一个 HF 模型 + 一个语料，在昇腾 NPU 上端到端跑一遍继续预训练，并产出：训练脚本、loss 曲线（含公网直链）、概要总结、训练前后域内评估（PPL / next-token acc / 生成 F1·Recall·EM）。全程在保证精度与正确性前提下尽量提效降时。
+把一个 HF 模型 + 一个语料，在昇腾 NPU 上端到端跑一遍继续预训练，并产出：训练脚本、loss 曲线（含公网直链）、概要总结、训练前后域内评估。全程在保证精度与正确性前提下尽量提效降时。
 
-适用：任意 decoder-only LM（CausalLM）。多模态模型的“文本头”也支持（见 references/multimodal-remap.md）。
+**这是一个通用 CPT 技能，不是仅针对文本 LM**：按模型类型自动选择训练范式——
+- **文本 decoder-only LM（CausalLM）**：next-token CE loss，`model(input_ids, labels)`，评估 PPL/acc/F1。多模态模型的"文本头"也走此路（见 references/multimodal-remap.md）。
+- **文生视频/文生图扩散模型（diffusers pipeline：DiT/U-Net + VAE + text_encoder + scheduler）**：流匹配/DDPM velocity/epsilon loss on VAE latents，`transformer(noisy_latent, timestep, text_emb)`，评估 velocity MSE + 采样生成。见 `references/generative-diffusion-cpt.md`。
+- 其它生成式范式（文生音频/ASR/全模态等）按同理：先判 backbone（可训练生成主干）+ 冻结编解码器，再据其原生损失训练。
+
+**核心方法论（对所有模型类型通用）**：①判定模型类型与格式 → ②拆出可训练 backbone + 冻结的编解码器/条件编码器 → ③据范式构造数据流水线（文本 tokenize / 视频 image decode+VAE 编码）→ ④用原生损失训练 backbone → ⑤按范式选评估指标。文本走 `cpt_train.py.tmpl`；扩散生成走 `cpt_diffusion.py.tmpl`。
 
 ## 输入（用户给路径即可启动）
 - **模型权重路径**（必填）：HF 目录（含 config.json/safetensors/tokenizer）。可在命令里直接指定，如
@@ -44,11 +49,19 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
    - **agent 主动轮询**：训练后台跑期间，agent 每 1–2min `tail` 训练日志并把最新用时表/心跳行回显到对话——**不得"启动后台就长 sleep 只查一次"**。
    - 每完成一阶段、评估每模型切换时也重印整张表（Markdown，`print(..., flush=True)`）。阶段 0–1 勘察完即给全程总预估；阶段 7 据已耗 step×s/step 外推剩余并周期刷新。
 
+10. **按模型类型选训练范式（通用 CPT 的第一步，不可跳过）**。本技能不止做文本 LM。阶段 0 必须先**判定模型类型与格式**，再决定训练范式、数据流水线、评估指标（见「模型类型→训练范式」表）。判定方法：读 `config.json`/`model_index.json`/文件名——
+    - `architectures` 含 `ForCausalLM`/有 `config.json` + safetensors 标准权重 → **文本 LM 范式**（CE loss）。
+    - 有 `model_index.json` + `transformer/`(或 `unet/`) + `vae/` + `text_encoder/` + `scheduler/` → **diffusers 生成式范式**（流匹配/DDPM loss on VAE latents）。
+    - 出现 `mlx_*.json`/`mlx_*.safetensors`、或 README/library_name 标 `mlx` → **MLX(Apple) 格式**，NPU 无法直接加载，须找同源 PyTorch 基座（见 pitfalls #47，references/generative-diffusion-cpt.md）。
+    - 多模态 `ForConditionalGeneration` 但目标是文本 → 走文本头 remap（references/multimodal-remap.md）。
+    范式决定后续阶段 3(数据)/6(脚本)/8(评估) 全部分支，判定错则全盘错。把判定结果写进 `env_probe.json` 的 `model_type`/`train_paradigm`。
+
 ## 工作流（9 阶段，每阶段都要在屏幕实时更新用时表）
 
 ### 阶段 0 · 意图确认与路径核对
 - 核对用户给的**模型路径**与**语料路径**是否真实存在（`ls`）。本类任务里用户常给理想化/不存在路径；不存在则搜索本机可用副本并**显式告知**用户用了哪个、改了什么。
 - 确认：模型 id/路径、语料路径、seq_len、batch_size、步数、是否要 DDP/FSDP2、是否要评估。用户未指定的超参由本技能自动择优（见下）。
+- **【范式判定，决定全局分支】** 按核心原则 10 判定模型类型与格式（文本 LM / diffusers 生成式 / MLX / 多模态文本头），写进 `env_probe.json`。判定决定阶段 3 数据流水线、阶段 6 训练脚本、阶段 8 评估指标。**扩散生成式模型**（文生视频/文生图）的完整流程见 `references/generative-diffusion-cpt.md`，不走文本 LM 模板。
 
 ### 阶段 1 · 环境/依赖勘察
 探测并记录（写进 `${WS_DIR}/env_probe.json`，即 `training-ws/<模型名>-cpt/env_probe.json`）：
@@ -73,6 +86,10 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - 数据集若只有 train 分割、用户要“验证集”：用 `seed` 重建训练划分取 held-out（见 references/eval-metrics.md）。
 
 ### 阶段 3 · 语料格式转换与打包
+
+**先按范式分支（核心原则 10）：**
+
+**A. 文本 LM 范式** → tokenize 打包：
 - 读语料（jsonl/json/parquet/csv 均要支持）。
 - **格式判定**：
   - 若是 `{"messages":[...]}` chat 格式 → `tokenizer.apply_chat_template` 转连续 token 流（CPT 用）。
@@ -82,6 +99,13 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - 数据预处理边界（去重/长文档分块/多语料混合/packing vs padding/tokenizer）见 `references/data-prep.md`。
 - 用 `scripts/prepare_data.py.tmpl`。**务必打印**：总样本/子集样本/总 token/原始块数/训练块数/epoch 估计。
 - **多卡必设 `WORLD_SIZE=N`**：`need = NUM_STEPS × BATCH_SIZE × WORLD_SIZE`，`prepare_data` 据此生成块数。若多卡训练却留 `WORLD_SIZE=1`（默认），need 会算少 → 每卡仅 1/N 块 → 训练内循环重复采样（见 pitfalls）。单卡不用设。
+
+**B. diffusers 生成式范式（文生视频/文生图）** → 解码+VAE 编码+缓存 latent（**不在 CPU 堆，VAE 编码上 NPU 规避 cgroup OOM**，pitfalls #44/#46）：
+- 视频用 `decord` 解码（图片用 PIL），resize 到模型原生分辨率（如 Wan 832×480），取 N 帧（VAE 时间压缩因子 k：T 满足 `(T-1)%k==0`）。
+- VAE 编码输入 **`[B,C,T,H,W]`（视频）/ `[B,C,H,W]`（图片）**，不是 `[B,T,C,H,W]`（pitfalls #48）。
+- 文本编码：用 pipeline 的 text_encoder（UMT5/CLIP/T5）编码 caption → embedding；**若 text_encoder 巨大下载受阻，可预计算+缓存 embedding 后释放，或退零嵌入近似无条件**（pitfalls #49，references/generative-diffusion-cpt.md）。
+- **预计算-后训练模式**：把 latent + text_emb 缓存到 `video_latents.pt`，训练阶段只跑 DiT 前向反向（快、省显存、可不上 NPU 编解码器）。
+- 用 `scripts/prepare_generative_data.py.tmpl`。详见 `references/generative-diffusion-cpt.md`。
 
 ### 阶段 4 · 训练方式自动选型
 按 `references/parallel-strategy.md` 的决策树，据**卡间互联速度**、**模型参数量**、**单卡显存**、**语料规模**、**用户要求**选。**先探测卡间互联**（`hccn_tool -i <devid> -ip -g` 是否配 RoCE IP）：
@@ -115,10 +139,10 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - **梯度检查点**：线性注意力/hybrid 模型 fallback 激活显存大，默认开（`use_reentrant=False`）。
 
 ### 阶段 6 · 生成训练脚本并 smoke
-- 按选型用 `scripts/cpt_train.py.tmpl`（**单卡 + DDP 自动检测**，由 RANK env 决定）/ `cpt_fsdp.py.tmpl`（FSDP2）。单卡 `python cpt_train.py`；DDP `bash launch_ddp.sh`（torchrun）。
-- 模板通用化：`AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 references/multimodal-remap.md。
+- **按范式选模板**：文本 LM → `scripts/cpt_train.py.tmpl`（**单卡 + DDP 自动检测**，由 RANK env 决定）/ `cpt_fsdp.py.tmpl`（FSDP2）；diffusers 生成式 → `scripts/cpt_diffusion.py.tmpl`（流匹配，读缓存的 latent+emb）。
+- 模板通用化：文本 `AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 references/multimodal-remap.md；扩散生成式按 component 分离加载（train backbone，freeze VAE/text_encoder），见 references/generative-diffusion-cpt.md。
 - 模板已支持断点续训（`RESUME=1` 开关，默认关闭）与梯度累积（`GRAD_ACCUM=N`），见 references/resume.md。
-- **smoke**：2 步、2 卡（DDP）或单卡，确认前向+反向+优化器 step 都通过、loss 合理（初始 ~模型典型值）再上正式。
+- **smoke**：2 步、2 卡（DDP）或单卡，确认前向+反向+优化器 step 都通过、loss 合理（初始 ~模型典型值）再上正式。**扩散生成式：先对 backbone(DiT) 与 VAE 分别用 dummy 数据做单组件前向 smoke**（抓 NPU 算子如 3D conv/attention 支持问题，pitfalls #50），再合练。
 - **smoke 的 s/step 不可直接外推正式训练用时**：smoke 的 `s/step = 累计耗时/(step+1)` 把首次 import(~90s)+多卡加载模型+FSDP2/DDP 初始化全摊进前几步，前几步 s/step 虚高。预估正式训练取正式 run 稳态步的 s/step（累计平均越往后越准），或 `总耗时/NUM_STEPS`。
 - 踩坑先看 references/pitfalls.md（已在脚本模板里规避了多数）。
 
@@ -135,12 +159,19 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - 所有产物存到 `<模型名>-cpt/` 子目录（见核心原则 8 与「产物目录约定」）。
 
 ### 阶段 8 · 训练前后域内评估
-- 用 `scripts/eval_cpt.py.tmpl`：取 held-out 样本，对 **base** 与 **CPT** 两套算：
+**按范式分支（核心原则 10）：**
+
+**A. 文本 LM 范式** → 用 `scripts/eval_cpt.py.tmpl`：取 held-out 样本，对 **base** 与 **CPT** 两套算：
   - PPL = exp(mean NLL)、mean NLL、next-token acc（全序列 token 级，从 logits argmax）。
   - **chat 数据**：末轮 assistant 贪心生 128 token，token 级 Precision/Recall/F1/EM。
   - **纯文本数据**（无 messages，如 base 模型喂网页/代码文本）：只算 PPL/NLL/next-token acc（无"末轮 assistant"可生成比对）。
 - 指标选择要"据训练数据与模型合理"：方言/领域语料用域内 PPL/acc/生成 F1；**不要**强行套英文 MMLU/HellaSwag（不对齐且需额外下载 lm-eval-harness）。若用户模型是**通用知识型**（非领域方言）且明确要英文基准，按 `references/eval-metrics.md` 的 MMLU how-to 跑小子集并说明局限。
 - **NLL 公式务必取负**：`nll = -log_probs.gather(...).mean()`（漏取负会得负值，见 pitfalls.md）。
+
+**B. diffusers 生成式范式** → 用 `scripts/eval_diffusion.py.tmpl`：
+  - **量化**：固定 σ（如 0.5）对 base vs CPT 算 **velocity MSE**（越低=速度预测越准；Δ<0 训练有效）。取 held-out latent。
+  - **定性**：CPT backbone 采样（noise→N 步 Euler 去噪→VAE 解码→存帧 gif/mp4）。生成质量随步数渐进提升，50 步演示看 loss/MSE 下降即可断"训练有效"。
+  - eval 指标与生成范式一一对应，**不要**给扩散模型套 PPL/next-token acc（无 token 序列概念）。
 - 出 `eval_results.json` + 结论表，给"训练是否有效"结论（Δ 方向 + 是否过拟合）。
 - **FSDP2 大模型评估**：ckpt 是 `full_tensor()` 聚合的全量 state_dict，单卡直接 `load_state_dict` 即可（评估不需 FSDP2/DDP）。base 多模态走 remap。完整 9B FSDP2 实战案例（含结果表 + 与 0.8B 对比）见 `references/eval-metrics.md`。
 - **多卡训练后别立刻跑单卡评估**：8 卡 FSDP2/DDP 训练退出后 NPU driver **异步回收显存有延迟**（pitfalls #32），立刻 `model.to(npu)` 易 OOM（card 仅剩几百 MB free 但无残留进程）。训练退出后等几秒、`npu-smi` 确认卡空闲（或 `torch.empty(40GB)` 实测可分配）再跑评估；评估脚本载入前先 `torch.npu.empty_cache()`。
@@ -150,6 +181,16 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 输出（Markdown）含：任务/模型/语料、并行策略、融合 API、超参表、loss 收敛(first5→last5, min, delta)、用时表(每阶段实际/预计)、公网直链、关键修正记录、复跑命令。全部归档到 `${WS_DIR}/`（即 `training-ws/<模型名>-cpt/`）。
 
 ## 自动选型速查（写进脚本头注释）
+
+### 模型类型 → 训练范式（首选维度，核心原则 10）
+
+| 模型类型 | 训练范式 | 损失 | 数据流水线 | 脚本 | 评估 |
+|---|---|---|---|---|---|
+| 文本 decoder-only LM / 多模态文本头 | next-token 自回归 | CE `model(input_ids,labels)` | tokenize→打包 seq_len 块 | `cpt_train.py.tmpl` | PPL/acc/F1 |
+| 文生视频/文生图 diffusers(DiT/U-Net) | 流匹配/DDPM | velocity/epsilon MSE on VAE latent | decode→VAE编码→缓存 latent+text emb | `cpt_diffusion.py.tmpl` | velocity MSE + 采样生成 |
+| MLX(Apple) 格式模型 | 同上但须先换 PyTorch 基座 | — | — | 见 pitfalls #47 | — |
+
+### 并行/规模选型（次选维度，适用于 backbone 训练）
 
 | 输入 | 选型 |
 |---|---|
@@ -222,6 +263,9 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - `references/resume.md` — 断点续训（存/载 optimizer+step+sampler）
 - `references/eval-metrics.md` — PPL/acc/F1/Recall/EM 定义 + held-out 重建 + FSDP2 实战案例 + MMLU how-to
 - `references/multimodal-remap.md` — 多模态 checkpoint → 文本头权重重映射
+- `references/generative-diffusion-cpt.md` — **文生视频/文生图 diffusers 扩散 DiT CPT 全流程**（MLX→PyTorch 基座、组件分离、VAE 编码上 NPU、流匹配 loss、预计算 latent、text_encoder 缓存/零嵌入兜底、采样评估）
 
 ## scripts（标准模板，新模型微调即用）
 见 `scripts/*.tmpl`。生成时复制到 `${WS_DIR}/`（即 `training-ws/<模型名>-cpt/`）并按当前模型/语料/选型替换占位。模板已规避多数踩坑（set_to_none=False、gradient_as_bucket_view=False、expandable_segments、autocast、grad-ckpt）。其中 `run_env.sh.tmpl` 的 `WS_DIR` 已自动指向 `training-ws/<模型名>-cpt/` 并 `mkdir -p`；`timing_table.py.tmpl` 用于全程实时用时表（见核心原则 9）。
+
+按范式选模板：文本 LM → `prepare_data.py.tmpl` + `cpt_train.py.tmpl`(+`cpt_fsdp.py.tmpl`/`cpt_mp.py.tmpl`) + `eval_cpt.py.tmpl`；扩散生成式 → `prepare_generative_data.py.tmpl` + `cpt_diffusion.py.tmpl` + `eval_diffusion.py.tmpl`。
