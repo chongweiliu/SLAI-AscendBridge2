@@ -9,13 +9,11 @@
 import os, json, math, time, random, sys, subprocess
 import torch
 import torch_npu  # noqa: F401  必须，autoload=0 时手动注册
-# 防御：部分镜像系统 torchaudio/torchvision .so 与 torch 符号错配，import 即崩；transformers 多模态文本头类
-# 会链式触发其加载（image_utils→torchvision.io, audio_utils→torchaudio）。先 try 探测，坏了用 sys.meta_path 拦成
-# 干净桩（torchvision 需带 __getattr__ sentinel 的 _StubModule，因 `from torchvision.io import X` 要取属性；见 pitfalls #39/#43）。文本/视觉 CPT 不需音视频。
-try:
-    import torchaudio  # noqa: F401
-    import torchvision  # noqa: F401
-except Exception:
+# torchaudio/torchvision: 默认走与 torch ABI 匹配的正式版(pitfalls #39/#43)。仅当 ≥3 次安装正式版
+# 仍失败时, 置 STUB_MM_FALLBACK=1 启用桩兜底(并打WARN)。默认不桩, 强制用正式版。
+if os.environ.get("STUB_MM_FALLBACK","0")=="1":
+    print("[WARN] STUB_MM_FALLBACK=1: torchaudio/torchvision 桩兜底启用; 请优先装匹配正式版"
+          "(如 torch2.8→torchaudio2.8/torchvision0.23, torch2.12→torchaudio2.12/torchvision0.27)以移除桩", flush=True)
     import sys, types, importlib.abc, importlib.machinery
     sys.modules.pop('torchaudio', None); sys.modules.pop('torchvision', None)
     class _Any:
@@ -32,6 +30,9 @@ except Exception:
         def create_module(self, spec): return _StubModule(spec.name)
         def exec_module(self, module): module.__version__ = '0.0.0'; module.__file__ = '<stub>'
     sys.meta_path.insert(0, _StubFinder())
+else:
+    import torchaudio  # noqa: F401
+    import torchvision  # noqa: F401
 try:
     import torch.distributed as dist
     from torch.nn.parallel import DistributedDataParallel as DDP

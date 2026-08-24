@@ -7,12 +7,11 @@
 import os, json, random, math
 import torch
 import torch_npu  # noqa: F401
-# 防御：坏掉的 torchaudio/torchvision 会挡住 transformers 多模态文本头导入（image_utils→torchvision, audio_utils→torchaudio）；
-# torchvision 需带 __getattr__ sentinel 的 _StubModule（`from torchvision.io import X` 要取属性）。见 pitfalls #39/#43。
-try:
-    import torchaudio  # noqa: F401
-    import torchvision  # noqa: F401
-except Exception:
+# torchaudio/torchvision: 默认走与 torch ABI 匹配的正式版(pitfalls #39/#43)。仅当 ≥3 次安装正式版
+# 仍失败时, 置 STUB_MM_FALLBACK=1 启用桩兜底(并打WARN)。默认不桩, 强制用正式版。
+if os.environ.get("STUB_MM_FALLBACK","0")=="1":
+    print("[WARN] STUB_MM_FALLBACK=1: torchaudio/torchvision 桩兜底启用; 请优先装匹配正式版"
+          "(如 torch2.8→torchaudio2.8/torchvision0.23, torch2.12→torchaudio2.12/torchvision0.27)以移除桩", flush=True)
     import sys, types, importlib.abc, importlib.machinery
     sys.modules.pop('torchaudio', None); sys.modules.pop('torchvision', None)
     class _Any:
@@ -29,6 +28,9 @@ except Exception:
         def create_module(self, spec): return _StubModule(spec.name)
         def exec_module(self, module): module.__version__ = '0.0.0'; module.__file__ = '<stub>'
     sys.meta_path.insert(0, _StubFinder())
+else:
+    import torchaudio  # noqa: F401
+    import torchvision  # noqa: F401
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
 from safetensors.torch import load_file
 
