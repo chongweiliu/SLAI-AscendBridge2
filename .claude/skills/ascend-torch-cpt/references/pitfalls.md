@@ -201,7 +201,8 @@ if r == 0:
 ## 39. 系统 torchaudio .so 符号错配，链式挡住 transformers 多模态文本头导入
 - **症状**：`from transformers.models.<mm>_xxx import XxxForCausalLM`（多模态模型的文本头类）报 `OSError: torchaudio/lib/_torchaudio.abi3.so: undefined symbol: torch_library_impl`；而 `from transformers import AutoModelForCausalLM` 正常。
 - **根因**：共享镜像里系统 torchaudio 按另一个 torch 版本编译，符号不匹配；transformers 多模态模型模块链式触发 `import torchaudio` 即崩（grep 源码未必直接引用，是间接加载）。纯文本 LM 不触发。
-- **解法**：文本/视觉 CPT 用不到音频，把 torchaudio 拦截成干净桩模块（带合法 `ModuleSpec`，可选依赖即跳过）。`sys.meta_path` 插 finder：
+- **解法（首选正式版，默认）**：装与当前 torch ABI 匹配的正式版 torchaudio（见 #43 对应表与命令），`import` 即正常，**无需打桩**。系统 site-packages 只读时 `pip install --user torchaudio==<匹配版>`，用户 site 优先级高于系统，直接覆盖坏包。装完 `python -c "import torchaudio,torchvision; from transformers.models.qwen3_5 import Qwen3_5ForCausalLM"` 验证导入链不崩。
+- **解法（fallback 打桩，最后手段）**：**仅当 ≥3 次尝试安装匹配正式版仍失败**（torch 太新无配套 release、离线无 mirror、aarch64 无 wheel 等）才用桩。模板**默认不打桩**——`cpt_train.py.tmpl`/`eval_cpt.py.tmpl` 顶部默认 `import torchaudio, torchvision` 走正式版；只有显式 `export STUB_MM_FALLBACK=1` 时才装桩 finder（并打印 WARN 提示优先装正式版）。桩代码见下（同时拦 torchaudio 和 torchvision，torchvision 需带 `__getattr__` sentinel 的 `_StubModule`）：
 ```python
 import sys, types, importlib.abc, importlib.machinery
 class _StubFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
@@ -212,7 +213,7 @@ class _StubFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
     def exec_module(self, module): module.__version__ = '0.0.0'; module.__file__ = '<stub>'
 sys.meta_path.insert(0, _StubFinder())
 ```
-注意：桩模块必须带 `ModuleSpec`（仅设 `sys.modules['torchaudio']=ModuleType(...)` 会因 `__spec__ is None` 再报 `ValueError`）。模板 `cpt_train.py.tmpl`/`eval_cpt.py.tmpl` 顶部已加**带探测的防御版**（先 `try: import torchaudio`，坏了才桩，健康时 no-op）。同模式适用于 soundfile/librosa 等其它坏掉的音频可选依赖。
+注意：桩模块必须带 `ModuleSpec`（仅设 `sys.modules['torchaudio']=ModuleType(...)` 会因 `__spec__ is None` 再报 `ValueError`）；torchvision 需更强的桩——`from torchvision.io import ImageReadMode` 要取属性，空 `ModuleType` 会 `ImportError`，需 `__getattr__` 返回 sentinel 的 `_StubModule`（完整代码见 #43）。模板 `cpt_train.py.tmpl`/`eval_cpt.py.tmpl` 顶部默认 `import torchaudio, torchvision` 走正式版；**仅 `export STUB_MM_FALLBACK=1`（≥3 次装正式版失败后）才装桩并打 WARN**。同模式适用于 soundfile/librosa 等其它坏掉的音频可选依赖。
 
 ## 40. torch 是 `+cpu` build 不代表没 NPU
 - **症状**：`torch.__version__ == '2.8.0+cpu'`，误以为该机器无 NPU 支持或装错 torch。
@@ -233,8 +234,8 @@ sys.meta_path.insert(0, _StubFinder())
 ## 43. torchvision 也与 torch ABI 错配（扩展 #39，不只 torchaudio）
 - **症状**：升级 torch（如 2.12）后，`from transformers.models.<mm>_xxx import XxxForCausalLM` 报 `RuntimeError: operator torchvision::nms does not exist` 或 torchvision `.so undefined symbol`；而 `from transformers import AutoTokenizer` 正常。导入链：多模态文本头 → `modeling_utils` → `loss_utils` → `image_transforms` → `image_utils` → `from torchvision.io import ...` 即崩。
 - **根因**：同 #39，系统 torchvision 按旧 torch 编译，符号/算子注册不匹配；transformers 多模态模型模块间接 `import torchvision`。#39 只覆盖 torchaudio，**torchvision 是同一类坑但常被漏**。
-- **解法（首选正式库）**：装匹配当前 torch 的正式版 torchvision/torchaudio，import 即正常，无需打桩。torch 2.12.x 实测可行组合：`pip install torchvision==0.27.1`（自动带 +cu130，匹配 torch 2.12.1+cu130）+ `torchaudio==2.11.0`（华为 mirror 最新；虽版本号对应 torch 2.11，实测与 torch 2.12.1 import 兼容）。torchvision 版本对应表：torch 2.12↔torchvision 0.27.x、torch 2.11↔0.26.x、torch 2.10↔0.25.x（torchaudio 版本号则与 torch 主版本对齐：torchaudio 2.12.0↔torch 2.12）。装完 `python -c "import torch,torchvision,torchaudio; from transformers.models.qwen3_5 import Qwen3_5ForCausalLM"` 验证导入链不崩。注意 torch_npu 与 torch patch 版本：torchvision 0.27.1 会拉 torch 到 2.12.1，torch_npu 2.12.0（pin torch==2.12.0）实测仍兼容 2.12.1（950PR matmul 正常），但若 torch_npu 报 ABI 错则固定 torch==2.12.0 + 装匹配 0.27.0。
-- **解法（fallback 打桩）**：仅当匹配 torch 的 torchvision/torchaudio 正式版不可得（如 torch 太新还没配套 release、或离线无 mirror）时，才用 stub。把 #39 的 stub finder 同时拦 torchaudio **和 torchvision**。torchvision 需更强的桩——`from torchvision.io import ImageReadMode` 要取属性，空 `ModuleType` 会 `ImportError`，需 `__getattr__` 返回 sentinel 的 `_StubModule`：
+- **解法（首选正式库，默认）**：装匹配当前 torch 的正式版 torchvision/torchaudio，import 即正常，无需打桩。**torch 2.8.0+cpu 实测可行组合（2026-08-24，aarch64 Ascend910）**：`pip install --user torchaudio==2.8.0`（华为云 mirror 有 cp311 manylinux aarch64 wheel，自动 pin `torch==2.8.0`，与 `2.8.0+cpu` ABI 对齐），torchvision 0.23.0 已预装匹配。原坏包是 `torchaudio 2.11.0+cpu`（太新，引用 torch 2.11 符号 `torch_library_impl`，torch 2.8 无此符号 → undefined symbol）——典型"装新了"而非"装旧了"。torch 2.12.x 实测组合：`pip install torchvision==0.27.1`（自动带 +cu130，匹配 torch 2.12.1+cu130）+ `torchaudio==2.11.0`（华为 mirror 最新；虽版本号对应 torch 2.11，实测与 torch 2.12.1 import 兼容）。torchvision 版本对应表：torch 2.8↔torchvision 0.23.x、torch 2.12↔0.27.x、torch 2.11↔0.26.x、torch 2.10↔0.25.x（torchaudio 版本号则与 torch 主版本对齐：torchaudio 2.8.0↔torch 2.8、2.12.0↔torch 2.12）。装完 `python -c "import torch,torchvision,torchaudio; from transformers.models.qwen3_5 import Qwen3_5ForCausalLM"` 验证导入链不崩。注意 torch_npu 与 torch patch 版本：torchvision 0.27.1 会拉 torch 到 2.12.1，torch_npu 2.12.0（pin torch==2.12.0）实测仍兼容 2.12.1（950PR matmul 正常），但若 torch_npu 报 ABI 错则固定 torch==2.12.0 + 装匹配 0.27.0。**判断"装新了 vs 装旧了"**：报 `undefined symbol: <某 torch 符号>` 多半是 torchaudio/torchvision 比当前 torch 新（引用了新 torch 才有的符号）；装匹配主版本号即可。
+- **解法（fallback 打桩）**：**仅当 ≥3 次尝试安装匹配正式版仍失败**（torch 太新还没配套 release、离线无 mirror、aarch64 无 wheel 等）才用桩。模板 `cpt_train.py.tmpl`/`eval_cpt.py.tmpl` 顶部**默认 `import torchaudio, torchvision` 走正式版（不打桩）**；只有显式 `export STUB_MM_FALLBACK=1` 时才装下面的 stub finder（同时拦 torchaudio **和** torchvision），并打印 `[WARN] STUB_MM_FALLBACK=1` 提示优先装正式版。torchvision 需更强的桩——`from torchvision.io import ImageReadMode` 要取属性，空 `ModuleType` 会 `ImportError`，需 `__getattr__` 返回 sentinel 的 `_StubModule`：
 ```python
 class _Any:
     def __call__(self, *a, **k): return _Any()
@@ -251,7 +252,7 @@ class _StubFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
     def exec_module(self, module): module.__version__ = '0.0.0'; module.__file__ = '<stub>'
 sys.meta_path.insert(0, _StubFinder())
 ```
-模板 `cpt_train.py.tmpl`/`eval_cpt.py.tmpl` 顶部用 `try: import torchaudio, torchvision; except: <stub>` 防御式——正式版可用时 try 成功 no-op、不生效；正式版崩了才走 stub。优先正式库，stub 仅兜底。
+模板 `cpt_train.py.tmpl`/`eval_cpt.py.tmpl` 顶部默认 `import torchaudio, torchvision` 走正式版；`STUB_MM_FALLBACK=1`（≥3 次装正式版失败后）才装上述桩 finder 并打 WARN。**默认优先正式库，stub 仅兜底且必须显式开启。**
 
 ## 44. 容器内存限制 + torch.load 大 ckpt 到 CPU → OOM SIGKILL(137)（静默死）
 - **症状**：eval/加载阶段 `torch.load(ckpt, map_location='cpu')` 一个大 state（如 4B fp32 = 16.8GB），叠加已建的 fp32 模型（16GB），进程被 `SIGKILL`（exit 137），**无任何 traceback/错误输出**（日志突然断在加载那行）。系统 `free -g` 显示 hundreds of GB available，看似不该 OOM。
