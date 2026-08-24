@@ -398,3 +398,39 @@ sys.meta_path.insert(0, _StubFinder())
 - **判定要点**：7B 全量 CPT 在 2×64GB DDP OOM → 改模型并行 device_map+max_memory(bf16)；仍要 fp32 master → 加卡或 FSDP2。
 
 > 注：音频-LLM 全流程见 `references/audio-llm-cpt.md`。GGUF/MLX 音频模型(如 OmniAudio)换同源 PyTorch 基座(#47)。
+
+## 61. 训练 loss 趋近 0 = 过拟合红旗（数据量不足多 epoch 循环）（MOSS CPT 实证）
+- **症状**：CPT 训练 loss 降到 ~0.01-0.05（near-0），但 held-out CE/loss 几乎不改善（-3% 甚至正 delta）。
+- **根因**：数据量太少 + 步数多 → epoch 过多 → 模型**记忆训练样本**（train_loss→0）但未学到可泛化模式。训练 loss 大降 ≠ 训练有效。
+- **实证**：MOSS 0.9B + AISHELL-4，8 会议 × 200 步(25 epoch)→train_loss 0.012(过拟合)、held-out -3%；50 会议 × 300 步(6 epoch)→train_loss 0.110(健康)、held-out -87%。**扩数据(8→50)比加步数更有效**——数据量是泛化的关键杠杆，非步数。
+- **解法**：①train_loss < 0.05 且 held-out 不改善 → 停止加步，**扩数据**；②train_loss 降到 0.1-0.5 + held-out 持续改善 = 健康收敛；③优先扩数据再加步（小数据多步=白烧算力）。
+- **判定要点**：train_loss near-0 + held-out delta 小/正 → 过拟合，扩数据。
+
+## 62. held-out 评估须用独立 test split，非同源不同段（MOSS CPT 实证）
+- **症状**：用"同源数据不同段"（如同一会议 120-180s 段）作 held-out → 评估结果不干净，低估/高估泛化。
+- **根因**：同源不同段仍共享说话人/声学/主题分布 → 非真正独立；模型过拟合到该源后，"held-out" 段也被记忆或不被学到，指标失真。
+- **解法**：held-out 用**独立 test split**（完全不同会议/样本），训练完全未见过。MOSS 实证：同源不同段 held-out -3%（误导），test 独立会议 held-out -87%（真实泛化）。
+- **判定要点**：held-out delta 与训练 loss 不匹配（train→0 但 held-out 不动）→ 查 held-out 是否独立；换 test split 重评。
+
+## 63. 音频-LLM forward API 未标准化——各模型 forward kwarg + processor 返回键不同（MOSS vs Qwen2-Audio 实证）
+- **症状**：用 Qwen2-Audio 的 forward kwarg（`input_features` + `feature_attention_mask`）跑 MOSS → 报 NoneType.to 或维度错。
+- **根因**：音频-LLM 的 forward 签名 + processor 返回键**未跨模型标准化**：Qwen2-Audio forward 用 `input_features`+`feature_attention_mask`；MOSS 用 `input_features`+`audio_feature_lengths`（无 `feature_attention_mask`）。audio token 名也不同（Qwen2-Audio `<|audio_bos|>/<|AUDIO|>/<|audio_eos|>` vs MOSS `<|audio_start|>/<|audio_pad|>/<|audio_end|>`）。
+- **解法**：①audio token 发现**可通用**（`discover_audio_token_ids` 按名含 "audio" 抓所有模型 ✓）；②forward kwarg **不通用**——换音频-LLM 须读其 `modeling_*.py` 的 forward 签名 + processor `__call__` 返回键，按模型适配。`cpt_audio_llm.py.tmpl` 的 forward 是 Qwen2-Audio-style 默认，MOSS 需改 `feature_attention_mask` → `audio_feature_lengths`。
+- **判定要点**：跨音频-LLM 报 forward kwarg / NoneType.to → 查该模型 forward 签名 + processor 返回键。
+
+## 64. 长音频数据集分段——CPT 取前 N 秒段，非整会长音频（AISHELL-4 实证）
+- **症状**：会议/长音频数据集（AISHELL-4 15-32min/会议）整条喂训练 → mel 巨大 + context 极长 → 慢/OOM。
+- **解法**：取每条前 N 秒段（60-120s）做 CPT 样本（`soundfile.read(fl, start=0, frames=N*sr)`）；标注同步截到该段（`parse_textgrid(tg, max_sec=N)` 只取 <N 秒的 interval）。MOSS 等支持长音频的模型 CPT 用短段即可学转写模式，不必整条。
+- **判定要点**：长音频（>5min）数据集 → 分段，非整条。
+
+## 65. 多通道音频取 ch0（AISHELL-4 等 mic array）
+- **症状**：`soundfile.read` 返回 `shape=(N, 8)`（多通道），直接传 processor 报 channel 维错或 mel 算错。
+- **解法**：`arr,sr=sf.read(fl, ...); if arr.ndim>1: arr=arr[:,0]`（取第 0 通道）。AISHELL-4 是 8 通道 mic array，取 ch0 = 近场主麦克风，与 16k 单声道训练期望一致。
+- **判定要点**：`arr.ndim>1` → 取 `[:,0]`。
+
+## 66. 标注格式转换——TextGrid/RTTM/JSON → 模型输出格式 transcript（AISHELL-4 实证）
+- **症状**：数据集标注不是纯文本 transcript（AISHELL-4 用 Praat TextGrid IntervalTier + RTTM），无法直接当训练 target。
+- **解法**：解析标注 → 转模型输出格式。TextGrid：解析 IntervalTier（每 speaker tier 的 `[xmin,xmax,text]`），按 xmin 排序，speaker 映射 `[S01]/[S02]`（首见序），格式化 `[Sxx] HH:MM:SS,mmm text`，去 `<sil>` 标记。RTTM（`SPEAKER file 1 onset dur ... spk`）类似。目标格式对齐模型输出（如 MOSS 输出 `[S01] 时间戳 文本`）。
+- **判定要点**：数据标注非纯文本 → 写转换器（TextGrid/RTTM/JSON → model-output-format）。
+
+> 注：#61/#62 是**通用**规律（适用于文本 LM / 扩散 / 音频-LLM 所有 CPT 范式），#63-66 是音频-LLM 特有。数据规模 vs 泛化规律详见 `references/audio-llm-cpt.md`「数据规模 vs 泛化」节。
