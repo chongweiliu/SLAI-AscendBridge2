@@ -405,6 +405,7 @@ sys.meta_path.insert(0, _StubFinder())
 - **实证**：MOSS 0.9B + AISHELL-4，8 会议 × 200 步(25 epoch)→train_loss 0.012(过拟合)、held-out -3%；50 会议 × 300 步(6 epoch)→train_loss 0.110(健康)、held-out -87%。**扩数据(8→50)比加步数更有效**——数据量是泛化的关键杠杆，非步数。
 - **解法**：①train_loss < 0.05 且 held-out 不改善 → 停止加步，**扩数据**；②train_loss 降到 0.1-0.5 + held-out 持续改善 = 健康收敛；③优先扩数据再加步（小数据多步=白烧算力）。
 - **判定要点**：train_loss near-0 + held-out delta 小/正 → 过拟合，扩数据。
+- **caveat**：上述 MOSS 对比同时改了数据量(8→50)和步数(200→300)，非严格受控实验。推断"数据为主因"的依据是 train_loss 从 0.012→0.110 **升高**（纯加步只会降 train_loss，不会升），故数据扩容是主因——但严格结论需固定步数变数据量的受控实验。
 
 ## 62. held-out 评估须用独立 test split，非同源不同段（MOSS CPT 实证）
 - **症状**：用"同源数据不同段"（如同一会议 120-180s 段）作 held-out → 评估结果不干净，低估/高估泛化。
@@ -415,7 +416,7 @@ sys.meta_path.insert(0, _StubFinder())
 ## 63. 音频-LLM forward API 未标准化——各模型 forward kwarg + processor 返回键不同（MOSS vs Qwen2-Audio 实证）
 - **症状**：用 Qwen2-Audio 的 forward kwarg（`input_features` + `feature_attention_mask`）跑 MOSS → 报 NoneType.to 或维度错。
 - **根因**：音频-LLM 的 forward 签名 + processor 返回键**未跨模型标准化**：Qwen2-Audio forward 用 `input_features`+`feature_attention_mask`；MOSS 用 `input_features`+`audio_feature_lengths`（无 `feature_attention_mask`）。audio token 名也不同（Qwen2-Audio `<|audio_bos|>/<|AUDIO|>/<|audio_eos|>` vs MOSS `<|audio_start|>/<|audio_pad|>/<|audio_end|>`）。
-- **解法**：①audio token 发现**可通用**（`discover_audio_token_ids` 按名含 "audio" 抓所有模型 ✓）；②forward kwarg **不通用**——换音频-LLM 须读其 `modeling_*.py` 的 forward 签名 + processor `__call__` 返回键，按模型适配。`cpt_audio_llm.py.tmpl` 的 forward 是 Qwen2-Audio-style 默认，MOSS 需改 `feature_attention_mask` → `audio_feature_lengths`。
+- **解法**：①audio token 发现**可通用**（`discover_audio_token_ids` 按名含 "audio" 抓所有模型 ✓）；②forward kwarg **自动探测通用**——`cpt_audio_llm.py.tmpl` 用 `inspect.signature(model.forward)` 探测 forward 参数，从 `("feature_attention_mask","audio_feature_lengths")` 中取 forward 接受 + processor 返回的那个，通过 `**audio_kwargs` 动态传（不再写死 Qwen2-Audio 的 `feature_attention_mask`）。换音频-LLM 无需改模板 forward 调用。③若 forward 接受其它 mask kwarg 名，扩展 `("feature_attention_mask","audio_feature_lengths", ...)` 列表。
 - **判定要点**：跨音频-LLM 报 forward kwarg / NoneType.to → 查该模型 forward 签名 + processor 返回键。
 
 ## 64. 长音频数据集分段——CPT 取前 N 秒段，非整会长音频（AISHELL-4 实证）
