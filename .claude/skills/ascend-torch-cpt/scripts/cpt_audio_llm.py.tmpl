@@ -1,0 +1,150 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# cpt_audio_llm.py.tmpl — 音频-LLM(audio-text-to-text) 继续预训练 CPT (NPU)
+# 冻结 audio_tower+multi_modal_projector, 训 language_model 全量(或 LoRA); 转写 CE loss。
+# 兼容单卡(ASCEND_RT_VISIBLE_DEVICES=0)/2卡模型并行(=0,1 + device_map+max_memory)。
+# 占位: MODEL_DIR, WS_DIR, DATA_FILE 由 run_env.sh 注入; NUM_STEPS/LR/WARMUP/BATCH_SIZE 可 env 覆盖
+import sklearn  # noqa  必先! libgomp TLS 修复(#55)
+import os, json, time, sys, subprocess, random, io, math
+os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD","0")
+os.environ.setdefault("TASK_QUEUE_ENABLE","1")
+os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF","expandable_segments:True")
+import torch, torch_npu  # noqa
+torch.npu.set_device(0); DEV0="npu:0"
+import soundfile as sf, numpy as np
+# 数据: parquet(audio bytes+transcription) 或 jsonl; 这里以 fleurs-style parquet 为例, 其它格式改 load_samples
+try:
+    import pyarrow.parquet as pq
+except Exception:
+    pq=None
+from transformers import AutoProcessor, Qwen2AudioForConditionalGeneration  # Qwen2-Audio; 其它音频-LLM 换对应类
+
+WS=os.environ["WS_DIR"]; MODEL=os.environ["MODEL_DIR"]; OUT=os.path.join(WS,"outputs"); LOG=os.path.join(WS,"logs")
+os.makedirs(OUT,exist_ok=True); os.makedirs(LOG,exist_ok=True)
+STEPS=int(os.environ.get("NUM_STEPS","100")); LR=float(os.environ.get("LR","2e-5"))
+WARMUP=int(os.environ.get("WARMUP","10")); SEED=42; RATIO=float(os.environ.get("RATIO","0.3"))
+N_KEEP=int(os.environ.get("N_KEEP","150")); GRAD_ACCUM=int(os.environ.get("GRAD_ACCUM","1")); BS=int(os.environ.get("BATCH_SIZE","1"))
+# 2卡模型并行: export NPU2CARD=1 + ASCEND_RT_VISIBLE_DEVICES=0,1
+NPU2CARD=os.environ.get("NPU2CARD","0")=="1"
+random.seed(SEED); torch.manual_seed(SEED)
+
+def load_samples():
+    """读 parquet(audio bytes+transcription) 取 N_KEEP 样本。其它格式(jsonl/path+caption)改这里。"""
+    dp=os.environ["DATA_FILE"]
+    samples=[]
+    if dp.endswith(".parquet") and pq is not None:
+        t=pq.read_table(dp); cols=t.column_names
+        tcol="transcription" if "transcription" in cols else ("raw_transcription" if "raw_transcription" in cols else "text")
+        rows=t.to_pylist(); rng=random.Random(SEED); rng.shuffle(rows)
+        for r in rows[:N_KEEP]:
+            a=r.get("audio",{}); b=a.get("bytes")
+            if not b: continue
+            try:
+                arr,sr=sf.read(io.BytesIO(b))
+                if arr.ndim>1: arr=arr[:,0]
+                if sr!=16000: continue  # 16k; 非16k跳过(避免 librosa 重采样依赖)
+                txt=str(r.get(tcol,"")).strip()
+                if not txt: continue
+                samples.append({"audio":arr.astype(np.float32),"text":txt})
+            except Exception: continue
+            if len(samples)>=N_KEEP: break
+    print(f"[data] loaded {len(samples)} samples", flush=True)
+    return samples
+
+def build_inputs(proc, samples, dev0):
+    """批量(bs=len(samples)): chat template + processor(padding) + labels mask pad/prompt/audio token(#58)。"""
+    U=[{"type":"audio","audio_url":"x"},{"type":"text","text":"Transcribe the audio into text verbatim."}]
+    fulls=[]; prompts=[]; arrs=[]
+    for s in samples:
+        fulls.append(proc.apply_chat_template([{"role":"user","content":U},{"role":"assistant","content":s["text"]}],tokenize=False,add_generation_prompt=False))
+        prompts.append(proc.apply_chat_template([{"role":"user","content":U}],tokenize=False,add_generation_prompt=True))
+        arrs.append(s["audio"])
+    inp=proc(text=fulls, audio=arrs, padding=True, return_tensors="pt", sampling_rate=16000)  # audio= 单数(#56)
+    pinp=proc(text=prompts, audio=arrs, padding=True, return_tensors="pt", sampling_rate=16000)
+    ids=inp.input_ids.to(dev0); am=inp.attention_mask.to(dev0)
+    af=inp.input_features.to(dev0); fam=inp.feature_attention_mask.to(dev0)
+    labels=ids.clone(); labels[am==0]=-100  # pad
+    for i in range(len(samples)):
+        labels[i,:int(pinp.attention_mask[i].sum())]=-100  # prompt 段
+    tok=proc.tokenizer  # 显式 mask audio 特殊 token(#58)
+    for a in {tok.convert_tokens_to_ids(t) for t in ["<|audio_bos|>","<|AUDIO|>","<|audio_eos|>"]}:
+        if a is not None and a>=0: labels[ids==a]=-100
+    return ids, am, af, fam, labels
+
+def main():
+    proc=AutoProcessor.from_pretrained(MODEL)
+    if NPU2CARD:
+        print("[model] loading bf16, device_map=auto+max_memory (2卡模型并行, #59/#60)...", flush=True)
+        model=Qwen2AudioForConditionalGeneration.from_pretrained(MODEL, torch_dtype=torch.bfloat16, device_map="auto", max_memory={0:"18GB",1:"42GB"}, low_cpu_mem_usage=True)
+    else:
+        print("[model] loading bf16, single card...", flush=True)
+        model=Qwen2AudioForConditionalGeneration.from_pretrained(MODEL, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True).to(DEV0)
+    model.config.use_cache=False
+    # 冻结 audio_tower+multi_modal_projector(按子模块路径, 勿用类名"Audio"误冻顶层 #59)
+    fr=0; tot=0
+    for n,m in model.named_modules():
+        if "audio_tower" in n or "multi_modal_projector" in n:
+            for p in m.parameters(recurse=True):
+                if p.requires_grad: p.requires_grad_(False); fr+=p.numel()
+    for p in model.parameters(): tot+=p.numel()
+    print(f"[freeze] audio_tower+projector={fr/1e6:.0f}M frozen, trainable LLM={(tot-fr)/1e9:.3f}B", flush=True)
+    dev0 = next(model.parameters()).device
+    # LLM grad-ckpt
+    for m in model.modules():
+        tn=type(m).__name__
+        if hasattr(m,"gradient_checkpointing_enable") and ("CausalLM" in tn or tn=="Qwen2Model"):
+            try: m.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
+            except Exception as e: print("[gc]",str(e)[:80],flush=True)
+    try: model.enable_input_require_grads()
+    except Exception: pass
+    model.train()
+    optim=torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=LR, betas=(0.9,0.95), weight_decay=0.01, eps=1e-8)  # 非 foreach/fused(#24 多device)
+    samples=load_samples()
+    def lr_at(s):
+        if s<WARMUP: return LR*(s+1)/WARMUP
+        p=(s-WARMUP)/max(1,STEPS-WARMUP); return 0.5*LR*(1+math.cos(math.pi*p))
+    log=[]; lp=os.path.join(LOG,"step_loss.jsonl"); open(lp,'w').close()
+    print(f"[train] {STEPS} steps bs={BS} lr={LR} grad_accum={GRAD_ACCUM} audio-LLM CPT({'model-parallel 2卡' if NPU2CARD else 'single'})", flush=True)
+    print(f"{'step':>4} {'loss':>10} {'lr':>10} {'s/step':>7} {'ETA':>8}", flush=True)
+    t0=time.time(); _lt=0.0; optim.zero_grad(set_to_none=False)
+    for step in range(STEPS):
+        idx=[(step*BS+i)%len(samples) for i in range(BS)]
+        sb=[samples[j] for j in idx]
+        try:
+            ids,am,af,fam,labels=build_inputs(proc, sb, dev0)
+        except Exception as e:
+            print(f"[skip step {step}] {type(e).__name__}: {str(e)[:80]}", flush=True); continue
+        lr=lr_at(step)
+        for g in optim.param_groups: g['lr']=lr
+        with torch.autocast(device_type="npu",dtype=torch.bfloat16):
+            out=model(input_ids=ids, attention_mask=am, input_features=af, feature_attention_mask=fam, labels=labels)  # 须传 input_features+feature_attention_mask(#57)
+            loss=out.loss if hasattr(out,'loss') else out[0]
+        (loss/GRAD_ACCUM).backward()
+        if (step+1)%GRAD_ACCUM==0 or step==STEPS-1:
+            torch.nn.utils.clip_grad_norm_([p for p in model.parameters() if p.requires_grad],1.0)
+            optim.step(); optim.zero_grad(set_to_none=False)
+        ls=float(loss.detach().cpu()); el=time.time()-t0; sps=el/(step+1)
+        log.append({"step":step,"loss":ls,"lr":lr,"elapsed_s":round(el,2),"s_per_step":round(sps,3)})
+        with open(lp,'a') as f: f.write(json.dumps(log[-1])+'\n')
+        if step%2==0 or step==STEPS-1:
+            remain=(STEPS-1-step)*sps; eta=f"{remain/60:.1f}min" if remain>=60 else f"{remain:.0f}s"
+            print(f"{step:>4} {ls:>10.5f} {lr:.2e} {sps:>7.3f} {eta:>8}", flush=True)
+        now=time.time()
+        if now-_lt>=30 or step==STEPS-1:
+            _lt=now; remain=(STEPS-1-step)*sps if sps>0 else 0
+            eta=f"{remain/60:.1f}min" if remain>=60 else f"{remain:.0f}s"
+            try: subprocess.run([sys.executable,os.path.join(WS,"timing_table.py"),"--doing","7",str(round(el,0)),f"{step+1}/{STEPS}步 ETA{eta} loss={ls:.3f}"],check=False)
+            except Exception: pass
+    # 存 ckpt(bf16 减半) + summary
+    sd={k:(v.detach().to("cpu",dtype=torch.bfloat16) if v.is_floating_point() else v.detach().cpu()) for k,v in model.state_dict().items()}
+    torch.save(sd, os.path.join(OUT,"cpt_audio_llm_state.pt"))
+    f5=sum(r['loss'] for r in log[:5])/min(5,len(log)); l5=sum(r['loss'] for r in log[-5:])/min(5,len(log))
+    s={"model":os.path.basename(MODEL),"task":"audio-LLM CPT","parallel":"model-parallel(2卡)" if NPU2CARD else "single","optim":"AdamW","precision":"bf16 master+bf16 autocast",
+       "steps":STEPS,"bs":BS,"lr":LR,"warmup":WARMUP,"grad_accum":GRAD_ACCUM,"n_trainable_B":round((tot-fr)/1e9,3),
+       "first5":round(f5,5),"last5":round(l5,5),"min":round(min(r['loss'] for r in log),5),
+       "final":round(log[-1]['loss'],5),"delta":round(f5-l5,5),"total_time_s":round(time.time()-t0,2)}
+    json.dump(s,open(os.path.join(OUT,"train_summary.json"),"w"),ensure_ascii=False,indent=2)
+    json.dump(log,open(os.path.join(OUT,"losses.json"),"w"),ensure_ascii=False,indent=2)
+    print("\n[done]"+json.dumps(s,ensure_ascii=False,indent=2), flush=True)
+
+if __name__=="__main__": main()
