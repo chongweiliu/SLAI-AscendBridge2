@@ -1,6 +1,7 @@
 # Team-Lead Agent Memory
 
 > 索引：昇腾 CPT 环境踩坑（950 系列新芯片 950PR/950DT torch_npu 不支持需升级 / 容器内存限制致 torch.load 大 ckpt OOM / torch2.12 后 torchvision ABI 错配）见 `ascend_cpt_env_pitfalls.md`，已沉淀至 ascend-torch-cpt skill pitfalls #42-45。
+> 索引：gitcode 主仓库 SLAI/SLAI-AscendBridge2 的 PR/MR 提交合并流程（git config、令牌安全红线、v5 API 创建+合并 MR）见 `gitcode_mr_workflow.md`。
 
 ## ⚠️ prompts/task_*.txt 中的人数是硬约束（2026-04-05）
 
