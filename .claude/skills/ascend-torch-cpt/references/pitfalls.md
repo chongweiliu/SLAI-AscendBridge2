@@ -354,3 +354,47 @@ sys.meta_path.insert(0, _StubFinder())
 - **判定要点**：报错信息含 `keep_in_fp32_modules`/`low_cpu_mem_usage` → 走 from_config 回退。跨 910/910C/950 都须带此 fallback。
 
 > 注：WanTransformer3DModel 不支持 `gradient_checkpointing_enable`（小 latent 如 `[1,16,4,32,56]` 在 64GB+ 卡上无需）；模板 `load_backbone` 已 `try/except` 仅防崩，每次跑打一行 `[gc]` 噪声可忽略。
+
+## 55. libgomp TLS 冲突：sklearn + torch_npu（音频-LLM/processor 间接 import sklearn）
+- **症状**：`import AutoProcessor`/`Qwen2AudioForConditionalGeneration`（或任何触发 transformers generation 模块）时报 `ImportError: .../scikit_learn.libs/libgomp-*.so: cannot allocate memory in static TLS block`。
+- **根因**：transformers 5.x 的 `generation/candidate_generator` `from sklearn.metrics import roc_curve` 间接 import sklearn；sklearn 的 libgomp 在 torch_npu 的 OMP 已填满静态 TLS 后 dlopen 失败。librosa 也走同 libgomp（同症）。
+- **解法**：脚本顶部**先 `import sklearn`**（让 libgomp 早入静态 TLS）再 `import torch, torch_npu`。无需 LD_PRELOAD。`librosa` 非必需时跳过（音频-LLM 用 soundfile 读 flac→numpy→processor 算 mel 即可，mel 用 numpy/scipy，MLS/fleurs 16k 无需重采样）。
+- **判定要点**：报错栈含 `candidate_generator`/`sklearn`/`libgomp`/`static TLS` → import 顺序问题。
+
+## 56. Qwen2-Audio processor kwarg 是 `audio=`（单数），返回 `input_features`/`feature_attention_mask`
+- **症状**：`proc(text=, audios=[arr], ...)` 打印 `Keyword argument 'audios' is not a valid argument for this processor and will be ignored`，返回只有 `input_ids`+`attention_mask`（无 mel/audio_features）→ 后续 forward 报 audio 维度错。
+- **根因**：Qwen2AudioProcessor.__call__ 的参数名是 **`audio=`（单数）**，不是 `audios=`；返回 key 是 `input_features`(mel `[B,128,~3000]`) + `feature_attention_mask`，**不是 `audio_features`**。
+- **解法**：`proc(text=[full,...], audio=[arr,...], padding=True, return_tensors="pt", sampling_rate=16000)`；取 `inp.input_features` + `inp.feature_attention_mask`。
+- **判定要点**：processor 返回无 mel / "audios ignored" warning → kwarg 名错。
+
+## 57. Qwen2-Audio model forward 须传 `input_features` + `feature_attention_mask`
+- **症状**：`model(input_ids=, attention_mask=, input_features=af, labels=)` 报 `AttributeError: 'NoneType' object has no attribute 'to'`（在 modeling_qwen2_audio forward 的 `feature_attention_mask.to(target_device)`）。
+- **根因**：Qwen2AudioModel.forward 需要 `input_features` **和** `feature_attention_mask`（音频 mel 的 valid mask，audio_tower 用它忽略 padding 帧）；只传 input_features → feature_attention_mask=None。
+- **解法**：`model(input_ids=ids, attention_mask=am, input_features=af, feature_attention_mask=fam, labels=labels)`。
+- **判定要点**：forward 报 NoneType.to 在 `feature_attention_mask` 行 → 漏传。
+
+## 58. audio 特殊 token 必须 mask in labels（漏则 loss 虚高 ~8×）
+- **症状**：bs=1 loss ~1.2 正常，bs≥2(批量+padding) loss 突涨到 ~10（同模型同数据）。
+- **根因**：`<|audio_bos|>`/`<|AUDIO|>`(重复)/`<|audio_eos|>` 是**条件输入 token**（被 audio embedding 替换），不该作为预测目标。批量 padding 时这些 audio token 可能落到 prompt-mask 区之外（pinp 与 inp 的 audio token 展开/padding 位置错位），漏进 labels → loss 计算在"预测 audio token"上 → 虚高。
+- **解法**：显式 mask：`tok=proc.tokenizer; aids={tok.convert_tokens_to_ids(t) for t in ["<|audio_bos|>","<|AUDIO|>","<|audio_eos|>"]}; for a in aids: if a is not None and a>=0: labels[ids==a]=-100`。叠加 prompt 段 mask + pad mask。
+- **判定要点**：bs1 正常、bs2 loss 飙升一个数量级 → 查 audio token 是否在 labels。
+
+## 59. 模型并行 device_map="auto" 不自动分卡 + 2卡 visible + freeze 勿用类名"Audio"
+- **症状A**：`device_map="auto"` 加载后 `first param device=npu:0, device_map=npu:0`（全在单卡），训练时全量 CPT 单卡 OOM。
+- **根因A**：device_map="auto" 只在模型**单卡装不下**时才分卡；7B bf16=16.6GB<64GB → auto 全放 card0，无切分。
+- **解法A**：`max_memory={0:"18GB",1:"42GB"}`（cap card0 模型量）强制切分到 npu:0,npu:1，模型+optim+grad 随切分摊两卡。
+- **症状B**：`ASCEND_RT_VISIBLE_DEVICES=0,1` 没生效，只看到 card0（"Device 1 not available"）。
+- **根因B**：run_env.sh 默认 `ASCEND_RT_VISIBLE_DEVICES=0`（单卡）；脚本内 `os.environ.setdefault` 不覆盖已设值；CANN 在进程启动时读 env。
+- **解法B**：shell 里 `source run_env.sh` 后 `export ASCEND_RT_VISIBLE_DEVICES=0,1` 再启动 python（覆盖，且 CANN 启动时读到）。
+- **症状C**：freeze 后 `trainable=0`（全冻）。
+- **根因C**：用 `"Audio" in type(m).__name__` 匹配，误中顶层 `Qwen2AudioForConditionalGeneration`/`Qwen2AudioModel`（都含 "Audio"）→ 冻结全部。
+- **解法C**：按**子模块路径名**匹配 `"audio_tower" in n or "multi_modal_projector" in n`（只冻真正的音频塔+投影器）。
+- **判定要点**：device_map 只列 npu:0 / Device 1 not available / trainable=0 → 分别查 max_memory / VISIBLE_DEVICES / freeze 匹配方式。
+
+## 60. 7B 全量 CPT 2×64GB: DDP bf16 OOM, fp32 master OOM; 模型并行 bf16 fits
+- **症状**：7B(Qwen2-Audio) 全量 CPT 在 2×910C(64GB) 上：DDP bf16 master `optim.step` 处 OOM（59.5/61GB）；fp32 master model-parallel 也 OOM。
+- **根因**：7.755B 可训 LLM 全量：bf16 master(权重16.6+AdamW m,v 31+grad 15.5)=63GB/card(DDP 每卡复制)>61GB 可用→OOM ~2GB；fp32 master(权重33+AdamW 62+grad 31)=126GB total>2×61=122→OOM ~4GB。
+- **解法**：**模型并行 device_map+max_memory 强制 2 卡切分 + bf16 master**——模型+optim+grad 随切分摊两卡 ~31GB/card fits。bf16 master 有精度吞小更新风险(#25)，但 7B + lr2e-5 + 标准attention 实测有效(held-out CE 降82%)。要 fp32 master 需 ≥3 卡或 FSDP2 分片。
+- **判定要点**：7B 全量 CPT 在 2×64GB DDP OOM → 改模型并行 device_map+max_memory(bf16)；仍要 fp32 master → 加卡或 FSDP2。
+
+> 注：音频-LLM 全流程见 `references/audio-llm-cpt.md`。GGUF/MLX 音频模型(如 OmniAudio)换同源 PyTorch 基座(#47)。

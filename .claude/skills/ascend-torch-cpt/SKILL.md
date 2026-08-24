@@ -12,9 +12,10 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 **这是一个通用 CPT 技能，不是仅针对文本 LM**：按模型类型自动选择训练范式——
 - **文本 decoder-only LM（CausalLM）**：next-token CE loss，`model(input_ids, labels)`，评估 PPL/acc/F1。多模态模型的"文本头"也走此路（见 references/multimodal-remap.md）。
 - **文生视频/文生图扩散模型（diffusers pipeline：DiT/U-Net + VAE + text_encoder + scheduler）**：流匹配/DDPM velocity/epsilon loss on VAE latents，`transformer(noisy_latent, timestep, text_emb)`，评估 velocity MSE + 采样生成。见 `references/generative-diffusion-cpt.md`。
-- 其它生成式范式（文生音频/ASR/全模态等）按同理：先判 backbone（可训练生成主干）+ 冻结编解码器，再据其原生损失训练。
+- **音频-LLM（audio-text-to-text：audio_tower + projector + CausalLM，如 Qwen2-Audio）**：冻结 audio_tower+projector，训 language_model 全量/LoRA；chat template(audio+transcribe 指令)→`input_features`(mel)+labels(只对 transcript 算 CE，mask audio 特殊 token)；评估 held-out 转写 CE loss。见 `references/audio-llm-cpt.md`，模板 `cpt_audio_llm.py.tmpl`。
+- 其它生成式范式（文生音频生成/全模态等）按同理：先判 backbone（可训练生成主干）+ 冻结编解码器，再据其原生损失训练。
 
-**核心方法论（对所有模型类型通用）**：①判定模型类型与格式 → ②拆出可训练 backbone + 冻结的编解码器/条件编码器 → ③据范式构造数据流水线（文本 tokenize / 视频 image decode+VAE 编码）→ ④用原生损失训练 backbone → ⑤按范式选评估指标。文本走 `cpt_train.py.tmpl`；扩散生成走 `cpt_diffusion.py.tmpl`。
+**核心方法论（对所有模型类型通用）**：①判定模型类型与格式 → ②拆出可训练 backbone + 冻结的编解码器/条件编码器 → ③据范式构造数据流水线（文本 tokenize / 视频 image decode+VAE 编码 / 音频 soundfile 读+processor mel）→ ④用原生损失训练 backbone → ⑤按范式选评估指标。文本走 `cpt_train.py.tmpl`；扩散生成走 `cpt_diffusion.py.tmpl`；音频-LLM 走 `cpt_audio_llm.py.tmpl`。
 
 ## 输入（用户给路径即可启动）
 - **模型权重路径**（必填）：HF 目录（含 config.json/safetensors/tokenizer）。可在命令里直接指定，如
@@ -52,6 +53,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 10. **按模型类型选训练范式（通用 CPT 的第一步，不可跳过）**。本技能不止做文本 LM。阶段 0 必须先**判定模型类型与格式**，再决定训练范式、数据流水线、评估指标（见「模型类型→训练范式」表）。判定方法：读 `config.json`/`model_index.json`/文件名——
     - `architectures` 含 `ForCausalLM`/有 `config.json` + safetensors 标准权重 → **文本 LM 范式**（CE loss）。
     - 有 `model_index.json` + `transformer/`(或 `unet/`) + `vae/` + `text_encoder/` + `scheduler/` → **diffusers 生成式范式**（流匹配/DDPM loss on VAE latents）。
+    - `architectures` 含 `Qwen2Audio*`/`*AudioForConditionalGeneration`/`pipeline_tag=audio-text-to-text` + audio_tower + language_model → **音频-LLM 范式**（转写 CE，见 references/audio-llm-cpt.md）。
     - 出现 `mlx_*.json`/`mlx_*.safetensors`、或 README/library_name 标 `mlx` → **MLX(Apple) 格式**，NPU 无法直接加载，须找同源 PyTorch 基座（见 pitfalls #47，references/generative-diffusion-cpt.md）。
     - 多模态 `ForConditionalGeneration` 但目标是文本 → 走文本头 remap（references/multimodal-remap.md）。
     范式决定后续阶段 3(数据)/6(脚本)/8(评估) 全部分支，判定错则全盘错。把判定结果写进 `env_probe.json` 的 `model_type`/`train_paradigm`。
@@ -61,7 +63,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 ### 阶段 0 · 意图确认与路径核对
 - 核对用户给的**模型路径**与**语料路径**是否真实存在（`ls`）。本类任务里用户常给理想化/不存在路径；不存在则搜索本机可用副本并**显式告知**用户用了哪个、改了什么。
 - 确认：模型 id/路径、语料路径、seq_len、batch_size、步数、是否要 DDP/FSDP2、是否要评估。用户未指定的超参由本技能自动择优（见下）。
-- **【范式判定，决定全局分支】** 按核心原则 10 判定模型类型与格式（文本 LM / diffusers 生成式 / MLX / 多模态文本头），写进 `env_probe.json`。判定决定阶段 3 数据流水线、阶段 6 训练脚本、阶段 8 评估指标。**扩散生成式模型**（文生视频/文生图）的完整流程见 `references/generative-diffusion-cpt.md`，不走文本 LM 模板。
+- **【范式判定，决定全局分支】** 按核心原则 10 判定模型类型与格式（文本 LM / diffusers 生成式 / 音频-LLM / MLX / 多模态文本头），写进 `env_probe.json`。判定决定阶段 3 数据流水线、阶段 6 训练脚本、阶段 8 评估指标。**扩散生成式模型**（文生视频/文生图）见 `references/generative-diffusion-cpt.md`；**音频-LLM**（audio-text-to-text）见 `references/audio-llm-cpt.md`——均不走文本 LM 模板。
 
 ### 阶段 1 · 环境/依赖勘察
 探测并记录（写进 `${WS_DIR}/env_probe.json`，即 `training-ws/<模型名>-cpt/env_probe.json`）：
@@ -106,6 +108,13 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - 文本编码：用 pipeline 的 text_encoder（UMT5/CLIP/T5）编码 caption → embedding；**若 text_encoder 巨大下载受阻，可预计算+缓存 embedding 后释放，或退零嵌入近似无条件**（pitfalls #49，references/generative-diffusion-cpt.md）。
 - **预计算-后训练模式**：把 latent + text_emb 缓存到 `video_latents.pt`，训练阶段只跑 DiT 前向反向（快、省显存、可不上 NPU 编解码器）。
 - 用 `scripts/prepare_generative_data.py.tmpl`。详见 `references/generative-diffusion-cpt.md`。
+
+**C. 音频-LLM 范式（audio-text-to-text）** → 音频读+processor mel+chat template（见 `references/audio-llm-cpt.md`，模板 `cpt_audio_llm.py.tmpl`）：
+- 音频 `soundfile.read(io.BytesIO(bytes))` → numpy float32 16k（flac 在 parquet `audio` 列 `bytes`；MLS/fleurs 16k 无需重采样，**跳 librosa 避 libgomp TLS 坑 #55**）。
+- `AutoProcessor`：`proc(text=[chat_full,...], audio=[arr,...], padding=True, return_tensors="pt", sampling_rate=16000)`——kwarg **`audio=`（单数，非 `audios=`，#56）**，返回 `input_features`(mel)+`feature_attention_mask`。
+- **labels（#58 必读）**：mask pad + prompt 段 + **audio 特殊 token**(`<|audio_bos|>/<|AUDIO|>/<|audio_eos|>`，漏 mask 致 loss 虚高 ~8×)；只对 assistant(transcript) 算 CE loss。
+- **forward（#57）**：`model(input_ids=, attention_mask=, input_features=, feature_attention_mask=, labels=)`（须传 input_features **和** feature_attention_mask）。
+- 冻结 `audio_tower`+`multi_modal_projector`（按子模块路径名，勿用类名"Audio"误冻顶层 #59），训 `language_model` 全量或 LoRA。
 
 ### 阶段 4 · 训练方式自动选型
 按 `references/parallel-strategy.md` 的决策树，据**卡间互联速度**、**模型参数量**、**单卡显存**、**语料规模**、**用户要求**选。**先探测卡间互联**（`hccn_tool -i <devid> -ip -g` 是否配 RoCE IP）：
@@ -172,6 +181,11 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
   - **量化**：固定 σ（如 0.5）对 base vs CPT 算 **velocity MSE**（越低=速度预测越准；Δ<0 训练有效）。取 held-out latent。
   - **定性**：CPT backbone 采样（noise→N 步 Euler 去噪→VAE 解码→存帧 gif/mp4）。生成质量随步数渐进提升，50 步演示看 loss/MSE 下降即可断"训练有效"。
   - eval 指标与生成范式一一对应，**不要**给扩散模型套 PPL/next-token acc（无 token 序列概念）。
+
+**C. 音频-LLM 范式** → 用 `cpt_audio_llm.py.tmpl` 的 eval 模式（见 `references/audio-llm-cpt.md`）：
+  - **量化转写 CE loss**：held-out 音频+转写，base(全新/ad adapter off) vs CPT(加载 state_dict，`strict=False` 验 miss/unexp=0)，同 build_inputs(audio mask)，`delta<0` 训练有效。
+  - 定性（可选）：采样生成转写 → 算 WER（需 jiwer/edit-distance）。
+  - **不要**给音频-LLM 套纯文本 PPL/扩散 velocity MSE（语义不对：音频-LLM 的目标是条件转写 CE）。
 - 出 `eval_results.json` + 结论表，给"训练是否有效"结论（Δ 方向 + 是否过拟合）。
 - **FSDP2 大模型评估**：ckpt 是 `full_tensor()` 聚合的全量 state_dict，单卡直接 `load_state_dict` 即可（评估不需 FSDP2/DDP）。base 多模态走 remap。完整 9B FSDP2 实战案例（含结果表 + 与 0.8B 对比）见 `references/eval-metrics.md`。
 - **多卡训练后别立刻跑单卡评估**：8 卡 FSDP2/DDP 训练退出后 NPU driver **异步回收显存有延迟**（pitfalls #32），立刻 `model.to(npu)` 易 OOM（card 仅剩几百 MB free 但无残留进程）。训练退出后等几秒、`npu-smi` 确认卡空闲（或 `torch.empty(40GB)` 实测可分配）再跑评估；评估脚本载入前先 `torch.npu.empty_cache()`。
