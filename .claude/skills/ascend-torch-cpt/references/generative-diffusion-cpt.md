@@ -44,10 +44,11 @@
 - **缓存**：`torch.save({"latents":[...],"embs":[...],"captions":[...]}, "video_latents.pt")`。latent `[1,C,Tl,Hl,Wl]`、emb `[1,L,D]` 各占几 MB，60 个约几十 MB。
 - **held-out**：留后 N% 样本不参与训练，用于阶段 8 velocity MSE 评估。
 
-### 阶段 4-5 · 选型 + 超参
-- 并行策略作用于 **backbone**（DiT/U-Net），与文本 LM 同决策树（parallel-strategy.md）。
-- 超参：fp32 主权重 + bf16 autocast + NpuFusedAdamW + 梯度检查点（`use_reentrant=False`），lr 1e-5，warmup ~10%步，cosine。seq/batch 用 latent 维度算。
-- batch：视频 DiT 单步显存大，常 batch=1（per-rank），梯度累积凑有效 batch。
+### 阶段 4-5 · 选型 + 超参（**自动**, 对齐 parallel-strategy.md / hyperparam-selection.md）
+**通用加载**：`cpt_diffusion.py.tmpl`/`prepare_generative_data.py.tmpl`/`eval_diffusion.py.tmpl` **读 `model_index.json` 动态按类名 import** backbone(`transformer`/`unet`→WanTransformer3DModel/UNet2DConditionModel/FluxTransformer2DModel/SD3Transformer2DModel/CogVideoXTransformer3DModel/…)、VAE(`AutoencoderKLWan`/`AutoencoderKL`/`AutoencoderKLSD`/`VQModel`/…)、text_encoder(`UMT5EncoderModel`/`CLIPTextModel`/`T5EncoderModel`)——**不写死 Wan 类，换 diffusers 视频/图模型不改模板**。`backbone_dir` 据 model_index key 自动定(`transformer` vs `unet`)。
+**自动并行**（探测 `device_count`+`free_mem`，估 `8×P` bf16/`16×P` fp32 GB）：`8×P≤free×0.8`→单卡；单卡装不下+`n_card≥2`→2卡模型并行(`max_memory` 按 `free×0.5` 自动算)；仍装不下→LoRA 回退。`MODE=auto|single|mp2|lora` 可强制。
+**自动超参**：lr=`1e-5×sqrt(global_batch/32)` clamp `[5e-6,5e-5]`；warmup~10%；bs OOM 回退阶梯(bs//2→1)；grad_accum 凑有效 batch。fp32/bf16 master + autocast + grad-ckpt(`use_reentrant=False`)。`from_pretrained` 撞 `keep_in_fp32_modules`(#54) → `from_config+load_state_dict` 回退。
+- 视频 DiT 单步显存大，常 batch=1；大 DiT(14B) 自动走模型并行，小 DiT(1.3B) 单卡。
 
 ### 阶段 6 · 脚本 + smoke（坑5）
 - 用 `cpt_diffusion.py.tmpl`：读缓存 latent+emb，流匹配，NpuFusedAdamW，存 `dit_cpt_state.pt`。

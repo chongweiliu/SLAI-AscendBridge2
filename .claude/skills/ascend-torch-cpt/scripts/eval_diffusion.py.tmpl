@@ -1,31 +1,36 @@
 #!/usr/bin/env python
-# eval_diffusion.py.tmpl — 扩散生成式 CPT 前后评估
+# eval_diffusion.py.tmpl — 扩散生成式 CPT 前后评估 (通用)
 # ① 量化: base vs CPT 在 held-out latent 上 velocity MSE(固定σ)
-# ② 定性: CPT backbone 采样 → VAE 解码 → 存 mp4(imageio-ffmpeg)
+# ② 定性: CPT backbone 采样 → VAE 解码 → 存 mp4/帧 png
+# 通用: 读 model_index.json 动态加载 backbone/VAE 类(不写死 Wan)。
 import os, json, time
 os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD","0")
-os.environ.setdefault("TASK_QUEUE_ENABLE","1")
 os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF","expandable_segments:True")
 import torch, torch_npu, numpy as np
 torch.npu.set_device(0); DEV="npu:0"
-from diffusers import WanTransformer3DModel, AutoencoderKLWan  # Wan; 其它模型换对应类
+from safetensors.torch import load_file as _lf
 
 WS=os.environ["WS_DIR"]; MODEL_DIR=os.environ["MODEL_DIR"]
-BK_DIR=os.environ.get("BACKBONE_DIR","transformer"); VAE_DIR=os.environ.get("VAE_DIR","vae")
-OUT=f"{WS}/outputs"; CKPT=f"{OUT}/dit_cpt_state.pt"
-SIGMA=float(os.environ.get("EVAL_SIGMA","0.5"))
+OUT=f"{WS}/outputs"; CKPT=f"{OUT}/dit_cpt_state.pt"; SIGMA=float(os.environ.get("EVAL_SIGMA","0.5"))
+
+def read_mi():
+    p=os.path.join(MODEL_DIR,"model_index.json"); return json.load(open(p)) if os.path.exists(p) else {}
+def bk_dir(mi): return "transformer" if "transformer" in mi else ("unet" if "unet" in mi else "transformer")
+def dyn_load(entry):
+    if not entry: return None
+    lib,cls=entry[0],entry[1]
+    try: return getattr(__import__(lib,fromlist=[cls]),cls)
+    except Exception: return None
 
 def load_backbone(state=None):
-    """DiT 加载。transformers5.x + _keep_in_fp32_modules 时 from_pretrained 崩(#54)→ 回退 from_config+load_state_dict。"""
-    BK=f"{MODEL_DIR}/{BK_DIR}"
+    mi=read_mi(); BK=bk_dir(mi); BkCls=dyn_load(mi.get(BK))
+    if BkCls is None: raise SystemExit("无法识别 backbone 类")
     try:
-        dit=WanTransformer3DModel.from_pretrained(BK, torch_dtype=torch.bfloat16).to(DEV)
+        dit=BkCls.from_pretrained(f"{MODEL_DIR}/{BK}", torch_dtype=torch.bfloat16, low_cpu_mem_usage=True).to(DEV)
     except Exception:
-        import json as _j; from safetensors.torch import load_file as _lf
-        cfg=_j.load(open(f"{BK}/config.json")); dit=WanTransformer3DModel.from_config(cfg, torch_dtype=torch.bfloat16)
-        dit.load_state_dict(_lf(f"{BK}/diffusion_pytorch_model.safetensors"), strict=False); dit=dit.to(DEV)
-    if state is not None:
-        dit.load_state_dict(torch.load(state,map_location=DEV,weights_only=False), strict=False)
+        cfg=json.load(open(f"{MODEL_DIR}/{BK}/config.json")); dit=BkCls.from_config(cfg, torch_dtype=torch.bfloat16)
+        dit.load_state_dict(_lf(f"{MODEL_DIR}/{BK}/diffusion_pytorch_model.safetensors"), strict=False); dit=dit.to(DEV)
+    if state is not None: dit.load_state_dict(torch.load(state,map_location=DEV,weights_only=False), strict=False)
     dit.eval(); return dit
 
 def backbone_fwd(dit, noisy, t, emb):  # #51 兼容
@@ -44,35 +49,35 @@ def vel_mse(dit, latents, embs, n=5):
             tot+=float(torch.nn.functional.mse_loss(pred.float(),target.float()).cpu()); c+=1
     return tot/max(1,c)
 
-def gen_sample(dit, vae, n_steps=20, latent_norm=False):
-    lat=torch.randn(1,16,6,60,104,device=DEV,dtype=torch.bfloat16)  # shape 据 prepare 阶段 latent 调
-    emb=torch.zeros(1,77,4096,device=DEV,dtype=torch.bfloat16)
+def gen_sample(dit, vae, n_steps=20, latent_norm=False, lat_shape=(1,16,6,60,104)):
+    lat=torch.randn(*lat_shape,device=DEV,dtype=torch.bfloat16); emb=torch.zeros(1,77,4096,device=DEV,dtype=torch.bfloat16)
     with torch.no_grad():
         for s in range(n_steps):
             tv=(n_steps-1-s)/n_steps; t=torch.tensor([tv*1000],device=DEV)
-            v=backbone_fwd(dit,lat,t,emb); lat=lat+(1.0/n_steps)*v  # Euler t:1→0
-        # 若训练 latent 是归一化空间(#52), decode 前逆归一化: raw=lat*std+mean
+            v=backbone_fwd(dit,lat,t,emb); lat=lat+(1.0/n_steps)*v
         if latent_norm and getattr(vae.config,"latents_mean",None) is not None:
             z=getattr(vae.config,"z_dim",16)
-            mean=torch.tensor(vae.config.latents_mean,device=DEV).view(1,z,1,1,1).to(lat.dtype)
-            std=torch.tensor(vae.config.latents_std,device=DEV).view(1,z,1,1,1).to(lat.dtype)
+            mean=torch.tensor(vae.config.latents_mean,device=DEV).view(1,z,1,1,1).to(lat.dtype) if lat.dim()==5 else torch.tensor(vae.config.latents_mean,device=DEV).view(1,z,1,1).to(lat.dtype)
+            std=torch.tensor(vae.config.latents_std,device=DEV).view(1,z,1,1,1).to(lat.dtype) if lat.dim()==5 else torch.tensor(vae.config.latents_std,device=DEV).view(1,z,1,1).to(lat.dtype)
             lat=lat*std+mean
         vid=vae.decode(lat).sample
     return vid
 
-def save_video(vid, path_mp4, fps=8):
-    frames=((vid[0].clamp(-1,1).float().cpu()+1)/2*255).permute(0,2,3,1).numpy().astype("uint8")  # [T,H,W,3]
-    np.save(path_mp4.replace(".mp4","_frames.npy"), frames)
-    import imageio_ffmpeg, subprocess
-    h,w=frames.shape[1],frames.shape[2]
-    p=subprocess.Popen([imageio_ffmpeg.get_ffmpeg_exe(),"-y","-f","rawvideo","-pix_fmt","rgb24","-s",f"{w}x{h}","-r",str(fps),"-i","-","-pix_fmt","yuv420p",path_mp4],stdin=subprocess.PIPE)
-    p.stdin.write(frames.tobytes()); p.stdin.close(); p.wait()
+def save_video(vid, path, fps=8):
+    frames=((vid[0].clamp(-1,1).float().cpu()+1)/2*255).permute(0,2,3,1).numpy().astype("uint8")
+    np.save(path.replace(".mp4","_frames.npy"), frames)
+    try:
+        import imageio_ffmpeg, subprocess
+        h,w=frames.shape[1],frames.shape[2]
+        p=subprocess.Popen([imageio_ffmpeg.get_ffmpeg_exe(),"-y","-f","rawvideo","-pix_fmt","rgb24","-s",f"{w}x{h}","-r",str(fps),"-i","-","-pix_fmt","yuv420p",path],stdin=subprocess.PIPE)
+        p.stdin.write(frames.tobytes()); p.stdin.close(); p.wait()
+    except Exception as e: print(f"[gen] mp4 存失败({e}), 仅存 .npy",flush=True)
 
 def main():
     data=torch.load(f"{OUT}/video_latents.pt",weights_only=False)
-    latents=data["latents"]; embs=data["embs"]
+    latents=data["latents"]; embs=data["embs"]; latent_norm=data.get("latent_norm",False)
     n_tr=int(len(latents)*0.8); held_lat=latents[n_tr:]; held_emb=embs[n_tr:]
-    print(f"[eval] held-out={len(held_lat)}",flush=True)
+    print(f"[eval] held-out={len(held_lat)} latent_norm={latent_norm}",flush=True)
     res={}
     for tag in ["base","cpt"]:
         dit=load_backbone(CKPT if tag=="cpt" else None)
@@ -83,12 +88,14 @@ def main():
     fin={"base":res["base"],"cpt":res["cpt"],"delta_cpt_minus_base":d,"note":"MSE delta<0=CPT velocity 预测更准(训练有效)"}
     json.dump(fin,open(f"{OUT}/eval_results.json","w"),ensure_ascii=False,indent=2)
     print(json.dumps(fin,ensure_ascii=False,indent=2),flush=True)
-    print("\n[gen] CPT 采样生成视频...",flush=True)
-    t0=time.time()
+    print("\n[gen] CPT 采样生成...",flush=True); t0=time.time()
     try:
-        dit=load_backbone(CKPT); vae=AutoencoderKLWan.from_pretrained(f"{MODEL_DIR}/{VAE_DIR}",torch_dtype=torch.bfloat16).to(DEV).eval()
-        vid=gen_sample(dit,vae,latent_norm=bool(data.get("latent_norm",False))); save_video(vid,f"{OUT}/sample_cpt.mp4")
-        print(f"[gen] saved sample_cpt.mp4 {vid.shape} {time.time()-t0:.1f}s",flush=True)
+        mi=read_mi(); VaeCls=dyn_load(mi.get("vae")) or __import__("diffusers").AutoencoderKLWan
+        vae=VaeCls.from_pretrained(f"{MODEL_DIR}/vae",torch_dtype=torch.bfloat16).to(DEV).eval()
+        lat_shape=tuple(latents[0].shape)
+        dit=load_backbone(CKPT); vid=gen_sample(dit,vae,latent_norm=latent_norm,lat_shape=lat_shape)
+        save_video(vid,f"{OUT}/sample_cpt.{'mp4' if data.get('is_video',True) else 'png'}")
+        print(f"[gen] saved sample {vid.shape} {time.time()-t0:.1f}s",flush=True)
     except Exception as e:
         print(f"[gen] 失败: {type(e).__name__} {str(e)[:150]}",flush=True)
     print("EVAL_DONE",flush=True)
