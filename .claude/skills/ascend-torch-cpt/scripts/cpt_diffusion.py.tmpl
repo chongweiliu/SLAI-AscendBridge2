@@ -22,10 +22,23 @@ GRAD_CLIP=float(os.environ.get("GRAD_CLIP","1.0"))
 torch.manual_seed(SEED); random.seed(SEED)
 
 def load_backbone():
-    dit=WanTransformer3DModel.from_pretrained(f"{MODEL_DIR}/{BK_DIR}", torch_dtype=torch.float32).to(DEV)
+    """加载 DiT/U-Net backbone(fp32)。transformers5.x + 有 _keep_in_fp32_modules 的 DiT(Wan) 用 from_pretrained 会崩
+    (#54: low_cpu_mem_usage cannot be False when keep_in_fp32_modules is True) → 回退 from_config+load_state_dict。"""
+    BK=f"{MODEL_DIR}/{BK_DIR}"
+    try:
+        dit=WanTransformer3DModel.from_pretrained(BK, torch_dtype=torch.float32).to(DEV)
+    except Exception as e:
+        print(f"[backbone] from_pretrained 失败({type(e).__name__})→ from_config+load_state_dict(#54)",flush=True)
+        import json as _j
+        from safetensors.torch import load_file as _lf
+        cfg=_j.load(open(f"{BK}/config.json"))
+        dit=WanTransformer3DModel.from_config(cfg, torch_dtype=torch.float32)
+        sd=_lf(f"{BK}/diffusion_pytorch_model.safetensors")
+        m,u=dit.load_state_dict(sd, strict=False); print(f"[backbone] load miss={len(m)} unexp={len(u)}",flush=True)
+        dit=dit.to(DEV)
     dit.train()
     try: dit.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
-    except Exception as e: print(f"[gc] {e}",flush=True)
+    except Exception as e: print(f"[gc] {type(e).__name__}: {str(e)[:80]} (Wan DiT 无 grad-ckpt, 小 latent 无需, 忽略)",flush=True)
     return dit
 
 def backbone_forward(dit, noisy, t, emb):

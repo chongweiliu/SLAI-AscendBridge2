@@ -30,11 +30,15 @@
 
 ### 阶段 3 · 数据流水线（用 `prepare_generative_data.py.tmpl`）
 - **视频 decode**：`decord.VideoReader(path, width=W, height=H)`，按步长取 N 帧（N 满足 VAE 时间压缩因子 k：`(N-1)%k==0`，如 Wan k=4 → N∈{1,5,9,13,17,21,...}）。归一化 `[-1,1]`：`frames/127.5-1`。
-- **VAE 编码（坑4）**：输入 **`[B,C,T,H,W]`**（视频）/ `[B,C,H,W]`（图片），**不是** `[B,T,C,H,W]`。`decode_video` 返回 `[T,3,H,W]` → `permute(1,0,2,3).unsqueeze(0)` 成 `[1,3,T,H,W]`。`vae.encode(v)`：返回 `.latent_dist`(.sample()) 或 `.latents` 或直接 tensor，三种兼容。latent 通道数 = config `in_channels`（Wan=16）。
+- **VAE 编码（坑4/#52）**：输入 **`[B,C,T,H,W]`**（视频）/ `[B,C,H,W]`（图片），**不是** `[B,T,C,H,W]`。`decode_video` 返回 `[T,3,H,W]` → `permute(1,0,2,3).unsqueeze(0)` 成 `[1,3,T,H,W]`。`vae.encode(v)`：返回 `.latent_dist`(.sample()) 或 `.latents` 或直接 tensor，三种兼容。latent 通道数 = config `in_channels`（Wan=16）。
+- **latent 归一化（坑52，必读）**：`AutoencoderKLWan.encode().latent_dist.sample()` 返回 **raw latent（无自动归一化）**。diffusers Wan pipeline 的 decode 是 `raw = stored * config.latents_std + config.latents_mean`，故 DiT 原生 latent 空间 = **`stored = (raw - latents_mean) / latents_std`（除，单位方差）**。prepare 阶段编码后应做此归一化（`prepare_generative_data.py.tmpl` 默认 `LATENT_NORM=1` 开启），让训练 latent 与预训练 DiT 对齐 + CPT ckpt 可直接 drop-in 原 pipeline 生成。**符号陷阱**：是**除以** `latents_std`，**不是乘**——乘反会把 loss 虚高 ~10×（实测 21 vs 正确 ~2）。`LATENT_NORM=0` 存 raw（原 950PR 方式，能跑但与预训练 scale 不对齐、ckpt 不能直接进原 pipeline）。eval 生成时 `vae.decode(lat)` 前须逆归一化 `lat = lat*latents_std + latents_mean`（`eval_diffusion.py.tmpl` 据 cached `latent_norm` 标志自动处理）。
 - **VAE 编码上 NPU**：VAE encode 的 3D conv 中间激活大，CPU 侧撞 cgroup OOM；视频 decode 后小 tensor `.to(npu)` 再 encode，CPU 峰值≈0。
 - **分辨率**：用模型原生分辨率（Wan 832×480）。显存紧张可降分辨率/减帧，但 H/W 须整除 VAE 空间压缩因子(Wan=8)。
-- **文本编码（坑3 兜底）**：
+- **视频解码兜底**：`decord` 装不上（无 aarch64 wheel / 缺 ffmpeg）时，`decode_video` 回退 `imageio.v3.imread(path, index=None)`（读全帧→抽帧+resize），imageio-ffmpeg 已在依赖里。**按文件扩展名**判视频/图片，不按 decord 是否可用。
+- **captionless 视频数据集**（MixKit/stock footage 无标注）：`caption_for` 从文件名派生（`mixkit-airplane-arriving-at-air-terminal-4095_clip_1.mp4` → "airplane arriving at air terminal"，去 mixkit-/数字 id/_clip_N），或用类别名；无文本来源则退回零嵌入无条件（坑50）。
+- **文本编码（坑3/坑53 兜底）**：
   - 正常：`text_encoder(input_ids).last_hidden_state` → `[1,L,D]`（D=DiT 期望的 cross-attn 维，如 UMT5-XXL D=4096）。
+  - **UMT5 必须用 `UMT5EncoderModel`（坑53）**，**不要用 `T5EncoderModel`**——UMT5 每层都有 `relative_attention_bias`，T5EncoderModel 只在 block 0 有，用 T5 加载会丢 block1-23 的偏置、embedding 静默退化。CLIP 用 CLIPTextModel。
   - **预计算+缓存+释放**：编码完全部 caption 后 `del text_encoder; torch.npu.empty_cache()`，训练时只用缓存 emb，省 11GB 显存。
   - **兜底（零嵌入近似无条件）**：text_encoder 下载受阻/未就绪时，用 `torch.zeros(1,L,D)` 近似无条件训练。DiT 流匹配 velocity 预测仍正常学习视频分布，loss 正常下降；代价是无文本条件对齐。**须在 README 注明**。TE 仍可后台下载，就绪后重跑带真实 caption 版本。
 - **缓存**：`torch.save({"latents":[...],"embs":[...],"captions":[...]}, "video_latents.pt")`。latent `[1,C,Tl,Hl,Wl]`、emb `[1,L,D]` 各占几 MB，60 个约几十 MB。
@@ -64,16 +68,17 @@
 - **定性采样生成**：`lat=randn; for s in N: t=(N-1-s)/N; v=Dit(lat, t·1000, emb); lat=lat+dt·v`（Euler，从 t=1 降到 0）；`vae.decode(lat).sample` → `[1,3,T,H,W]` → 帧 → `imageio-ffmpeg` 存 mp4（imageio 常缺失，用 `imageio_ffmpeg.get_ffmpeg_exe()`+rawvideo pipe 存 mp4，或存 `.npy`+PNG）。
 - VAE decode 后 `clamp(-1,1)` 再 `(+1)/2*255` → uint8 帧。
 
-## 踩坑速查（详见 pitfalls.md #47-50）
+## 踩坑速查（详见 pitfalls.md #47-54）
 - #47 MLX 格式 → 换 PyTorch 基座
 - #48 hf_hub flaky 大文件死亡螺旋 → wget -c
 - #49 VAE 输入 layout [B,C,T,H,W]
 - #50 text_encoder 巨大 → 预计算缓存/零嵌入兜底
 - #51 DiT forward 返回 tensor|dict 兼容 + 组件分离 smoke 顺序
+- #52 VAE latent 归一化符号：`(raw-mean)/latents_std` 除(非乘)，乘反 loss 虚高 ~10×
+- #53 UMT5 用 `UMT5EncoderModel`(非 T5EncoderModel)，否则丢 block1-23 的 relative_attention_bias
+- #54 transformers5.x + `_keep_in_fp32_modules` 的 DiT，`from_pretrained` 崩 → `from_config`+`load_state_dict` 回退
 - #44/#46 cgroup 32GB → VAE/UMT5 加载编码全上 NPU（通用，非扩散专属）
 
-## 实战数据点（Wan2.1-T2V-1.3B @ Ascend950PR 单卡 128GB）
-- DiT 1.419B，fp32 主权重 + bf16 autocast + NpuFusedAdamW + grad-ckpt
-- latent `[1,16,6,60,104]`（21 帧 832×480 经 VAE：时间4×→6、空间8×→60×104）
-- 50 步 45s（~0.9s/step），loss 1.63→0.41，velocity MSE base 1.99→CPT 0.37（降 81%）
-- 全程 NPU 算子通过（DiT attention + VAE 3D conv）
+## 实战数据点（跨芯片交叉验证）
+- **Ascend950PR 单卡 128GB**（torch 2.12 + torch_npu 2.12）：DiT 1.419B，fp32+bf16 autocast+NpuFusedAdamW+grad-ckpt；latent `[1,16,6,60,104]`（21 帧 832×480）；50 步 45s(~0.9s/step)，loss 1.63→0.41，velocity MSE base 1.99→CPT 0.37（降 81%）。全程 NPU 算子通过。
+- **Ascend910 单卡 64GB**（torch 2.8.0+cpu + torch_npu 2.8.0.post4 + transformers 5.15.1 + diffusers 0.40，cross-chip 回归验证）：同一 FastWan2.1-T2V-1.3B-Diffusers，MixKit 80 视频(16帧 256×448)；latent `[1,16,4,32,56]`；50 步 63s(~1.3s/step)，loss 21.14→8.77，velocity MSE 17.63→6.27（降 64%）。**910 暴露了 950PR 未遇的 3 个跨栈 gap**：#52(那次 latent 归一化乘反致 loss ~10×虚高)、#53(UMT5 用 T5EncoderModel 丢偏置)、#54(`from_pretrained`+keep_in_fp32 崩，950PR 的 transformers 版未触发)。说明：**技能每支持一种新芯片/版本栈都应在该栈实跑回归**（见 skill_change_verify_protocol）。

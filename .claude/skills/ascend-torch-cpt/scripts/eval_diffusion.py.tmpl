@@ -16,7 +16,14 @@ OUT=f"{WS}/outputs"; CKPT=f"{OUT}/dit_cpt_state.pt"
 SIGMA=float(os.environ.get("EVAL_SIGMA","0.5"))
 
 def load_backbone(state=None):
-    dit=WanTransformer3DModel.from_pretrained(f"{MODEL_DIR}/{BK_DIR}", torch_dtype=torch.bfloat16).to(DEV)
+    """DiT 加载。transformers5.x + _keep_in_fp32_modules 时 from_pretrained 崩(#54)→ 回退 from_config+load_state_dict。"""
+    BK=f"{MODEL_DIR}/{BK_DIR}"
+    try:
+        dit=WanTransformer3DModel.from_pretrained(BK, torch_dtype=torch.bfloat16).to(DEV)
+    except Exception:
+        import json as _j; from safetensors.torch import load_file as _lf
+        cfg=_j.load(open(f"{BK}/config.json")); dit=WanTransformer3DModel.from_config(cfg, torch_dtype=torch.bfloat16)
+        dit.load_state_dict(_lf(f"{BK}/diffusion_pytorch_model.safetensors"), strict=False); dit=dit.to(DEV)
     if state is not None:
         dit.load_state_dict(torch.load(state,map_location=DEV,weights_only=False), strict=False)
     dit.eval(); return dit
@@ -37,13 +44,19 @@ def vel_mse(dit, latents, embs, n=5):
             tot+=float(torch.nn.functional.mse_loss(pred.float(),target.float()).cpu()); c+=1
     return tot/max(1,c)
 
-def gen_sample(dit, vae, n_steps=20):
+def gen_sample(dit, vae, n_steps=20, latent_norm=False):
     lat=torch.randn(1,16,6,60,104,device=DEV,dtype=torch.bfloat16)  # shape 据 prepare 阶段 latent 调
     emb=torch.zeros(1,77,4096,device=DEV,dtype=torch.bfloat16)
     with torch.no_grad():
         for s in range(n_steps):
             tv=(n_steps-1-s)/n_steps; t=torch.tensor([tv*1000],device=DEV)
             v=backbone_fwd(dit,lat,t,emb); lat=lat+(1.0/n_steps)*v  # Euler t:1→0
+        # 若训练 latent 是归一化空间(#52), decode 前逆归一化: raw=lat*std+mean
+        if latent_norm and getattr(vae.config,"latents_mean",None) is not None:
+            z=getattr(vae.config,"z_dim",16)
+            mean=torch.tensor(vae.config.latents_mean,device=DEV).view(1,z,1,1,1).to(lat.dtype)
+            std=torch.tensor(vae.config.latents_std,device=DEV).view(1,z,1,1,1).to(lat.dtype)
+            lat=lat*std+mean
         vid=vae.decode(lat).sample
     return vid
 
@@ -74,7 +87,7 @@ def main():
     t0=time.time()
     try:
         dit=load_backbone(CKPT); vae=AutoencoderKLWan.from_pretrained(f"{MODEL_DIR}/{VAE_DIR}",torch_dtype=torch.bfloat16).to(DEV).eval()
-        vid=gen_sample(dit,vae); save_video(vid,f"{OUT}/sample_cpt.mp4")
+        vid=gen_sample(dit,vae,latent_norm=bool(data.get("latent_norm",False))); save_video(vid,f"{OUT}/sample_cpt.mp4")
         print(f"[gen] saved sample_cpt.mp4 {vid.shape} {time.time()-t0:.1f}s",flush=True)
     except Exception as e:
         print(f"[gen] 失败: {type(e).__name__} {str(e)[:150]}",flush=True)
