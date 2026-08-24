@@ -33,12 +33,21 @@
 - **processor 批量（坑 #56）**：`proc(text=[full,...], audio=[arr,...], padding=True, return_tensors="pt", sampling_rate=16000)`——kwarg 是 **`audio=`（单数，非 `audios=`）**；返回 `input_ids`+`attention_mask`+`input_features`(mel `[B,128,~3000]`)+`feature_attention_mask`。单样本无 padding：`audio=[arr]`。
 - **labels mask（坑 #58，必读）**：`labels=ids.clone()`；① mask pad `labels[attention_mask==0]=-100`；② mask prompt 段（用 prompt-only tokenize 的 `attention_mask[i].sum()` 作 per-sample prompt len）；③ **显式 mask audio 特殊 token** `<|audio_bos|>/<|AUDIO|>/<|audio_eos|>`（`labels[ids==audio_id]=-100`）——它们是条件输入不该当预测目标，**漏 mask 会致 loss 虚高 ~8×**（bs≥2 + padding 时尤甚，因 audio token 落到非 prompt 区）。
 
-### 阶段 4-5 · 选型 + 超参
-- 7B 全量 fp32 master CPT = 126GB > 2×64GB → 装不下（坑 #60）。选项：
-  - **模型并行 `device_map="auto"+max_memory` 强制 2 卡切分 + bf16 master**（模型+optim+grad 随切分摊两卡 ~31GB/卡 fits）——2 卡全量 CPT 的可行路径（坑 #59）。
-  - **LoRA**（冻结全 base，只训 q/k/v/o 适配器 ~10M）——单卡即可，但非全量。
-  - DDP 全量 bf16 master = 63GB/卡 > 61GB → OOM ~2GB（坑 #60）；DDP 只适合 LoRA 或 ≤3B 模型。
-- 超参：bf16 master + bf16 autocast + grad-ckpt(`use_reentrant=False`)；lr 2e-5，warmup ~10%步，cosine；bs 视显存（7B 模型并行 2 卡 bs=2 fits），grad_accum 凑有效 batch。
+### 阶段 4-5 · 选型 + 超参（**自动**, 对齐 parallel-strategy.md / hyperparam-selection.md）
+**通用模型识别**：`cpt_audio_llm.py.tmpl` 按 `config.architectures` 自动识别音频-LLM 类（`Qwen2AudioForConditionalGeneration`/`QwenAudioForConditionalGeneration`/… 映射表，回退 `AutoModelForConditionalGeneration`）；audio 特殊 token 从 tokenizer 自动发现（名含 "audio" 的特殊 token，不写死 Qwen2-Audio 的 3 个）。换音频-LLM 不改模板。
+
+**自动并行**（探测 `device_count`+`mem_get_info` free，估模型显存 `bf16 master≈8×P`/`fp32 master≈16×P` GB，见 parallel-strategy.md 选型表）：
+- `8×P ≤ free×0.8`（单卡装得下）→ **单卡**。
+- 单卡装不下 + `n_card≥2` 且 `8×P/2 ≤ free×0.8` → **2 卡模型并行 `device_map+max_memory`**（`max_memory` 按每卡 `free×0.5` 自动算，不写死）。
+- 仍装不下 → **LoRA 回退**（冻结 base，训 q/k/v/o，~10M 可训；`peft` 不可用则退单卡全量并告警可能 OOM）。
+- 可 `MODE=single|mp2|lora` 强制覆盖（默认 `auto`）。2 卡须 shell `export ASCEND_RT_VISIBLE_DEVICES=0,1`（#59）。
+
+**自动超参**（对齐 hyperparam-selection.md）：
+- lr = `1e-5 × sqrt(global_batch/32)` clamp `[5e-6, 5e-5]`；warmup ~10% 步数；cosine 衰减。
+- bs：全量 CPT 大模型默认 1，LoRA 默认 2；`BATCH_SIZE=0` 自动；**OOM 回退阶梯**：bs→//2→1，仍 OOM 跳过该步（torch.npu.OutOfMemoryError 捕获）。
+- grad_accum 凑有效 batch（`effective = bs×accum×n_card`）。
+- bf16 master（fp32 master `16×P` 在 2×64GB 多数 OOM，#60）；grad-ckpt(`use_reentrant=False`)。
+- 可 env 覆盖：`NUM_STEPS/LR/WARMUP/BATCH_SIZE/GRAD_ACCUM/N_KEEP`（0=自动）。
 
 ### 阶段 6 · 脚本 + smoke（用 `cpt_audio_llm.py.tmpl`）
 - load model → freeze `audio_tower`+`multi_modal_projector`(按**子模块路径名**，勿用类名"Audio"——会误冻顶层 `Qwen2Audio*`，坑 #59) → grad-ckpt LLM → AdamW(非 foreach/fused，多 device 参数；非 NpuFusedAdamW，模型并行跨 device 不兼容)。
