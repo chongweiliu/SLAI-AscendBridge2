@@ -6,7 +6,7 @@
 #           lr=sqrt(global_batch) 自动, warmup~10%, bs 带 OOM 回退阶梯, grad_accum 凑有效 batch。
 # 见 references/audio-llm-cpt.md; 并行/lr 规则对齐 parallel-strategy.md / hyperparam-selection.md。
 import sklearn  # noqa  必先! libgomp TLS 修复(#55)
-import os, json, time, sys, subprocess, random, io, math
+import os, json, time, sys, subprocess, random, io, math, inspect
 os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD","0")
 os.environ.setdefault("TASK_QUEUE_ENABLE","1")
 os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF","expandable_segments:True")
@@ -84,7 +84,7 @@ def load_samples():
     print(f"[data] loaded {len(samples)} samples", flush=True)
     return samples
 
-def build_inputs(proc, samples, dev0, audio_ids):
+def build_inputs(proc, samples, dev0, audio_ids, fwd_params):
     U=[{"type":"audio","audio_url":"x"},{"type":"text","text":TRANSCRIBE_PROMPT}]
     fulls=[]; prompts=[]; arrs=[]
     for s in samples:
@@ -94,11 +94,16 @@ def build_inputs(proc, samples, dev0, audio_ids):
     inp=proc(text=fulls, audio=arrs, padding=True, return_tensors="pt", sampling_rate=16000)  # audio= 单数(#56)
     pinp=proc(text=prompts, audio=arrs, padding=True, return_tensors="pt", sampling_rate=16000)
     ids=inp.input_ids.to(dev0); am=inp.attention_mask.to(dev0)
-    af=inp.input_features.to(dev0); fam=inp.feature_attention_mask.to(dev0)
+    af=inp.input_features.to(dev0)
+    # auto-detect audio mask kwarg(#63): Qwen2-Audio=feature_attention_mask, MOSS=audio_feature_lengths; 通用按 forward 签名动态传
+    audio_kwargs={}
+    for k in ("feature_attention_mask","audio_feature_lengths"):
+        if k in fwd_params and hasattr(inp,k): audio_kwargs[k]=getattr(inp,k).to(dev0)
+    if not audio_kwargs: print(f"[warn] forward 无 audio mask kwarg(既非 feature_attention_mask 也非 audio_feature_lengths)",flush=True)
     labels=ids.clone(); labels[am==0]=-100
     for i in range(len(samples)): labels[i,:int(pinp.attention_mask[i].sum())]=-100
     for a in audio_ids: labels[ids==a]=-100  # 显式 mask audio 特殊 token(#58)
-    return ids, am, af, fam, labels
+    return ids, am, af, audio_kwargs, labels
 
 def probe_hardware():
     n=torch.npu.device_count()
@@ -178,6 +183,10 @@ def main():
     try: model.enable_input_require_grads()
     except Exception: pass
     model.train()
+    # 探测 forward 签名(#63 通用): Qwen2-Audio 接受 feature_attention_mask, MOSS 接受 audio_feature_lengths
+    try: fwd_params=set(inspect.signature(model.forward).parameters.keys())
+    except Exception: fwd_params=set()
+    print(f"[forward] params含: {[k for k in ('feature_attention_mask','audio_feature_lengths','input_features') if k in fwd_params]}",flush=True)
     optim=torch.optim.AdamW([p for p in model.parameters() if p.requires_grad], lr=1e-5, betas=(0.9,0.95), weight_decay=0.01, eps=1e-8)
     # ---- 自动超参(对齐 hyperparam-selection.md) ----
     bs=BS if BS>0 else (1 if (not is_lora and P_train>=3) else 2)
@@ -198,13 +207,13 @@ def main():
         idx=[(step*bs+i)%len(samples) for i in range(bs)]
         sb=[samples[j] for j in idx]
         try:
-            ids,am,af,fam,labels=build_inputs(proc, sb, dev0, audio_ids)
+            ids,am,af,audio_kwargs,labels=build_inputs(proc, sb, dev0, audio_ids, fwd_params)
         except Exception as e:
             print(f"[skip step {step}] {type(e).__name__}: {str(e)[:60]}", flush=True); continue
         for g in optim.param_groups: g['lr']=lr_at(step)
         try:
             with torch.autocast(device_type="npu",dtype=torch.bfloat16):
-                out=model(input_ids=ids, attention_mask=am, input_features=af, feature_attention_mask=fam, labels=labels)  # #57
+                out=model(input_ids=ids, attention_mask=am, input_features=af, labels=labels, **audio_kwargs)  # #57/#63 通用 forward(audio mask kwarg 自动适配)
                 loss=out.loss if hasattr(out,'loss') else out[0]
             (loss/ga).backward()
             if (step+1)%ga==0 or step==STEPS-1:
