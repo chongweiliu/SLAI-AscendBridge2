@@ -1,100 +1,111 @@
 #!/usr/bin/env python
-# prepare_generative_data.py.tmpl — 扩散生成式(文生视频/文生图) CPT 数据预处理
-# 解码(视频decord/图片PIL) → VAE编码(NPU) → 文本编码(可选) → 缓存 latent+emb
-# 规避 cgroup(#44/#46): VAE/UMT5 加载与编码全在 NPU；CPU 仅解码(帧小)。
-# 占位: MODEL_DIR, DATA_FILE, WS_DIR 由 run_env.sh 注入；N_FRAMES/VID_H/VID_W/MAX_LEN 可 env 覆盖
-import os, json, glob, time
+# prepare_generative_data.py.tmpl — 扩散生成式(文生视频/文生图) CPT 数据预处理 (通用)
+# 通用: 读 model_index.json 动态加载 VAE/TE 类(按名 import, 不写死 WanTransformer3DModel/AutoencoderKLWan/UMT5);
+#       据 _class_name 自动判 视频(decord/imageio)/图像(PIL) decode。
+# 规避 cgroup(#44/#46): VAE/TE 加载与编码全在 NPU；CPU 仅解码(帧小)。
+# 占位: MODEL_DIR, DATA_FILE, WS_DIR 由 run_env.sh 注入; N_FRAMES/VID_H/VID_W/MAX_LEN 可 env 覆盖
+import os, json, glob, time, io
 os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD","0")
 os.environ.setdefault("TASK_QUEUE_ENABLE","1")
 os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF","expandable_segments:True")
 import torch, torch_npu
 torch.npu.set_device(0); DEV="npu:0"
-# 依赖: pip install diffusers decord imageio-ffmpeg (decord 自带 ffmpeg)
 try:
-    import decord  # 视频
+    import decord
 except Exception:
     decord=None
-from PIL import Image  # 图片
+from PIL import Image
 import numpy as np
 
 MODEL_DIR=os.environ["MODEL_DIR"]; WS_DIR=os.environ["WS_DIR"]
-N_FRAMES=int(os.environ.get("N_FRAMES","21"))   # 满足 VAE 时间压缩因子 k: (T-1)%k==0 (Wan k=4)
-H=int(os.environ.get("VID_H","480")); W=int(os.environ.get("VID_W","832"))
+N_FRAMES=int(os.environ.get("N_FRAMES","21")); H=int(os.environ.get("VID_H","480")); W=int(os.environ.get("VID_W","832"))
 MAX_LEN=int(os.environ.get("MAX_LEN","77"))
-# backbone 子目录名: Wan=transformer, SD/CogVideoX 等=unet/transformer
-BK_DIR=os.environ.get("BACKBONE_DIR","transformer")
-VAE_DIR=os.environ.get("VAE_DIR","vae")
-TE_DIR=os.environ.get("TEXT_ENCODER_DIR","text_encoder")
+VAE_DIR=os.environ.get("VAE_DIR","vae"); TE_DIR=os.environ.get("TEXT_ENCODER_DIR","text_encoder")
 
-def load_vae():
-    from diffusers import AutoencoderKLWan  # Wan; 其它模型用对应 VAE 类(见 generative-diffusion-cpt.md)
-    vae=AutoencoderKLWan.from_pretrained(f"{MODEL_DIR}/{VAE_DIR}", torch_dtype=torch.bfloat16).to(DEV).eval()
+def read_model_index():
+    """读 model_index.json → {组件: [lib,cls]}, 通用识别 VAE/TE/backbone 类。无则返回 {}。"""
+    p=os.path.join(MODEL_DIR,"model_index.json")
+    if not os.path.exists(p): return {}
+    return json.load(open(p))
+
+def _dyn_load(entry):
+    """entry=['diffusers','AutoencoderKLWan'] → 动态 import 取类。"""
+    if not entry: return None
+    lib,cls=entry[0],entry[1]
+    try:
+        mod=__import__(lib, fromlist=[cls]); return getattr(mod,cls)
+    except Exception as e:
+        print(f"[dyn-load] {lib}.{cls} 失败: {e}", flush=True); return None
+
+def is_video(mi):
+    name=(mi.get("_class_name","") or "").lower()
+    return ("video" in name) or ("t2v" in name) or ("v2v" in name) or ("i2v" in name) or ("wan" in name)
+
+def load_vae(mi):
+    VaeCls=_dyn_load(mi.get("vae")) or _dyn_load(["diffusers","AutoencoderKLWan"])  # 回退通用 VAE
+    print(f"[vae] class={VaeCls.__name__}", flush=True)
+    vae=VaeCls.from_pretrained(f"{MODEL_DIR}/{VAE_DIR}", torch_dtype=torch.bfloat16).to(DEV).eval()
     for p in vae.parameters(): p.requires_grad=False
     return vae
 
-def vae_norm_tensors(vae):
-    """Wan latent 归一化张量(#52): decode 反向是 raw=stored*std+mean, 故 stored=(raw-mean)/std(除)。
-    AutoencoderKLWan.encode().latent_dist.sample() 返回 raw(无自动归一化)。无 latents_mean/std 返回 None。"""
-    cfg=getattr(vae,"config",None)
-    lm=getattr(cfg,"latents_mean",None); ls=getattr(cfg,"latents_std",None)
-    if lm is None or ls is None: return None,None
-    z=getattr(cfg,"z_dim",getattr(cfg,"latents","16") if isinstance(getattr(cfg,"latents",None),int) else 16)
-    import torch as _t
-    mean=_t.tensor(lm,device=DEV).view(1,z,1,1,1).to(torch.bfloat16)
-    std=_t.tensor(ls,device=DEV).view(1,z,1,1,1).to(torch.bfloat16)
-    return mean,std
-
-def load_text_encoder():
-    """可选: TE 分片不全则返回 (None,None) → 零嵌入兜底(#50)。"""
-    shards=glob.glob(f"{MODEL_DIR}/{TE_DIR}/model-*.safetensors")
-    if len(shards)<1:
+def load_text_encoder(mi):
+    """TE 分片不全或无则返回 (None,None) → 零嵌入兜底(#50)。类按 model_index 取(UMT5→UMT5EncoderModel, CLIP→CLIPTextModel, #53)。"""
+    shards=glob.glob(f"{MODEL_DIR}/{TE_DIR}/model-*.safetensors") + glob.glob(f"{MODEL_DIR}/{TE_DIR}/*.bin")
+    if not shards and not glob.glob(f"{MODEL_DIR}/{TE_DIR}/*.safetensors"):
         print(f"[text] TE 无分片，零嵌入近似无条件(#50)", flush=True); return None,None
     try:
         import transformers
         tok=transformers.AutoTokenizer.from_pretrained(f"{MODEL_DIR}/tokenizer")
-        # UMT5 必须用 UMT5EncoderModel(每层有 relative_attention_bias); 用 T5EncoderModel 会丢 block1-23 的偏置(#53)。CLIP 用 CLIPTextModel。
-        te_cls=transformers.UMT5EncoderModel
-        te=te_cls.from_pretrained(f"{MODEL_DIR}/{TE_DIR}", torch_dtype=torch.bfloat16).to(DEV).eval()
+        TECls=_dyn_load(mi.get("text_encoder"))  # model_index 指定正确 TE 类(避免 T5/UMT5 混用 #53)
+        if TECls is None: TECls=transformers.T5EncoderModel  # 回退
+        te=TECls.from_pretrained(f"{MODEL_DIR}/{TE_DIR}", torch_dtype=torch.bfloat16).to(DEV).eval()
         for p in te.parameters(): p.requires_grad=False
-        print("[text] TE 已加载(UMT5EncoderModel)，真实 caption 编码", flush=True); return tok,te
+        print(f"[text] TE class={TECls.__name__} 已加载", flush=True); return tok,te
     except Exception as e:
-        print(f"[text] TE 加载失败({type(e).__name__}: {str(e)[:120]})，零嵌入(#50)", flush=True); return None,None
+        print(f"[text] TE 加载失败({type(e).__name__}: {str(e)[:100]})，零嵌入(#50)", flush=True); return None,None
+
+def vae_norm_tensors(vae):
+    """latent 归一化(#52): decode 反向 raw=stored*std+mean, 故 stored=(raw-mean)/std(除)。无 mean/std 返回 None。"""
+    cfg=getattr(vae,"config",None); lm=getattr(cfg,"latents_mean",None); ls=getattr(cfg,"latents_std",None)
+    if lm is None or ls is None: return None,None
+    z=getattr(cfg,"z_dim",16) or getattr(cfg,"latents",16)
+    mean=torch.tensor(lm,device=DEV).view(1,z,1,1,1).to(torch.bfloat16) if hasattr(cfg,"z_dim") else None
+    # Wan VAE 有 z_dim(视频 latent [B,C,T,H,W]); 图像 VAE 无 T 维, 用 1,1,1 视角(后续 broadcast)
+    if mean is None:
+        mean=torch.tensor(lm,device=DEV).view(1,z,1,1).to(torch.bfloat16); std=torch.tensor(ls,device=DEV).view(1,z,1,1).to(torch.bfloat16)
+    else:
+        std=torch.tensor(ls,device=DEV).view(1,z,1,1,1).to(torch.bfloat16)
+    return mean,std
 
 def decode_video(path):
-    """视频 → [T,3,H,W] float [-1,1]。decord 优先; 装不上回退 imageio.v3(自带 ffmpeg, #P2-2)。layout 修正见 #49。"""
+    """视频 → [T,3,H,W] float [-1,1]。decord 优先; 装不上回退 imageio.v3。layout 修正见 #49。"""
     if decord is not None:
         vr=decord.VideoReader(path, width=W, height=H); n=len(vr)
-        idx=list(range(0, n, max(1,n//N_FRAMES)))[:N_FRAMES]
+        idx=list(range(0,n,max(1,n//N_FRAMES)))[:N_FRAMES]
         while len(idx)<N_FRAMES: idx.append(idx[-1] if idx else 0)
-        fr=vr.get_batch(idx).asnumpy()  # [T,H,W,3] uint8
-        return torch.from_numpy(fr).float().permute(0,3,1,2)/127.5-1.0  # [T,3,H,W]
-    import imageio.v3 as iio  # 回退: 读全帧再抽帧(decord 无 wheel / 缺 ffmpeg 时)
-    fr=iio.imread(path, index=None)  # [T,H,W,3] uint8
-    fr=np.asarray(fr); T=fr.shape[0]
+        fr=vr.get_batch(idx).asnumpy()
+        return torch.from_numpy(fr).float().permute(0,3,1,2)/127.5-1.0
+    import imageio.v3 as iio
+    fr=iio.imread(path, index=None); fr=np.asarray(fr); T=fr.shape[0]
     idx=np.linspace(0,T-1,N_FRAMES).astype(int) if T>=N_FRAMES else np.minimum(np.arange(N_FRAMES),T-1)
     fr=fr[idx]
     return torch.from_numpy(fr).float().permute(0,3,1,2)/127.5-1.0
 
 def decode_image(path):
-    """PIL → [3,H,W] float [-1,1]。"""
     im=Image.open(path).convert("RGB").resize((W,H))
-    return torch.from_numpy(np.array(im)).float().permute(2,0,1)/127.5-1.0  # [3,H,W]
+    return torch.from_numpy(np.array(im)).float().permute(2,0,1)/127.5-1.0
 
-def encode_vae(vae, vid, mean=None, std=None):
-    """VAE 编码 [T,3,H,W] → latent [1,C,Tl,Hl,Wl]。输入 [B,C,T,H,W](#49)。
-    归一化(#52, 默认 LATENT_NORM=1): stored=(raw-mean)/std(除), 匹配预训练DiT+原pipeline; =0 则存 raw(原950PR方式)。"""
-    v=vid.permute(1,0,2,3).unsqueeze(0).to(DEV, dtype=torch.bfloat16) if vid.dim()==4 else vid.unsqueeze(0).to(DEV,dtype=torch.bfloat16)
+def encode_vae(vae, vid, mean, std):
+    """VAE 编码 [T,3,H,W]→latent [1,C,Tl,Hl,Wl]; 输入 [B,C,T,H,W](#49)。归一化 (raw-mean)/std 除(#52)。"""
+    v=vid.permute(1,0,2,3).unsqueeze(0).to(DEV,dtype=torch.bfloat16) if vid.dim()==4 else vid.unsqueeze(0).to(DEV,dtype=torch.bfloat16)
     with torch.no_grad():
         out=vae.encode(v)
-        if hasattr(out,"latent_dist"): lat=out.latent_dist.sample()
-        elif hasattr(out,"latents"): lat=out.latents
-        else: lat=out
+        lat=out.latent_dist.sample() if hasattr(out,"latent_dist") else (out.latents if hasattr(out,"latents") else out)
         if mean is not None and std is not None and os.environ.get("LATENT_NORM","1")!="0":
-            lat=(lat-mean)/std  # 除(非乘); 见 pitfalls #52
+            lat=(lat-mean)/std
     return lat
 
 def caption_for(item, fn):
-    """有 cap 用 cap; 无则从文件名派生(#P2-1): mixkit-airplane-arriving-at-air-terminal-4095_clip_1.mp4 → "airplane arriving at air terminal"。"""
     cap=item.get("cap") or item.get("caption") or item.get("text")
     if cap: return cap
     import re
@@ -102,34 +113,41 @@ def caption_for(item, fn):
     parts=[p for p in b.split("-") if p.lower()!="mixkit" and not re.fullmatch(r"\d+",p)]
     return " ".join(parts) or item.get("category","")
 
-def encode_text(tok, te, cap):
-    ids=tok(cap, max_length=MAX_LEN, padding="max_length", truncation=True, return_tensors="pt").input_ids.to(DEV)
-    with torch.no_grad(): return te(input_ids=ids).last_hidden_state  # [1,L,D]
-
 def main():
-    vae=load_vae(); tok,te=load_text_encoder(); use_text=te is not None
-    mean,std=vae_norm_tensors(vae)  # #52 latent 归一化(None=VAE无mean/std配置, 存raw)
-    print(f"[init] VAE on {DEV}; text_encoder={'ON(UMT5)' if use_text else 'OFF(零嵌入,#50)'}; latent_norm={'ON(/std)' if mean is not None else 'OFF(无mean/std)'}", flush=True)
-    # DATA_FILE: 视频用 jsonl/video2caption.json(每条{path,cap}) 或目录; 图片同理
-    items=__import__("json").load(open(os.environ["DATA_FILE"]))
+    mi=read_model_index()
+    print(f"[init] model_index: {mi.get('_class_name','?')}, is_video={is_video(mi)}", flush=True)
+    vae=load_vae(mi); tok,te=load_text_encoder(mi); use_text=te is not None
+    mean,std=vae_norm_tensors(vae)
+    print(f"[init] VAE on {DEV}; text_encoder={'ON' if use_text else 'OFF(零嵌入,#50)'}; latent_norm={'ON(/std)' if mean is not None else 'OFF(无mean/std)'}", flush=True)
+    vid=is_video(mi)
+    items=json.load(open(os.environ["DATA_FILE"]))
     if isinstance(items,dict): items=items.get("data",items.get("train",[]))
     vdir=os.environ.get("VIDEO_DIR", os.path.dirname(os.environ["DATA_FILE"]))
     latents=[]; embs=[]; caps=[]; t0=time.time()
     for i,item in enumerate(items):
         p=item.get("path",item.get("file","")); fn=os.path.basename(p)
-        vp=os.path.join(vdir, fn) if not os.path.isabs(p) else p
+        vp=os.path.join(vdir,fn) if not os.path.isabs(p) else p
         if not os.path.exists(vp): print(f"[skip] {fn}",flush=True); continue
         try:
-            is_vid=fn.lower().endswith((".mp4",".avi",".mov",".mkv",".webm"))
-            vid=decode_video(vp) if is_vid else decode_image(vp).unsqueeze(0)
-            lat=encode_vae(vae, vid, mean, std)
-            cap=caption_for(item, fn)  # 无标注则文件名派生(#P2-1)
-            emb=encode_text(tok,te,cap) if use_text else torch.zeros(1,MAX_LEN,lat.shape[1] if lat.dim()>3 else 4096, dtype=torch.bfloat16)
+            if vid and fn.lower().endswith((".mp4",".avi",".mov",".mkv",".webm")):
+                v=decode_video(vp)
+            elif fn.lower().endswith((".png",".jpg",".jpeg",".webp",".bmp")):
+                v=decode_image(vp).unsqueeze(0)
+            else:
+                v=decode_video(vp) if vid else decode_image(vp).unsqueeze(0)
+            lat=encode_vae(vae, v, mean, std)
+            cap=caption_for(item, fn)
+            emb=encode_text(tok,te,cap) if use_text else torch.zeros(1,MAX_LEN,lat.shape[1] if lat.dim()>3 else 4096,dtype=torch.bfloat16)
             latents.append(lat.cpu()); embs.append(emb.cpu() if use_text else torch.zeros(1,MAX_LEN,4096,dtype=torch.bfloat16)); caps.append(cap[:60])
             if (i+1)%4==0: print(f"[encode] {i+1}/{len(items)} lat={tuple(lat.shape)} cap='{cap[:30]}' {time.time()-t0:.0f}s",flush=True)
         except Exception as e:
             print(f"[FAIL] {fn}: {type(e).__name__} {str(e)[:120]}",flush=True)
-    torch.save({"latents":latents,"embs":embs,"captions":caps,"latent_norm": (mean is not None and os.environ.get("LATENT_NORM","1")!="0")}, f"{WS_DIR}/outputs/video_latents.pt")
-    print(f"[done] cached {len(latents)} samples (latent_norm={'ON' if (mean is not None and os.environ.get('LATENT_NORM','1')!='0') else 'OFF/raw'}) {time.time()-t0:.0f}s",flush=True)
+    torch.save({"latents":latents,"embs":embs,"captions":caps,"latent_norm":(mean is not None and os.environ.get("LATENT_NORM","1")!="0"),"is_video":vid},
+               f"{WS_DIR}/outputs/video_latents.pt")
+    print(f"[done] cached {len(latents)} samples {'(视频)' if vid else '(图像)'} {time.time()-t0:.0f}s",flush=True)
+
+def encode_text(tok, te, cap):
+    ids=tok(cap, max_length=MAX_LEN, padding="max_length", truncation=True, return_tensors="pt").input_ids.to(DEV)
+    with torch.no_grad(): return te(input_ids=ids).last_hidden_state
 
 if __name__=="__main__": main()

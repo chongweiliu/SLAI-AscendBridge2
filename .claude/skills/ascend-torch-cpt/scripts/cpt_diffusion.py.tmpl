@@ -1,97 +1,169 @@
 #!/usr/bin/env python
-# cpt_diffusion.py.tmpl — 扩散生成式(文生视频/文生图) DiT/U-Net 流匹配 CPT
-# 读缓存的 latent+text emb → 流匹配 velocity → MSE loss → NpuFusedAdamW
-# fp32 主权重 + bf16 autocast + 梯度检查点; 全程 NPU(规避 cgroup #44/#46)
-# 占位: MODEL_DIR, WS_DIR, BACKBONE_DIR 由 run_env.sh 注入; NUM_STEPS/LR/WARMUP 可 env 覆盖
+# cpt_diffusion.py.tmpl — 扩散生成式(文生视频/图) DiT/U-Net 流匹配 CPT (通用+NPU自动选型)
+# 通用: 读 model_index.json 动态加载 backbone 类(transformer/unet, 不写死 WanTransformer3DModel)。
+# 自动调参: 探测 device_count+free_mem → 自动选 单卡/2卡模型并行(max_memory按显存算)/LoRA回退;
+#           lr=sqrt(global_batch) 自动, warmup~10%, bs OOM 回退阶梯, grad_accum 凑有效 batch。
+# 见 references/generative-diffusion-cpt.md; 并行/lr 规则对齐 parallel-strategy.md / hyperparam-selection.md。
 import os, json, math, time, sys, subprocess, random
 os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD","0")
 os.environ.setdefault("TASK_QUEUE_ENABLE","1")
 os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF","expandable_segments:True")
 import torch, torch_npu
-torch.npu.set_device(0); DEV="npu:0"
-from diffusers import WanTransformer3DModel  # Wan; 其它模型换对应类(见 generative-diffusion-cpt.md)
-from torch_npu.optim import NpuFusedAdamW
+torch.npu.set_device(0); DEV0="npu:0"
+from safetensors.torch import load_file as _lf
 
 MODEL_DIR=os.environ["MODEL_DIR"]; WS_DIR=os.environ["WS_DIR"]
-BK_DIR=os.environ.get("BACKBONE_DIR","transformer")
 LOG=os.path.join(WS_DIR,"logs"); OUT=os.path.join(WS_DIR,"outputs")
 os.makedirs(LOG,exist_ok=True); os.makedirs(OUT,exist_ok=True)
-NUM_STEPS=int(os.environ.get("NUM_STEPS","50")); LR=float(os.environ.get("LR","1e-5"))
-WARMUP=int(os.environ.get("WARMUP","5")); SEED=int(os.environ.get("SEED","42"))
-GRAD_CLIP=float(os.environ.get("GRAD_CLIP","1.0"))
-torch.manual_seed(SEED); random.seed(SEED)
+NUM_STEPS=int(os.environ.get("NUM_STEPS","50")); SEED=42
+LR_ENV=os.environ.get("LR","0"); WARMUP_ENV=int(os.environ.get("WARMUP","0"))
+BS=int(os.environ.get("BATCH_SIZE","1")); GRAD_ACCUM=int(os.environ.get("GRAD_ACCUM","1"))
+MODE_FORCE=os.environ.get("MODE","auto")
+random.seed(SEED); torch.manual_seed(SEED)
 
-def load_backbone():
-    """加载 DiT/U-Net backbone(fp32)。transformers5.x + 有 _keep_in_fp32_modules 的 DiT(Wan) 用 from_pretrained 会崩
-    (#54: low_cpu_mem_usage cannot be False when keep_in_fp32_modules is True) → 回退 from_config+load_state_dict。"""
-    BK=f"{MODEL_DIR}/{BK_DIR}"
-    try:
-        dit=WanTransformer3DModel.from_pretrained(BK, torch_dtype=torch.float32).to(DEV)
-    except Exception as e:
-        print(f"[backbone] from_pretrained 失败({type(e).__name__})→ from_config+load_state_dict(#54)",flush=True)
-        import json as _j
-        from safetensors.torch import load_file as _lf
-        cfg=_j.load(open(f"{BK}/config.json"))
-        dit=WanTransformer3DModel.from_config(cfg, torch_dtype=torch.float32)
-        sd=_lf(f"{BK}/diffusion_pytorch_model.safetensors")
-        m,u=dit.load_state_dict(sd, strict=False); print(f"[backbone] load miss={len(m)} unexp={len(u)}",flush=True)
-        dit=dit.to(DEV)
-    dit.train()
-    try: dit.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
-    except Exception as e: print(f"[gc] {type(e).__name__}: {str(e)[:80]} (Wan DiT 无 grad-ckpt, 小 latent 无需, 忽略)",flush=True)
-    return dit
+def read_model_index():
+    p=os.path.join(MODEL_DIR,"model_index.json")
+    return json.load(open(p)) if os.path.exists(p) else {}
+
+def backbone_dir(mi):
+    """DiT/U-Net 子目录名: Wan/FLUX/SD3=transformer, SD1.5/SDXL/cog=unet。据 model_index key 定。"""
+    if "transformer" in mi: return "transformer"
+    if "unet" in mi: return "unet"
+    return "transformer"
+
+def load_backbone_class(mi):
+    """据 model_index 的 transformer/unet entry 动态 import 类(不写死 Wan)。"""
+    bk=backbone_dir(mi)
+    entry=mi.get(bk)
+    if entry:
+        lib,cls=entry[0],entry[1]
+        try:
+            mod=__import__(lib, fromlist=[cls]); return getattr(mod,cls), bk
+        except Exception as e: print(f"[backbone] {lib}.{cls} 动态加载失败: {e}",flush=True)
+    return None, bk
 
 def backbone_forward(dit, noisy, t, emb):
-    """返回兼容 tensor|dict|dataclass(#51)，绝不 out[0]。"""
+    """返回兼容 tensor|dict|dataclass(#51)。"""
     out=dit(hidden_states=noisy, timestep=t, encoder_hidden_states=emb, return_dict=True)
     if isinstance(out,dict): return out.get("sample",out)
     return out.sample if hasattr(out,"sample") else out
 
+def probe_hardware():
+    n=torch.npu.device_count(); frees=[]
+    for i in range(max(1,n)):
+        try: frees.append(torch.npu.mem_get_info(i)[0]/1e9)
+        except Exception: frees.append(60.0)
+    free=min(frees) if frees else 60.0
+    print(f"[hw] device_count={n} free/card~{free:.1f}GB",flush=True)
+    return n,free
+
+def auto_parallel(P_B, n_card, free_GB, mode_force):
+    full_bf16=8*P_B  # bf16 master 全量 CPT 近似
+    if mode_force in ("single","mp2","lora"): mode=mode_force
+    elif full_bf16 <= free_GB*0.8: mode="single"
+    elif n_card>=2 and full_bf16/2 <= free_GB*0.8: mode="mp2"
+    else: mode="lora"
+    max_mem={i:f"{int(free_GB*0.5)}GB" for i in range(n_card)} if n_card>=2 else None
+    print(f"[auto-parallel] P={P_B:.2f}B full_bf16≈{full_bf16:.1f}GB free={free_GB:.1f}GB n_card={n_card} → mode={mode} max_mem={max_mem}",flush=True)
+    return mode,max_mem
+
 def main():
+    mi=read_model_index()
+    BkCls, BK = load_backbone_class(mi)
+    if BkCls is None:
+        raise SystemExit(f"无法识别 backbone 类(model_index 无 transformer/unet entry); 请确认 MODEL_DIR 是 diffusers pipeline")
+    print(f"[backbone] dir={BK} class={BkCls.__name__}",flush=True)
+    n_card,free_GB=probe_hardware()
+    # 先单卡 load 算参数量(估显存), 再按 mode 处理
+    print(f"[model] loading {BkCls.__name__} (fp32/bf16)...",flush=True)
+    try:
+        dit=BkCls.from_pretrained(f"{MODEL_DIR}/{BK}", torch_dtype=torch.float32, low_cpu_mem_usage=True).to(DEV0)
+    except Exception as e:  # transformers5.x keep_in_fp32_modules 冲突(#54) → from_config+load_state_dict
+        print(f"[model] from_pretrained 失败({type(e).__name__})→ from_config+load_state_dict(#54)",flush=True)
+        cfg=json.load(open(f"{MODEL_DIR}/{BK}/config.json"))
+        dit=BkCls.from_config(cfg, torch_dtype=torch.float32)
+        sd=_lf(f"{MODEL_DIR}/{BK}/diffusion_pytorch_model.safetensors")
+        m,u=dit.load_state_dict(sd, strict=False); print(f"[model] load miss={len(m)} unexp={len(u)}",flush=True)
+        dit=dit.to(DEV0)
+    P_B=sum(p.numel() for p in dit.parameters())/1e9
+    mode,max_mem=auto_parallel(P_B, n_card, free_GB, MODE_FORCE)
+    if mode=="mp2":
+        del dit; torch.npu.empty_cache()
+        dit=BkCls.from_pretrained(f"{MODEL_DIR}/{BK}", torch_dtype=torch.bfloat16, device_map="auto", max_memory=max_mem, low_cpu_mem_usage=True)
+    dit.config.use_cache=False
+    try: dit.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
+    except Exception as e: print(f"[gc] {type(e).__name__}: {str(e)[:60]} (该 backbone 无 grad-ckpt, 小 latent 无需)",flush=True)
+    dev0=next(dit.parameters()).device
+    is_lora=(mode=="lora")
+    if is_lora:
+        try:
+            from peft import LoraConfig, get_peft_model
+            lcfg=LoraConfig(r=8,lora_alpha=16,lora_dropout=0.05,bias="none",target_modules=["q_proj","k_proj","v_proj","o_proj","to_q","to_k","to_v"],task_type=None)
+            dit=get_peft_model(dit,lcfg)
+            print(f"[lora] 回退(全量装不下): trainable={sum(p.numel() for p in dit.parameters() if p.requires_grad)/1e6:.1f}M",flush=True)
+        except Exception as e:
+            print(f"[lora] peft 不可用({e}), 退单卡全量(可能 OOM)",flush=True); is_lora=False
+    dit.train()
+    optim=torch.optim.AdamW([p for p in dit.parameters() if p.requires_grad], lr=1e-5, betas=(0.9,0.95), weight_decay=0.01, eps=1e-8)
+    # 自动超参(对齐 hyperparam-selection.md)
+    bs=BS if BS>0 else 1; ga=GRAD_ACCUM if GRAD_ACCUM>0 else 1; global_batch=bs*ga*n_card
+    lr=float(LR_ENV) if LR_ENV!="0" else max(5e-6,min(5e-5,1e-5*math.sqrt(max(1,global_batch/32))))
+    warmup=WARMUP_ENV if WARMUP_ENV>0 else max(3,int(NUM_STEPS*0.1))
+    print(f"[auto-hp] bs={bs} grad_accum={ga} n_card={n_card} global_batch={global_batch} → lr={lr:.1e} warmup={warmup}",flush=True)
     data=torch.load(f"{OUT}/video_latents.pt", weights_only=False)
     latents=data["latents"]; embs=data["embs"]; N=len(latents)
-    print(f"[data] {N} cached samples",flush=True)
-    dit=load_backbone(); nP=sum(p.numel() for p in dit.parameters())
-    print(f"[model] backbone {nP/1e9:.3f}B on {DEV} optim=NpuFusedAdamW",flush=True)
-    optim=NpuFusedAdamW(dit.parameters(), lr=LR, betas=(0.9,0.95), weight_decay=0.01, eps=1e-8)
+    print(f"[data] N={N} cached samples (is_video={data.get('is_video',True)})",flush=True)
     def lr_at(s):
-        if s<WARMUP: return LR*(s+1)/WARMUP
-        p=(s-WARMUP)/max(1,NUM_STEPS-WARMUP); return 0.5*LR*(1+math.cos(math.pi*p))
+        if s<warmup: return lr*(s+1)/warmup
+        p=(s-warmup)/max(1,NUM_STEPS-warmup); return 0.5*lr*(1+math.cos(math.pi*p))
     log=[]; lp=os.path.join(LOG,"step_loss.jsonl"); open(lp,'w').close()
+    print(f"[train] {NUM_STEPS} steps bs={bs} lr={lr:.1e} warmup={warmup} grad_accum={ga} mode={mode}{'(lora)' if is_lora else ''} rectified-flow velocity",flush=True)
     print(f"{'step':>4} {'loss':>10} {'lr':>10} {'s/step':>7} {'ETA':>8}",flush=True)
-    t0=time.time(); _lt=0.0
+    t0=time.time(); _lt=0.0; optim.zero_grad(set_to_none=False)
     for step in range(NUM_STEPS):
-        i=step%N
-        lat=latents[i].to(DEV).to(torch.float32); emb=embs[i].to(DEV).to(torch.bfloat16)
-        sigma=torch.rand(lat.shape[0],device=DEV,dtype=torch.float32).view(-1,*[1]*(lat.dim()-1))
-        noise=torch.randn_like(lat); noisy=(1-sigma)*lat+sigma*noise
-        target=noise-lat  # velocity (flow matching)
-        lr=lr_at(step)
-        for g in optim.param_groups: g['lr']=lr
-        optim.zero_grad(set_to_none=False)
-        with torch.autocast(device_type="npu",dtype=torch.bfloat16):
-            t=torch.tensor([float(sigma.flatten()[0])*1000],device=DEV)
-            pred=backbone_forward(dit, noisy.to(torch.bfloat16), t, emb)
-            loss=torch.nn.functional.mse_loss(pred.float(),target.float())
-        loss.backward(); torch.nn.utils.clip_grad_norm_(dit.parameters(),GRAD_CLIP); optim.step()
+        idx=[(step*bs+i)%N for i in range(bs)]
+        lats=[latents[j].to(dev0).to(torch.float32) for j in idx]
+        embs_b=[embs[j].to(dev0).to(torch.bfloat16) for j in idx]
+        # 简化: bs=1 取首个; bs>1 需 padding(扩散 latent shape 一致时可 stack)
+        lat=lats[0]; emb=embs_b[0]
+        if bs>1:
+            try: lat=torch.stack(lats); emb=torch.stack(embs_b)
+            except Exception: pass  # shape 不一 → 取 1
+        sigma=torch.rand(lat.shape[0],device=dev0,dtype=torch.float32).view(-1,*[1]*(lat.dim()-1))
+        noise=torch.randn_like(lat); noisy=(1-sigma)*lat+sigma*noise; target=noise-lat
+        for g in optim.param_groups: g['lr']=lr_at(step)
+        try:
+            with torch.autocast(device_type="npu",dtype=torch.bfloat16):
+                t=torch.tensor([float(sigma.flatten()[0])*1000],device=dev0)
+                pred=backbone_forward(dit, noisy.to(torch.bfloat16), t, emb)
+                loss=torch.nn.functional.mse_loss(pred.float(),target.float())
+            (loss/ga).backward()
+            if (step+1)%ga==0 or step==NUM_STEPS-1:
+                torch.nn.utils.clip_grad_norm_([p for p in dit.parameters() if p.requires_grad],1.0)
+                optim.step(); optim.zero_grad(set_to_none=False)
+        except torch.npu.OutOfMemoryError:
+            if bs>1: bs=max(1,bs//2); print(f"[OOM] step{step} bs降→{bs}重试",flush=True); torch.npu.empty_cache(); optim.zero_grad(set_to_none=False); continue
+            print(f"[OOM] step{step} bs=1仍OOM,跳过",flush=True); torch.npu.empty_cache(); optim.zero_grad(set_to_none=False); continue
         ls=float(loss.detach().cpu()); el=time.time()-t0; sps=el/(step+1)
-        log.append({"step":step,"loss":ls,"lr":lr,"elapsed_s":round(el,2),"s_per_step":round(sps,3)})
+        log.append({"step":step,"loss":ls,"lr":lr_at(step),"elapsed_s":round(el,2),"s_per_step":round(sps,3)})
         with open(lp,'a') as f: f.write(json.dumps(log[-1])+'\n')
         if step%2==0 or step==NUM_STEPS-1:
             remain=(NUM_STEPS-1-step)*sps; eta=f"{remain/60:.1f}min" if remain>=60 else f"{remain:.0f}s"
-            print(f"{step:>4} {ls:>10.5f} {lr:.2e} {sps:>7.3f} {eta:>8}",flush=True)
+            print(f"{step:>4} {ls:>10.5f} {lr_at(step):.2e} {sps:>7.3f} {eta:>8}",flush=True)
         now=time.time()
         if now-_lt>=30 or step==NUM_STEPS-1:
             _lt=now; remain=(NUM_STEPS-1-step)*sps if sps>0 else 0
             eta=f"{remain/60:.1f}min" if remain>=60 else f"{remain:.0f}s"
             try: subprocess.run([sys.executable,os.path.join(WS_DIR,"timing_table.py"),"--doing","7",str(round(el,0)),f"{step+1}/{NUM_STEPS}步 ETA{eta} loss={ls:.3f}"],check=False)
             except Exception: pass
-    torch.save(dit.state_dict(), os.path.join(OUT,"dit_cpt_state.pt"))
+    sd={k:(v.detach().to("cpu",dtype=torch.bfloat16) if v.is_floating_point() else v.detach().cpu()) for k,v in dit.state_dict().items()}
+    if is_lora: dit.save_pretrained(os.path.join(OUT,"lora_adapter"))
+    else: torch.save(sd, os.path.join(OUT,"dit_cpt_state.pt"))
     f5=sum(r['loss'] for r in log[:5])/min(5,len(log)); l5=sum(r['loss'] for r in log[-5:])/min(5,len(log))
-    s={"paradigm":"diffusion_flow_matching","parallel":"single","steps":NUM_STEPS,"lr":LR,"warmup":WARMUP,
-       "optim":"NpuFusedAdamW","precision":"fp32+bf16 autocast","grad_ckpt":True,"n_params_B":round(nP/1e9,4),
-       "first5":round(f5,5),"last5":round(l5,5),"min":round(min(r['loss'] for r in log),5),
-       "final":round(log[-1]['loss'],5),"delta":round(f5-l5,5),"total_time_s":round(time.time()-t0,2)}
+    s={"paradigm":"diffusion_flow_matching","mode":mode,"lora":is_lora,"parallel":("model-parallel(2卡)" if mode=="mp2" else "single"),
+       "optim":"AdamW","precision":"fp32+bf16 autocast","steps":NUM_STEPS,"bs":bs,"lr":round(lr,7),"warmup":warmup,"grad_accum":ga,
+       "global_batch":global_batch,"n_params_B":round(P_B/1e9,4),"first5":round(f5,5),"last5":round(l5,5),
+       "min":round(min(r['loss'] for r in log),5),"final":round(log[-1]['loss'],5),"delta":round(f5-l5,5),"total_time_s":round(time.time()-t0,2)}
     json.dump(s,open(os.path.join(OUT,'train_summary.json'),'w'),ensure_ascii=False,indent=2)
     json.dump(log,open(os.path.join(OUT,'losses.json'),'w'),ensure_ascii=False,indent=2)
     print("\n[done]"+json.dumps(s,ensure_ascii=False,indent=2),flush=True)
