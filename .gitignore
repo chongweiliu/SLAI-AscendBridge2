@@ -64,6 +64,7 @@ export_only_prof_dir/
 *.csv
 *.mp4
 
+trace_*.json
 trace_*.json.tmp
 *.json.tmp
 **/*__prev*

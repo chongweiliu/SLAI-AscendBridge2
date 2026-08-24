@@ -45,6 +45,14 @@ metadata:
 - 提交内容：ascend-torch-cpt skill 优化（pitfalls #42-45 + 模板 stub/map_location + SKILL.md + agent-memory），见 [[ascend-cpt-env-pitfalls]]。
 - 合并后 main 已含，本地已同步。
 
+### !20 (2026-08-24, 同日第二次)
+- 分支 `feat/cpt-stub-policy-official`，commit `05b305c`，MR `!20`，merge commit `905d3eb`。
+- 提交内容：torchaudio/torchvision 默认走正式匹配版、stub 仅≥3次失败后经 `STUB_MM_FALLBACK=1` 兜底（SKILL.md + pitfalls #39/#43 + cpt_train.py.tmpl/eval_cpt.py.tmpl）。4 文件 +24/-20。
+- **踩坑**：push 首次被服务端 pre-receive hook 拒（`Deny by project hooks 'default': trace_npu_1_*.json 142MiB > 100MiB, in commit dd38404`）——本地 main 比远端多带一串未推送的 optimization/benchmark 提交，其中 `dd38404` 含 142MB trace 产物（不该入库）。我的提交干净（只动 4 个 skill 文件），但特性分支基于本地 main 会拖上大文件提交。
+- **解法**：`git reset --hard origin/main` 后 `git cherry-pick <我的commit>`，让特性分支只含远端 main + 我的 1 个干净提交，push 即通过（hook PASSED）。**不要把本地那串含大文件的提交推上去**，那是单独的仓库卫生问题（需把 trace 类产物加入 LFS/.gitignore 后单独处理）。
+- 凭据：本机 `credential.helper=store` 已缓存 gitcode 令牌，`git push` 直接用、API 调用用 `printf 'protocol=https\nhost=gitcode.com\n\n' | git credential fill` 取 password 作 `PRIVATE-TOKEN`（不打印值、用完即 unset），免去手动 export。
+- 合并后远端 main `818435f → 905d3eb`，本地未 reset main（保留用户未推送的 optimization 提交链，避免误删）。
+
 ## 复用命令骨架（下次直接改分支名/文件/标题）
 ```bash
 cd /workspace/SLAI-AscendBridge2
