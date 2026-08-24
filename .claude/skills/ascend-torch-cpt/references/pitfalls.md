@@ -266,3 +266,28 @@ sys.meta_path.insert(0, _StubFinder())
 - **症状 B**：去掉 to_empty 后，前向崩 `NotImplementedError: Cannot copy out of meta tensor; no data!`（在 RoPE `self.inv_freq`）。
 - **根因 B**：`inv_freq` 等 non-persistent buffer（`persistent=False`，不在 `state_dict`）在 meta 建模时被跳过初始化，`assign` 只覆盖 state_dict 里的键，这些 buffer 仍是 meta tensor，前向取值即崩。
 - **解法**：大模型 eval 加载**不要走 meta 路线**，直接用 #44 的"正常建 fp32 CPU 模型 + `map_location='npu'` 加载 + 跨设备 copy"——inv_freq 正常初始化、权重正确、CPU 峰值低。meta+assign 仅在确信无 non-persistent buffer 且不用 to_empty 时才可，风险高不推荐。
+
+## 46. 多模态 remap 在 CPU 三份叠加 → OOM 137（#44 的 remap 变体，最隐蔽）
+- **症状**：多模态→文本头 remap（`REMAP=1` 路径）一启动即 `SIGKILL`（exit 137），日志只停在 import/`LD_PRELOAD` 那行，**连 `[remap]` 打印都没到**就被杀，无 traceback。`free -h` 显示 754GB available，NPU HBM 也几乎全空——两边都"看起来不该 OOM"，极具迷惑性。
+- **根因**：remap 路径在 CPU 上同时持有**三份**大对象（比 #44 的两份更狠）：
+  1. 文本头模型 `XxxForCausalLM(tc).to(torch.float32)`：4.2B × 4B = **16.8GB**
+  2. `load_file(shard, device='cpu')` 全分片加载到 CPU（bf16）：**9.3GB**
+  3. remap 时 `v.to(torch.float32)` 把命中的权重再转一份 fp32 到 `sd` 字典：**16.8GB**
+  - 峰值 ≈ 43GB。容器（K8s/Docker）cgroup 限制常远小于宿主视图（本机 `free` 显示 754GB，但 `cat /sys/fs/cgroup/memory.max` = **32GB**），43GB > 32GB → OOM killer 发 SIGKILL，python 来不及打印。
+- **与 #44 的区别**：#44 是 `torch.load` 单个 ckpt + CPU 模型（两份）；本条是 **remap 路径的三份叠加**（模型 + 多分片 ckpt + dtype 转换副本），且常发生在"我以为 remap 只是复制几个 tensor"时，三份峰值更易被忽略。`free` 误导性在此条最严重——宿主 754GB 让人完全不设防。
+- **解法**：整个 remap 搬到 **NPU** 上做（HBM 128GB 绰绰有余），CPU 不留任何大副本：
+  ```python
+  with torch.device(device):              # 模型直接在 NPU 上构造，不占 CPU
+      model = XxxForCausalLM(tc)
+  model = model.to(torch.float32)        # NPU 上转 fp32
+  for f in shard_files:
+      shard = load_file(path/f, device=device)   # 分片直加载到 NPU
+      sd = {nk: v.to(torch.float32) for ...命中的重映射键...}
+      model.load_state_dict(sd, strict=False)     # partial：仅本片 key 写入
+      loaded_keys.update(sd.keys())
+      del shard, sd; torch.npu.empty_cache()
+  model.tie_weights()  # tie=True 时绑 lm_head
+  ```
+  关键三点：①`with torch.device(device)` 让模型构造落在 NPU（不是 CPU 建完再 `.to(device)`，那一步 CPU 仍持 16.8GB）；②`load_file(device=device)` 分片直加载 NPU，不在 CPU 暂存全量 ckpt；③逐分片 `load_state_dict(strict=False)` 累积写入 + 立即 `del + empty_cache`，NPU 峰值≈模型(16.8GB)+单分片(~5GB)，CPU 峰值≈0。
+- **eval 同理**：加载 `cpt_model_state.pt`（16.8GB fp32 全量 state_dict）用 `torch.load(CKPT, map_location='npu:0', weights_only=False)`，别 `map_location='cpu'`；NPU 上建模型 + NPU 上 load，再 `load_state_dict`。
+- **判定要点**：exit 137 + 无 traceback + remap/load_model 阶段即死 + `free` 显示充足 = **第一时间查 cgroup**：`cat /sys/fs/cgroup/memory.max`(v2) / `memory.limit_in_bytes`(v1)。**永远先 `cat /sys/fs/cgroup/memory.max`，不要信 `free`。** 950PR 机器实测：cgroup=32GB，宿主=754GB，Qwen3.5-4B remap 三份 43GB 必中此坑。本条已验证解法（搬 NPU 后 smoke 一次通过，200 步训练正常）。

@@ -53,6 +53,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 ### 阶段 1 · 环境/依赖勘察
 探测并记录（写进 `${WS_DIR}/env_probe.json`，即 `training-ws/<模型名>-cpt/env_probe.json`）：
 - NPU：卡数、每卡显存（**以实际分配测试为准**，`mem_get_info` 的 free 可能为负，见 pitfalls #29）、CANN 版本、`npu-smi`/`/dev/davinci*`。
+- **容器 CPU 内存限制（强制查，别信 free）**：`cat /sys/fs/cgroup/memory.max`(v2) 或 `memory.limit_in_bytes`(v1)。容器（K8s/Docker）cgroup 限制常远小于宿主视图——`free -h` 的 total 是宿主机值会误导。≥4B 模型在 CPU 上做 remap/load（模型+ckpt+dtype 转换三份叠加可达 40GB+）极易撞 32GB 级限制被 `SIGKILL`(137)（pitfalls #44/#46）。查到限制 < 模型加载峰值 → 整个权重加载/remap 搬 NPU 做，不在 CPU 堆副本。env_probe 必记 `cgroup_mem_limit`。
 - **卡间互联**：`hccn_tool -i <devid> -ip -g` 看是否配了 RoCE IP（报 "no ip was preset" = 只能走慢速 PCIe，见 pitfalls #23）；**真实 CPU 核数**用 `nproc --all`/`os.cpu_count()`（`nproc` 会受 OMP_NUM_THREADS 误导，见 pitfalls #22）。
 - torch / torch_npu / transformers 版本；解释器路径。**注意 `torch==X.Y.Z+cpu` 不代表无 NPU**——昇腾镜像常用 +cpu build 配 torch_npu，NPU 后端由 torch_npu 注册，以 `torch.npu.is_available()` 为准（pitfalls #40）。
 - **新芯片 soc 不支持（Ascend950 系列：950PR/950DT）**：若 `torch.npu.set_device(0)` 报 `Unsupported soc version: Ascend950PR` 或 `Ascend950DT`（device_count 能返回但 lazy_init/算子执行失败），是 torch_npu 太旧不识别 950 系列芯片——升级 torch+torch_npu 到支持 950 系列的版本（**950PR 实测可行组合** `torch==2.12.0 + torch_npu==2.12.0`，pip 华为 mirror；**950DT** 同系列同 CANN 9.0.0-beta，预期同方案，需实机验证 set_device+matmul）。env_probe 必实测 `set_device` + 一次 `x@x` matmul，**不能只看 device_count 就认定 NPU 可用**（pitfalls #42）。`npu-smi info -t board -i 0` 的 Chip Name 匹配 `Ascend950(PR|DT)` 即 950 系列，都需检查 soc 支持。
