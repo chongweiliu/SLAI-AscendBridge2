@@ -223,3 +223,45 @@ sys.meta_path.insert(0, _StubFinder())
 - **症状**：`source /usr/local/Ascend/ascend-toolkit/set_env.sh` 报 `No such file or directory`；或该机器 `LD_LIBRARY_PATH`/`ASCEND_TOOLKIT_HOME` 已在 base profile 注入，根本不需要 source。
 - **根因**：不同镜像 CANN 安装路径不同（有的是 `ascend-toolkit/set_env.sh`，有的只有 `driver/`，有的 env 已在 `/etc/profile` 注入）。
 - **解法**：`run_env.sh` 里对 `set_env.sh` 做 `[ -f ]` 条件 source，不存在则跳过（env_probe 阶段先 `python -c "import torch_npu; print(torch.npu.is_available())"` 验证 env 是否已就绪）。不要硬 source。
+
+## 42. torch_npu 不支持新芯片 soc（Ascend950 系列：950PR/950DT）→ 升级 torch+torch_npu
+- **症状**：`torch.npu.set_device(0)` / `torch.npu._lazy_init()` 报 `RuntimeError: Unsupported soc version: Ascend950PR 9579` 或 `Ascend950DT xxxx`（950 系列两款之一，或其它新型号）；CANN 版本被判 `"X is invalid or not supported yet"`。`device_count()`/`get_device_name()` 可能能返回（不触发 lazy_init），误导以为 NPU 可用，但真正初始化/算子执行即崩。
+- **根因**：镜像预装的 `torch_npu` 版本太旧，C++ 层 soc 版本映射表里没有 950 系列芯片。Ascend950 系列（**950PR 与 950DT 两款**，2026 年新芯片，CANN 9.0.0-beta.2 已支持，`platform_config` 下有 `Ascend950PR_*.ini` 与 `Ascend950DT_*.ini`）在 `torch_npu 2.7.1.post2.dev` 里都不识别——两款同根因、同解法。
+- **解法**：升级到支持 950 系列的 torch_npu 新版本（与 torch 配套）。**950PR 已实测可行组合**：`pip install torch==2.12.0 torch_npu==2.12.0`（torch_npu 2.12 识别 950PR，matmul 正常，HBM free 131.8GB）。**950DT** 同属 950 系列、同 CANN 9.0.0-beta，预期同方案（torch2.12+torch_npu2.12）适用，但**需在 950DT 实机验证** `set_device`+一次 `x@x` matmul 后才算确认。注意 torch_npu wheel 对 torch 精确 pin（`torch_npu==2.12.0` 要求 `torch==2.12.0`），pip 会一并升级 torch（默认拉 CUDA 版 nvidia 依赖数 GB；纯 NPU 机器想省可加 `--index-url https://download.pytorch.org/whl/cpu` 装 torch CPU build，`==2.12.0` 仍匹配 `2.12.0+cpu`）。升级后务必 `python -c "import torch,torch_npu; torch.npu.set_device(0); x=torch.randn(8,8,device='npu:0'); print((x@x).sum().item())"` 实测算子可执行（别只看 device_count）。
+- **判定要点**：`device_count()` 返回 >0 ≠ NPU 可用；必须 `set_device` + 真实算子能跑通才算。旧 torch_npu + 950 系列芯片（950PR 或 950DT）必中此坑。env_probe 记 `torch_npu.__version__` + `npu-smi info -t board -i 0`（Chip Name，匹配 `Ascend950(PR|DT)` 即 950 系列，都需检查 soc 支持）。
+
+## 43. torchvision 也与 torch ABI 错配（扩展 #39，不只 torchaudio）
+- **症状**：升级 torch（如 2.12）后，`from transformers.models.<mm>_xxx import XxxForCausalLM` 报 `RuntimeError: operator torchvision::nms does not exist` 或 torchvision `.so undefined symbol`；而 `from transformers import AutoTokenizer` 正常。导入链：多模态文本头 → `modeling_utils` → `loss_utils` → `image_transforms` → `image_utils` → `from torchvision.io import ...` 即崩。
+- **根因**：同 #39，系统 torchvision 按旧 torch 编译，符号/算子注册不匹配；transformers 多模态模型模块间接 `import torchvision`。#39 只覆盖 torchaudio，**torchvision 是同一类坑但常被漏**。
+- **解法（首选正式库）**：装匹配当前 torch 的正式版 torchvision/torchaudio，import 即正常，无需打桩。torch 2.12.x 实测可行组合：`pip install torchvision==0.27.1`（自动带 +cu130，匹配 torch 2.12.1+cu130）+ `torchaudio==2.11.0`（华为 mirror 最新；虽版本号对应 torch 2.11，实测与 torch 2.12.1 import 兼容）。torchvision 版本对应表：torch 2.12↔torchvision 0.27.x、torch 2.11↔0.26.x、torch 2.10↔0.25.x（torchaudio 版本号则与 torch 主版本对齐：torchaudio 2.12.0↔torch 2.12）。装完 `python -c "import torch,torchvision,torchaudio; from transformers.models.qwen3_5 import Qwen3_5ForCausalLM"` 验证导入链不崩。注意 torch_npu 与 torch patch 版本：torchvision 0.27.1 会拉 torch 到 2.12.1，torch_npu 2.12.0（pin torch==2.12.0）实测仍兼容 2.12.1（950PR matmul 正常），但若 torch_npu 报 ABI 错则固定 torch==2.12.0 + 装匹配 0.27.0。
+- **解法（fallback 打桩）**：仅当匹配 torch 的 torchvision/torchaudio 正式版不可得（如 torch 太新还没配套 release、或离线无 mirror）时，才用 stub。把 #39 的 stub finder 同时拦 torchaudio **和 torchvision**。torchvision 需更强的桩——`from torchvision.io import ImageReadMode` 要取属性，空 `ModuleType` 会 `ImportError`，需 `__getattr__` 返回 sentinel 的 `_StubModule`：
+```python
+class _Any:
+    def __call__(self, *a, **k): return _Any()
+    def __getattr__(self, n): return _Any()
+_SENT = _Any()
+class _StubModule(types.ModuleType):
+    def __getattr__(self, name): return _SENT
+class _StubFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
+    def find_spec(self, fullname, path, target=None):
+        if fullname == 'torchaudio' or fullname.startswith('torchaudio.') \
+           or fullname == 'torchvision' or fullname.startswith('torchvision.'):
+            return importlib.machinery.ModuleSpec(fullname, self)
+    def create_module(self, spec): return _StubModule(spec.name)
+    def exec_module(self, module): module.__version__ = '0.0.0'; module.__file__ = '<stub>'
+sys.meta_path.insert(0, _StubFinder())
+```
+模板 `cpt_train.py.tmpl`/`eval_cpt.py.tmpl` 顶部用 `try: import torchaudio, torchvision; except: <stub>` 防御式——正式版可用时 try 成功 no-op、不生效；正式版崩了才走 stub。优先正式库，stub 仅兜底。
+
+## 44. 容器内存限制 + torch.load 大 ckpt 到 CPU → OOM SIGKILL(137)（静默死）
+- **症状**：eval/加载阶段 `torch.load(ckpt, map_location='cpu')` 一个大 state（如 4B fp32 = 16.8GB），叠加已建的 fp32 模型（16GB），进程被 `SIGKILL`（exit 137），**无任何 traceback/错误输出**（日志突然断在加载那行）。系统 `free -g` 显示 hundreds of GB available，看似不该 OOM。
+- **根因**：容器（K8s/Docker）环境的 cgroup 内存限制远小于宿主机视图（`free -g` 的 total 是宿主机，容器实际 limit 可能仅 24-32GB）；且 `/sys/fs/cgroup/memory.max` 可能不在标准路径或无权限读，查不到真实 limit。CPU 峰值 = 模型(16GB) + torch.load 的 state(16.8GB) + load_state_dict 复制 ≈ 32-49GB，超 cgroup limit → OOM killer 发 SIGKILL，python 来不及打印异常。
+- **解法**：别把大 state 一次性 load 到 CPU。改用 **`torch.load(ckpt, map_location='npu:0', weights_only=False)`** 把张量直接加载到 NPU（HBM 通常 32-128GB free，够），再 `load_state_dict` 跨设备 in-place copy 到 CPU 模型（逐参数 copy，CPU 只持模型本身 16GB，峰值≈16GB < limit）。即：`model = XxxForCausalLM(tc)`(CPU fp32) → `sd = torch.load(CKPT, map_location='npu:0')` → `model.load_state_dict(sd, strict=False)`(NPU→CPU copy) → `model.to(device)`。NPU 侧 16GB，CPU 侧 16GB，互不叠加。
+- **判定要点**：exit 137 + 无 traceback + 大 ckpt 加载 = 强烈暗示容器 OOM。查 cgroup limit：`cat /sys/fs/cgroup/memory.max`(v2) 或 `memory.limit_in_bytes`(v1)，不在标准路径则 `free -g` 不可信。训练时 `torch.save` 大 ckpt 不受影响（流式写盘，内存峰值低）；只有 `torch.load` 反序列化会峰值翻倍。
+
+## 45. meta 模型 + assign + to_empty 路线的两个陷阱（#44 的错误尝试）
+- **症状 A**：为省 CPU 内存用 `with torch.device('meta'): model=XxxForCausalLM(tc)` + `load_state_dict(sd, assign=True)` + `model.to_empty(device=device)`，结果模型输出全是随机（NLL=ln(vocab_size)、ppl=vocab_size、acc=0），等于没加载权重。
+- **根因 A**：`to_empty(device)` 会把**所有**未初始化 tensor（含 `assign` 刚赋入的真实权重）重新 materialize 成未初始化的 empty，覆盖了真实数据。assign 后**不能**再调 to_empty。
+- **症状 B**：去掉 to_empty 后，前向崩 `NotImplementedError: Cannot copy out of meta tensor; no data!`（在 RoPE `self.inv_freq`）。
+- **根因 B**：`inv_freq` 等 non-persistent buffer（`persistent=False`，不在 `state_dict`）在 meta 建模时被跳过初始化，`assign` 只覆盖 state_dict 里的键，这些 buffer 仍是 meta tensor，前向取值即崩。
+- **解法**：大模型 eval 加载**不要走 meta 路线**，直接用 #44 的"正常建 fp32 CPU 模型 + `map_location='npu'` 加载 + 跨设备 copy"——inv_freq 正常初始化、权重正确、CPU 峰值低。meta+assign 仅在确信无 non-persistent buffer 且不用 to_empty 时才可，风险高不推荐。

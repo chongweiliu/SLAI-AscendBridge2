@@ -1,5 +1,7 @@
 # Team-Lead Agent Memory
 
+> 索引：昇腾 CPT 环境踩坑（950 系列新芯片 950PR/950DT torch_npu 不支持需升级 / 容器内存限制致 torch.load 大 ckpt OOM / torch2.12 后 torchvision ABI 错配）见 `ascend_cpt_env_pitfalls.md`，已沉淀至 ascend-torch-cpt skill pitfalls #42-45。
+
 ## ⚠️ prompts/task_*.txt 中的人数是硬约束（2026-04-05）
 
 **规则**：当前运行实际加载的 `prompts/inbox.txt` + `prompts/task_*.txt` 是本轮最高优先级契约，其中写明的 agent 数量/并发数必须严格执行。

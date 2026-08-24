@@ -7,17 +7,26 @@
 import os, json, random, math
 import torch
 import torch_npu  # noqa: F401
-# 防御：坏掉的 torchaudio 会挡住 transformers 多模态文本头导入；先探测，坏了桩掉。见 pitfalls #39。
+# 防御：坏掉的 torchaudio/torchvision 会挡住 transformers 多模态文本头导入（image_utils→torchvision, audio_utils→torchaudio）；
+# torchvision 需带 __getattr__ sentinel 的 _StubModule（`from torchvision.io import X` 要取属性）。见 pitfalls #39/#43。
 try:
     import torchaudio  # noqa: F401
+    import torchvision  # noqa: F401
 except Exception:
     import sys, types, importlib.abc, importlib.machinery
-    sys.modules.pop('torchaudio', None)
+    sys.modules.pop('torchaudio', None); sys.modules.pop('torchvision', None)
+    class _Any:
+        def __call__(self, *a, **k): return _Any()
+        def __getattr__(self, n): return _Any()
+    _SENT = _Any()
+    class _StubModule(types.ModuleType):
+        def __getattr__(self, name): return _SENT
     class _StubFinder(importlib.abc.MetaPathFinder, importlib.abc.Loader):
         def find_spec(self, fullname, path, target=None):
-            if fullname == 'torchaudio' or fullname.startswith('torchaudio.'):
+            if fullname == 'torchaudio' or fullname.startswith('torchaudio.') \
+               or fullname == 'torchvision' or fullname.startswith('torchvision.'):
                 return importlib.machinery.ModuleSpec(fullname, self)
-        def create_module(self, spec): return types.ModuleType(spec.name)
+        def create_module(self, spec): return _StubModule(spec.name)
         def exec_module(self, module): module.__version__ = '0.0.0'; module.__file__ = '<stub>'
     sys.meta_path.insert(0, _StubFinder())
 from transformers import AutoModelForCausalLM, AutoTokenizer, AutoConfig
@@ -34,7 +43,8 @@ def load_model(src, device):
     if REMAP: raise SystemExit("REMAP=1：按 references/multimodal-remap.md 填重映射")
     if src=='cpt':
         model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, torch_dtype=torch.float32, trust_remote_code=True)
-        sd=torch.load(CKPT,map_location='cpu',weights_only=False)  # 本地自存 cpt ckpt，部分架构含非-tensor 全局需 weights_only=False（pitfalls #37）
+        # 大 ckpt map_location='cpu' 会叠加 CPU 模型致容器 OOM SIGKILL(137)（pitfalls #44）；改加载到 NPU 再跨设备 copy
+        sd=torch.load(CKPT,map_location=device,weights_only=False)  # weights_only=False 见 pitfalls #37
         model.load_state_dict(sd,strict=False)
     else:
         model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, torch_dtype=torch.float32, trust_remote_code=True)
