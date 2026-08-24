@@ -327,3 +327,30 @@ sys.meta_path.insert(0, _StubFinder())
 - **根因B**：扩散 pipeline 有 VAE(3D conv 重)+DiT(attention)+text_encoder 三个独立大组件，NPU 算子支持问题可能出在任一处，合练时定位难。
 - **解法B**：**先单组件 dummy smoke**：①DiT 前向反向用 `dummy latent [1,C,Tl,Hl,Wl]` + `dummy emb [1,L,D]`；②VAE encode 用 `dummy [1,3,T,H,W]`。各自通过再合练。早抓算子问题（如 Wan DiT attention + VAE 3D conv 在 950PR 实测都通过）。
 - **判定要点**：扩散 CPT 的 smoke 必须组件级，不能跳到合练。
+
+## 52. 扩散 VAE latent 归一化符号：`(raw-mean)/latents_std` 除，不是乘（910 回归发现）
+- **症状**：流匹配训练 loss 虚高 ~10×（如 910 上 loss 21 vs 同 convention 950PR 的 1.63），但 loss 仍下降、CPT 似"有效"。
+- **根因**：`AutoencoderKLWan.encode().latent_dist.sample()` 返回 **raw latent（无自动归一化）**。diffusers Wan pipeline 的 decode 是 `raw = stored * config.latents_std + config.latents_mean`，故 DiT 原生 latent 空间 = `stored = (raw - latents_mean) / latents_std`（**除**，单位方差）。若误写成 `*(latents_std)`（乘），latent 放大 std² 倍 → velocity target 同比放大 → MSE 虚高 ~std⁴（std~2 → ~16×）。raw 不归一化虽能跑（loss ~var(lat)+1），但与预训练 DiT 期望 scale 不对齐、CPT ckpt 不能直接进原 pipeline 生成。
+- **解法**：prepare 阶段 `lat = vae.encode(v).latent_dist.sample(); lat = (lat - latents_mean) / latents_std`（**除**），`latents_mean/std/z_dim` 读自 `vae.config`。eval 生成时 `vae.decode(lat)` 前先逆归一化 `lat = lat*latents_std + latents_mean`。`prepare_generative_data.py.tmpl` 默认 `LATENT_NORM=1` 开启；`=0` 存 raw（原 950PR 方式）。
+- **判定要点**：同 convention 下 loss 量级比正常高一个数量级 → 查归一化符号（乘 vs 除）。
+
+## 53. UMT5 必须用 UMT5EncoderModel，不要用 T5EncoderModel（910 回归发现）
+- **症状**：用 `T5EncoderModel.from_pretrained(text_encoder_dir)` 加载 UMT5，`LOAD REPORT` 报 `encoder.block.{1..23}.layer.0.SelfAttention.relative_attention_bias.weight | UNEXPECTED`，embedding 静默退化（loss 仍跑但文本条件不对齐）。
+- **根因**：UMT5 在**每层** block 都有 `relative_attention_bias`（universal 多语言机制），而 T5 只在 block 0 有；用 T5EncoderModel 加载会把 block1-23 的偏置当 UNEXPECTED 丢弃。
+- **解法**：`from transformers import UMT5EncoderModel; te = UMT5EncoderModel.from_pretrained(...)`（每层都有偏置，正确加载，无 UNEXPECTED）。CLIP 走 CLIPTextModel。`prepare_generative_data.py.tmpl` 已改用 UMT5EncoderModel。
+- **判定要点**：UMT5 加载时 `LOAD REPORT` 出现 `block.{1..23}.relative_attention_bias UNEXPECTED` → 用错了类。
+
+## 54. transformers 5.x + `_keep_in_fp32_modules` 的 DiT，`from_pretrained` 崩（910 回归发现）
+- **症状**：`WanTransformer3DModel.from_pretrained(dir, torch_dtype=float32)` 报 `ValueError: low_cpu_mem_usage cannot be False when keep_in_fp32_modules is True`；加 `low_cpu_mem_usage=True` 也救不回。
+- **根因**：WanTransformer3DModel 有 `_keep_in_fp32_modules = ["rope","time_embedder","scale_shift_table","norm1","norm2","norm3"]`；transformers 5.15.1 的检查要求 `low_cpu_mem_usage=True` 才能启用 keep_in_fp32，但该 kwarg 被前置逻辑吞掉/不生效。950PR（torch 2.12 + 另一版 transformers）未触发此检查。
+- **解法**：回退到 `from_config` + 手动 `load_state_dict` 绕开该机制：
+  ```python
+  cfg = json.load(open(f"{BK}/config.json"))
+  dit = WanTransformer3DModel.from_config(cfg, torch_dtype=torch.float32)
+  sd = load_file(f"{BK}/diffusion_pytorch_model.safetensors")
+  dit.load_state_dict(sd, strict=False)  # miss=0 正常(unexp 是非持久 buffer/rope freqs)
+  ```
+  `cpt_diffusion.py.tmpl`/`eval_diffusion.py.tmpl` 的 `load_backbone` 已内置 `try from_pretrained; except → from_config` 回退。
+- **判定要点**：报错信息含 `keep_in_fp32_modules`/`low_cpu_mem_usage` → 走 from_config 回退。跨 910/910C/950 都须带此 fallback。
+
+> 注：WanTransformer3DModel 不支持 `gradient_checkpointing_enable`（小 latent 如 `[1,16,4,32,56]` 在 64GB+ 卡上无需）；模板 `load_backbone` 已 `try/except` 仅防崩，每次跑打一行 `[gc]` 噪声可忽略。
