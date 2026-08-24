@@ -187,6 +187,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
   - 定性（可选）：采样生成转写 → 算 WER（需 jiwer/edit-distance）。
   - **不要**给音频-LLM 套纯文本 PPL/扩散 velocity MSE（语义不对：音频-LLM 的目标是条件转写 CE）。
 - 出 `eval_results.json` + 结论表，给"训练是否有效"结论（Δ 方向 + 是否过拟合）。
+- **【通用】过拟合检查（#61/#62，所有范式）**：①held-out **须用独立 test split**（非同源不同段——同源共享分布，评估失真）；②**训练 loss 趋近 0（<0.05）+ held-out 不改善 = 过拟合红旗**（小数据多 epoch 记忆样本）；③**数据量是泛化的关键杠杆（非步数）**：小数据多步→train_loss 虚低但泛化差；扩数据→train_loss 不到 0 但 held-out 大幅改善。MOSS 实证：8样本×25epoch train_loss 0.012 held-out -3%（过拟合）；50样本×6epoch train_loss 0.110 held-out -87%（泛化好）。优先扩数据再加步。
 - **FSDP2 大模型评估**：ckpt 是 `full_tensor()` 聚合的全量 state_dict，单卡直接 `load_state_dict` 即可（评估不需 FSDP2/DDP）。base 多模态走 remap。完整 9B FSDP2 实战案例（含结果表 + 与 0.8B 对比）见 `references/eval-metrics.md`。
 - **多卡训练后别立刻跑单卡评估**：8 卡 FSDP2/DDP 训练退出后 NPU driver **异步回收显存有延迟**（pitfalls #32），立刻 `model.to(npu)` 易 OOM（card 仅剩几百 MB free 但无残留进程）。训练退出后等几秒、`npu-smi` 确认卡空闲（或 `torch.empty(40GB)` 实测可分配）再跑评估；评估脚本载入前先 `torch.npu.empty_cache()`。
 - **ckpt 转 HF 可复用目录**（可选）：若用户想用 `from_pretrained` 直接加载 CPT 模型做推理/当新 base，把 `cpt_model_state.pt` 存成 HF 目录（拷 config.json+tokenizer 到 `outputs/cpt_hf_model/` + 存权重为 `model.safetensors`）。否则评估用 `load_state_dict` 即可。

@@ -75,3 +75,43 @@
 - 50 步 bs1(75 样本): first5→last5 0.473→0.109, held-out CE 0.810→0.218 (-73%)。
 - **200 步 bs2(1301 样本=全量一半): first5→last5 2.251→0.272 (-88%), held-out CE 0.810→0.145 (-82%)**。扩数据+加步数+bs2 显著优于 50 步(0.218→0.145)。
 - 全程 NPU 算子通过（audio_tower Whisper + LLM attention）；~0.83s/step(bs2)。
+
+## 数据规模 vs 泛化规律（MOSS CPT 双 run 实证，通用规律）
+
+> **这是所有 CPT 范式（文本/扩散/音频）通用的规律，非音频专属。**
+
+### 核心规律：数据量是泛化的关键杠杆，非步数
+
+| MOSS 0.9B + AISHELL-4 | 8 会议 × 200 步(25 epoch) | 50 会议 × 300 步(6 epoch) |
+|---|---|---|
+| 训练 loss (last5) | 0.012（near-0） | 0.110（健康） |
+| held-out CE delta | -3%（差） | **-87%（强）** |
+
+- **训练 loss 趋近 0（<0.05）= 过拟合红旗**（小数据多 epoch 记忆样本，非学模式）。8 会议 25 epoch → train_loss 0.012 但 held-out 仅 -3%（过拟合）。
+- **扩数据（8→50 会议）比加步数有效**：50 会议 6 epoch → train_loss 0.110（不 near-0）但 held-out -87%（真实泛化）。
+- **优先扩数据再加步**：小数据多步 = 白烧算力（train_loss 虚低、held-out 不动）。
+
+### held-out 评估须用独立 test split
+
+- **同源不同段**（如同一会议 120-180s 段）**非独立**（共享说话人/声学/主题）→ 评估失真。
+- **用独立 test split**（完全不同样本）：MOSS 实证同源不同段 -3%（误导），test 独立会议 -87%（真实）。
+- held-out delta 与 train_loss 不匹配（train→0 但 held-out 不动）→ 查 held-out 是否独立 + 是否过拟合。
+
+## MOSS-Transcribe-Diarize API 适配（forward kwarg 未标准化实证）
+
+音频-LLM 的 forward API **未跨模型标准化**（#63）：
+
+| 模型 | processor 返回 | forward kwarg | audio token |
+|---|---|---|---|
+| Qwen2-Audio | input_features + **feature_attention_mask** | input_features + **feature_attention_mask** | `<\|audio_bos\|>/<\|AUDIO\|>/<\|audio_eos\|>` |
+| MOSS | input_features + **audio_feature_lengths** | input_features + **audio_feature_lengths** | `<\|audio_start\|>/<\|audio_pad\|>/<\|audio_end\|>` |
+
+- **audio token 发现可通用**：`discover_audio_token_ids`（名含 audio）抓所有模型 ✓。
+- **forward kwarg 不通用**：换音频-LLM 须读其 `modeling_*.py` 的 forward 签名 + processor 返回键，按模型适配（#63）。
+- **trust_remote_code 模型**：MOSS 用 `AutoModelForCausalLM(trust_remote_code=True)`（auto_map 映射），非 AutoModelForConditionalGeneration。
+
+## 实战数据点（MOSS-Transcribe-Diarize 0.9B @ Ascend910C 单卡）
+- 0.9B(Qwen3 backbone 28层)，fp32 master 全量 CPT（8×0.9=7GB<<64GB，单卡 fits，无精度妥协），冻结 audio_tower(Whisper 307M)。
+- TextGrid→`[Sxx]时间戳文本`转换；8通道取ch0(#65)；120s分段(#64)。
+- 50会议×300步：first5→last5 1.119→0.110(-90%)，held-out(test独立会议) CE 1.106→0.146(**-87%**)，~0.45s/step。
+- 全程NPU算子通过；libgomp TLS(#55, import sklearn先)。
