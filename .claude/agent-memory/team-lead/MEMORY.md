@@ -2,6 +2,7 @@
 
 > 索引：昇腾 CPT 环境踩坑（950 系列新芯片 950PR/950DT torch_npu 不支持需升级 / 容器内存限制致 torch.load 大 ckpt OOM / torch2.12 后 torchvision ABI 错配）见 `ascend_cpt_env_pitfalls.md`，已沉淀至 ascend-torch-cpt skill pitfalls #42-45。
 > 索引：950PR 容器 cgroup 内存仅 32GB，多模态 remap 必须搬 NPU 不在 CPU 堆副本（SIGKILL 137）见 `cpt_950pr_32gb_cgroup.md`。
+> 索引：对 skill 的任何改动必须做改动前后回归验证（未改文件diff=0/纯追加/原路径关键词保留/ast.parse/引用完整），确保不破坏原有功能见 `skill_change_verify_protocol.md`。
 > 索引：gitcode 主仓库 SLAI/SLAI-AscendBridge2 的 PR/MR 提交合并流程（git config、令牌安全红线、v5 API 创建+合并 MR）见 `gitcode_mr_workflow.md`。
 
 ## ⚠️ prompts/task_*.txt 中的人数是硬约束（2026-04-05）
