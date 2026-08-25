@@ -44,7 +44,15 @@ def _container(statefulset: dict) -> dict:
 def _validate_pd_documents(
     documents: list[dict], request: dict, errors: list[str]
 ) -> list[str]:
+    scheduler = request.get("scheduler", {})
+    platform = str(scheduler.get("platform", "")).lower()
+    if platform not in PLATFORMS:
+        errors.append(f"unsupported Kubernetes platform: {platform}")
+    if request.get("target") != "scheduler":
+        errors.append("Kubernetes artifacts require target=scheduler")
     multi = request["multi_node"]
+    if multi.get("distributed_executor_backend") != "mp":
+        errors.append("Kubernetes PD deployment requires native mp")
     pd = multi["pd"]
     statefulsets = _by_kind(documents, "StatefulSet")
     deployments = _by_kind(documents, "Deployment")
@@ -249,8 +257,6 @@ def validate(documents: list[dict], request: dict | None = None) -> list[str]:
             errors.append("Kubernetes artifacts require target=scheduler")
         if request.get("deployment_mode") == "multi_node":
             multi = request.get("multi_node", {})
-            if multi.get("pd_disaggregation") is not False:
-                errors.append("Kubernetes v1 renderer does not support PD disaggregation")
             if multi.get("distributed_executor_backend") != "mp":
                 errors.append("Kubernetes v1 renderer requires native mp")
             if replicas != multi.get("node_count"):

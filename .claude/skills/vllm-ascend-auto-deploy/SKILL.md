@@ -185,7 +185,7 @@ KV replication。
 
 ## 执行流程
 
-1. gate 完成后，仅按目标读取一个 reference：本机读 [references/local.md](references/local.md)，SSH 读 [references/ssh.md](references/ssh.md)，调度平台读 [references/scheduler.md](references/scheduler.md)。
+1. gate 完成后，仅按目标读取一个 reference：本机读 [references/local.md](references/local.md)，SSH 读 [references/ssh.md](references/ssh.md)，调度平台读 [references/scheduler.md](references/scheduler.md)。同时按条件路由专项知识：驱动/固件或 NPU 不可见读 `ascend-driver-firmware`；多机预检读 `ascend-hccl-validation`；官方模型/profile 不覆盖或首次 forward 显示架构不支持时读 `vllm-ascend-model-adaptation`；生成最终命令前读 `vllm-ascend-dtype-selection`。任何节点级安装、升级、复位或重启必须另行取得明确授权。
 2. 将非敏感字段写入 `deploy-request.json`，运行：
 
    ```bash
@@ -202,12 +202,12 @@ KV replication。
    视为未命中并回退通用计算；禁止“近似套用”。配置摘要必须注明计划来源是
    `validated_profile` 还是 `generic_calculation`。
 4. 展示最终配置：申请资源、实际运行资源、TP/DP/EP、多机执行后端、PD 角色与作用域、版本、连接器/Direct、节点、镜像、挂载、网络、全部端口和命令摘要；随后用 `AskUserQuestion` 交互选择“执行部署 / 暂不执行”。多机默认显示 `distributed_executor_backend=mp`；只有当前提示词显式要求 Ray 时才可显示 `ray`，并注明其授权来源。
-5. 只有用户明确确认后才生成部署文件并执行 Shell 语法检查和平台 dry-run。`target=local` 调用 `scripts/render_local_artifacts.py` 生成 `deploy-local.sh` + `local-node.sh`；`target=ssh` 调用 `scripts/render_ssh_artifacts.py` 生成 `deploy-ssh.sh` + `remote-node.sh`；`target=scheduler` 仅支持 Kubernetes/CCE/ACK，调用 `scripts/render_kubernetes_artifacts.py`。本机/SSH 产物包含冻结校验、只读 Ascend 预检和语义验收器；预检必须通过 `npu-smi` 识别所选物理设备的 `Ascend*` 型号，并记录板卡 Product Name、Board ID、PCI Device ID、Subsystem Device ID 和 Chip Count。按华为 PCI Device ID 将 `0xD802` 识别为 A2、`0xD803` 识别为 A3，无法识别代际时禁止启动。当前可执行 renderer 支持单机及非 PD 原生 MP 多机；PD 规划/profile 能力不能表述成可下发能力，SSH/Kubernetes 的 PD renderer 与真实 E2E 补齐前必须明确拒绝。
+5. 只有用户明确确认后才生成部署文件并执行 Shell 语法检查和平台 dry-run。`target=local` 调用 `scripts/render_local_artifacts.py` 生成 `deploy-local.sh` + `local-node.sh`；`target=ssh` 调用 `scripts/render_ssh_artifacts.py` 生成 `deploy-ssh.sh` + `remote-node.sh`；`target=scheduler` 仅支持 Kubernetes/CCE/ACK，调用 `scripts/render_kubernetes_artifacts.py`。本机/SSH 产物包含冻结校验、只读 Ascend 预检和语义验收器；预检必须通过 `npu-smi` 识别所选物理设备的 `Ascend*` 型号，并记录板卡 Product Name、Board ID、PCI Device ID、Subsystem Device ID 和 Chip Count。按华为 PCI Device ID 将 `0xD802` 识别为 A2、`0xD803` 识别为 A3，无法识别代际时禁止启动。SSH 与 Kubernetes renderer 均支持已规划的 PD 角色下发：生成 Prefill、Decode、Mooncake KV transfer 和 Proxy 产物，并在真实验收阶段检查 KV transfer 与 Proxy 推理；PD 规划/profile 能力不等于真实 E2E 成功，版本、网络、共享模型和 direct transport 仍须通过预检。
    冻结前运行 `python scripts/validate_frozen_artifact.py DEPLOY_DIR --write`，
    提交前再不带 `--write` 检查精确文件集合和哈希；不能只用
    `sha256sum -c`，因为它不会发现额外的旧日志或编译缓存。
 6. 多机调度任务若允许单 Pod 独立重启或换节点，必须用 `scripts/stable_cluster_supervisor.py` 包裹每个角色入口；共享状态目录必须按冻结任务唯一命名。session/IP 变化立即重建，瞬时存储/心跳不可用按 `--unavailable-grace-seconds` 有限容忍；保留非零的 `--child-tail-lines`，让容器重启前把角色末尾输出写入共享 `events/rank-*-child-tail.log`。验收时同时检查事件和子进程末尾日志，区分首发根因与协调终止产生的次生异常。同一节点有多个本地 DP 实例时使用 `scripts/launch_online_dp.py`，不得使用忽略子进程 `exitcode` 的启动器。用户确认执行后提交部署；轮询进程/Pod。
-7. 所有节点 `/v1/models` 就绪后发送确定性最小推理请求，并用 `scripts/validate_inference_result.py` 对解析后的答案做严格断言。
+7. 所有节点 `/v1/models` 就绪后发送确定性最小推理请求，并用 `scripts/validate_inference_result.py` 对解析后的答案做严格断言。随后按 `vllm-ascend-consistency-validation` 比较部署前基线与当前服务；没有可用基线时至少做重复确定性请求、响应 schema 和任务语义检查。启动、首个 forward、通信、OOM 或 KV transfer 失败时进入 `vllm-ascend-troubleshooting`，保留最早错误和最小复现证据。
 8. 返回 endpoint、PID/job ID、日志位置、停止命令和对应一键脚本路径。失败时只停止本次创建的资源。
 
 PD 验收还必须确认 Prefill、Decode、Proxy 三类进程均健康，Proxy 真实推理通过语义断言，KV transfer 日志显示传输成功且未静默 fallback。`use_ascend_direct=true` 失败时不得自动关闭；换干净节点复测仍失败则报告阻塞。只有用户明确接受降级时才能用 `false` 做独立故障隔离，且不能用降级结果替代 direct 成功标准。

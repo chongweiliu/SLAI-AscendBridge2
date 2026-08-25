@@ -45,12 +45,16 @@ manifest，先 dry-run，再提交并解析 job ID。Pending 使用有界等待�
    port-forward，并用真实最小推理完成语义断言。
 5. 用 `deploy-kubernetes.sh status|logs|delete` 查询、取日志和清理。
 
-当前原生 Kubernetes v1 支持单机，以及非 PD 的多机原生 `mp` 部署。多机时
-TP 在单 Pod/节点内，DP 跨 Pod；`data_parallel_size` 必须能被节点数整除，
-每节点运行 NPU 数等于 `TP * local_DP`。API Service 只选择 rank 0，headless
-Service 为各 rank 提供稳定 DNS。
+当前原生 Kubernetes v1 支持单机、非 PD 的多机原生 `mp`，以及基于 Mooncake
+的多机 PD 分离。非 PD 多机时 TP 在单 Pod/节点内、DP 跨 Pod；
+`data_parallel_size` 必须能被节点数整除，每节点运行 NPU 数等于 `TP * local_DP`。
+PD 模式为每个 P/D 实例生成独立 StatefulSet、headless/API Service、KV transfer
+端口和一个 Proxy Deployment/Service；API 请求必须经 Proxy 发送。所有角色共享
+相同模型制品并使用同一套版本/连接器契约。
 
-当前原生 Kubernetes v1 明确拒绝 PD 分离和 Ray。不得因集群安装了 Ray 而
-自动切换；只有用户显式要求 Ray 时才进入后续专用实现，而不是复用本清单。
+当前原生 Kubernetes v1 仍明确拒绝 Ray。不得因集群安装了 Ray 而自动切换；
+只有用户显式要求 Ray 时才进入后续专用实现，而不是复用本清单。PD 分离可以
+渲染和提交，但不能把 YAML 生成成功当作部署成功：必须等待 P/D/Proxy 健康，
+确认 KV transfer 成功且没有静默 fallback，再通过 Proxy 做真实推理验收。
 CCE/ACK 是否可直接使用同一清单，取决于目标集群已安装兼容的昇腾设备插件、
 网络组件、存储类/PVC 和镜像访问配置；渲染器不写入云账号或临时凭据。

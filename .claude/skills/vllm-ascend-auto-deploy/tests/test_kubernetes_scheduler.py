@@ -224,6 +224,46 @@ class KubernetesSchedulerTests(unittest.TestCase):
         )
         subprocess.run(["bash", "-n", str(output / "deploy-kubernetes.sh")], check=True)
 
+    def test_pd_manifest_validator_keeps_platform_and_mp_guards(self) -> None:
+        request = request_fixture()
+        request["multi_node"]["pd_disaggregation"] = True
+        request["multi_node"]["pd"] = {
+            "prefill_instance_count": 1,
+            "decode_instance_count": 1,
+            "prefill_node_count": 1,
+            "decode_node_count": 1,
+            "prefill_runtime_npu_per_node": 8,
+            "decode_runtime_npu_per_node": 8,
+            "prefill_parallel_scope": "independent_instances",
+            "decode_parallel_scope": "independent_instances",
+            "prefill_tensor_parallel_size": 8,
+            "prefill_data_parallel_size": 1,
+            "decode_tensor_parallel_size": 8,
+            "decode_data_parallel_size": 1,
+            "prefill_expert_parallel": True,
+            "decode_expert_parallel": True,
+            "vllm_ascend_version": "0.23.0",
+            "connector": "MooncakeConnectorV1",
+            "use_ascend_direct": True,
+            "kv_port_base": 36000,
+            "proxy_placement": "prefill-1",
+            "proxy_port": 9000,
+            "prefill_service_port_base": 7100,
+            "decode_service_port_base": 7200,
+            "prefix_caching": False,
+            "configuration_source": "official_pd_guide",
+        }
+        _, documents = self.render_fixture(request)
+        from validate_kubernetes_manifest import validate  # noqa: E402
+
+        request["target"] = "wrong"
+        errors = validate(documents, request)
+        self.assertIn("Kubernetes artifacts require target=scheduler", errors)
+        request["target"] = "scheduler"
+        request["multi_node"]["distributed_executor_backend"] = "ray"
+        errors = validate(documents, request)
+        self.assertIn("Kubernetes PD deployment requires native mp", errors)
+
     def test_invalid_local_dp_topology_is_rejected(self) -> None:
         request = request_fixture()
         request["multi_node"]["data_parallel_size"] = 3
