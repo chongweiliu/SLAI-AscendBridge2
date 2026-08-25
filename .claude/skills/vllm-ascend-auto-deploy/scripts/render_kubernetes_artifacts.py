@@ -94,8 +94,6 @@ def _runtime(request: dict) -> dict:
     mode = request["deployment_mode"]
     if mode == "multi_node":
         multi = request["multi_node"]
-        if multi.get("pd_disaggregation") is not False:
-            raise ValueError("Kubernetes v1 renderer does not support PD disaggregation")
         if multi.get("distributed_executor_backend") != "mp":
             raise ValueError("Kubernetes deployments require distributed_executor_backend=mp")
         node_count = _positive_int(multi.get("node_count"), "multi_node.node_count")

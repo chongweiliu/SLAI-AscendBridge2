@@ -60,6 +60,8 @@ v2.2 新增 `cannbot-adapter` Agent、CANNBot 协同工作流和项目内同步�
 - 优先复用 `adaptations/` 中已有模型制品；未找到时可选择外部权重路径或自动下载准备
 - 根据模型 `config.json`、可用 NPU 和官方模型配置自动规划 TP、DP、EP 等并行参数
 - 自动检查 Ascend 硬件、模型权重、镜像/运行环境、端口、网络和资源约束
+- 内置 vLLM-Ascend 系统排障、HCCL 通信验证、未原生支持模型的适配路径和 dtype 决策
+- 支持部署前后的服务一致性验证，以及驱动/固件/CANN 的只读诊断与授权修复流程
 - 自动生成本机、SSH 或 Kubernetes 部署脚本与 YAML，并执行语法检查和 dry-run
 - 服务启动后通过 OpenAI 兼容 API 发起真实推理请求；只有健康检查和语义验收均通过才报告部署成功
 - 实际启动或提交前先展示完整配置摘要，并等待用户明确确认
@@ -88,6 +90,12 @@ SLAI-AscendBridge2/
 │   │   └── ascend-cannbot-pipeline.js # CANNBot 四角色协同编排
 │   └── skills/
 │       ├── vllm-ascend-auto-deploy/   # vLLM-Ascend 自动部署技能、知识库、脚本和模板
+│       ├── vllm-ascend-troubleshooting/ # 启动、运行、通信和 PD 故障排查
+│       ├── ascend-hccl-validation/    # 多机 HCCL 静态与运行前验证
+│       ├── vllm-ascend-model-adaptation/ # 非原生模型适配路径
+│       ├── vllm-ascend-dtype-selection/ # dtype 约束决策
+│       ├── vllm-ascend-consistency-validation/ # 服务一致性验收
+│       ├── ascend-driver-firmware/    # 驱动、固件和 CANN 诊断
 │       └── ascend-torch-cpt/          # 昇腾 NPU 继续预训练(CPT)技能、知识库、脚本模板
 ├── .agents -> .claude                 # 兼容部分 agent 工具的目录入口
 ├── AGENTS.md -> CLAUDE.md             # 兼容 AGENTS.md 约定
@@ -570,12 +578,12 @@ Agent 会继续收集目标主机、用户名和认证方式。密码、Token �
 描述模型和部署需求
 -> 选择单机/多机及部署目标
 -> 解析或准备模型权重
--> 检查 Ascend 环境与部署约束
+-> 检查驱动/固件/CANN、HCCL、dtype 与部署约束
 -> 自动规划 TP/DP/EP 或 PD 拓扑
 -> 展示完整配置摘要
 -> 用户确认执行
 -> 生成部署文件并启动服务
--> 通过 OpenAI 兼容 API 完成真实推理验收
+-> 通过 OpenAI 兼容 API 完成真实推理与服务一致性验收
 ```
 
 部署成功后，Agent 会返回：

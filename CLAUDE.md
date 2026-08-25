@@ -55,7 +55,14 @@ SLAI-AscendBridge2/
     ├── model-files-override/  # model_files 本地覆盖，性能优化测试（不改 models 缓存）
     ├── torch-npu-optimization/  # torch_npu 推理优化：融合算子替换
     ├── ascend-diffusers-optimization/  # diffusers 图像/视频 pipeline 推理优化
-    └── ascend-profiling/   # NPU 性能分析：torch_npu.profiler L0/L1/L2 + MindStudio Insight
+    ├── ascend-profiling/   # NPU 性能分析：torch_npu.profiler L0/L1/L2 + MindStudio Insight
+    ├── vllm-ascend-auto-deploy/ # vLLM-Ascend 本机/SSH/Kubernetes/PD 自动部署
+    ├── vllm-ascend-troubleshooting/ # vLLM-Ascend 系统排障
+    ├── ascend-hccl-validation/ # 多机 HCCL 验证
+    ├── vllm-ascend-model-adaptation/ # vLLM 非原生模型适配
+    ├── vllm-ascend-dtype-selection/ # dtype 决策
+    ├── vllm-ascend-consistency-validation/ # 服务一致性验证
+    └── ascend-driver-firmware/ # 驱动、固件和 CANN 诊断
 .agents -> .claude
 AGENTS.md -> CLAUDE.md
 adaptation/

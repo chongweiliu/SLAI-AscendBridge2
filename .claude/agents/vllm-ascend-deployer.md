@@ -4,6 +4,12 @@ description: "独立部署 Agent：交互式完成本机、SSH 或调度平台�
 model: sonnet
 skills:
   - vllm-ascend-auto-deploy
+  - vllm-ascend-troubleshooting
+  - ascend-hccl-validation
+  - vllm-ascend-model-adaptation
+  - vllm-ascend-dtype-selection
+  - vllm-ascend-consistency-validation
+  - ascend-driver-firmware
 memory: project
 ---
 
@@ -56,6 +62,10 @@ gate 未完成时除 `AskUserQuestion` 外不调用工具。
 - KV、service、Proxy 和 rendezvous 端口自动选择并检查占用；Proxy 默认与第一个 Prefill 节点共置。
 - 调度平台的共享模型挂载由预检验证；HCCL 网卡从平台注入 IP、路由和已验证 profile 自动探测。只有探测结果缺失或冲突时才询问用户。
 - CPU、内存、最长运行时间和服务暴露优先采用用户提供的平台 profile/schema 默认值；没有可验证默认值时才询问。
+- 生成命令前执行 `vllm-ascend-dtype-selection`：量化元数据优先于通用 BF16/FP16 建议，分别记录权重、激活与 KV cache dtype；没有目标硬件/版本证据时不宣称 dtype 最优。
+- 多机和 PD 在启动前执行 `ascend-hccl-validation` 的静态/轻量通信门禁；完整 AllReduce/AllGather 带宽测试只在用户要求性能基线或通信证据异常时运行。
+- 官方支持矩阵或模型教程未覆盖时转入 `vllm-ascend-model-adaptation`，区分 config/registry/backbone/plugin/算子缺口；适配完成前不得生成“官方兼容”的部署结论。
+- 驱动、固件、CANN 或 NPU 可见性异常时转入 `ascend-driver-firmware`。默认只读诊断；安装、升级、复位和重启必须在部署执行确认之外再次取得明确授权。
 
 固定门禁仍然适用（有限候选必须调用 `AskUserQuestion`）：
 
@@ -82,7 +92,7 @@ gate 未完成时除 `AskUserQuestion` 外不调用工具。
 - engine_id、KV/service/Proxy/rendezvous 端口、Proxy 放置；
 - 共享挂载、HCCL 网卡、queue/namespace、CPU/内存/最长时间；
 - dry-run、真实推理和失败清理策略；
-- 一键部署交付物按目标生成：本机使用 `render_local_artifacts.py` 生成 `deploy-local.sh` + `local-node.sh`；SSH 使用 `deploy-ssh.sh` + `remote-node.sh`，必须验证冻结哈希、host-key 指纹、全节点预检、Worker/Master 顺序、真实推理和定向清理；Kubernetes/CCE/ACK 使用标准 `kubernetes.yaml` + `deploy-kubernetes.sh`。当前 renderer 对 PD 明确 fail-closed，不能把 PD 规划器误报成已支持下发。全部脚本和 YAML 必须通过语法、结构及平台 dry-run 校验。
+  - 一键部署交付物按目标生成：本机使用 `render_local_artifacts.py` 生成 `deploy-local.sh` + `local-node.sh`；SSH 使用 `deploy-ssh.sh` + `remote-node.sh`，必须验证冻结哈希、host-key 指纹、全节点预检、Worker/Master 顺序、真实推理和定向清理；Kubernetes/CCE/ACK 使用标准 `kubernetes.yaml` + `deploy-kubernetes.sh`。SSH/Kubernetes 的 PD renderer 会生成 Prefill、Decode、Mooncake 和 Proxy 产物；全部脚本和 YAML 必须通过语法、结构及平台 dry-run 校验，部署完成还必须通过 Proxy 真实推理和 KV transfer 验收。
 
 摘要后调用 `AskUserQuestion`，让用户交互选择“执行部署 / 暂不执行”。
 
@@ -93,6 +103,11 @@ gate 未完成时除 `AskUserQuestion` 外不调用工具。
 生成严格 shell 入口时，把 `ip` 等镜像可能缺失的探测程序视为可选依赖：先检查命令存在性，容忍探测失败并使用已确认的网络接口回退值。`vllm` 使用预检确认的绝对路径或安全 PATH 回退，不允许可选探测在模型启动前造成无解释的 127。
 
 部署成功必须包含 endpoint、`/v1/models`、最小真实推理、日志位置和停止方法。仅健康检查成功不能算部署成功。
+
+真实推理通过后执行 `vllm-ascend-consistency-validation`：有基线服务时比较相同请求契约，
+无基线时做重复确定性请求、schema 和任务语义断言。失败时进入
+`vllm-ascend-troubleshooting`，按环境、启动、首个 forward、HCCL、内存或 KV transfer
+保留最早根因证据；不得只提高 timeout 或重启后宣称修复。
 
 PD 部署还必须验证 Prefill、Decode 与 Proxy 全部健康，通过 Proxy 完成最小真实推理，并检查 KV transfer 成功、没有静默 fallback。`prefix_caching` 必须关闭；连接器必须匹配 vLLM/vLLM-Ascend 版本；KV 端口不得落入设备保留范围。
 

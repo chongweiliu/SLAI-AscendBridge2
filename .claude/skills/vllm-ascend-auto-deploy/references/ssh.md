@@ -33,10 +33,14 @@ SSH v1 支持：
   `source_user_bashrc`，在内存中恢复容器运行环境，不把环境内容写入产物；
 - 每节点独立指定 `device_ids`、通信 IP/网卡；
 - SSH Agent、密钥或一次性交互密码认证；
+- Prefill/Decode 分离：按角色启动 Prefill、Decode、Mooncake KV transfer 和 Proxy，
+  并通过 Proxy 完成真实推理验收；
 - 通过 SSH 隧道执行 `/v1/models` 和真实最小推理验收。
 
-SSH v1 明确不支持 PD 分离、自动 Ray、自动复制大模型权重、把密码或私钥写入
-部署包。缺少这些能力时必须报告不支持，不能生成看似可用的脚本。
+SSH v1 仍不支持自动 Ray、自动复制大模型权重、把密码或私钥写入部署包。
+PD 不是“仅生成规划”的能力：renderer 会生成 P/D 角色命令、Mooncake 参数和
+Proxy 启动入口，但执行前必须验证版本兼容、角色间 KV 端口可达、共享模型路径
+和 direct transport；任一条件不满足时停止并报告具体阻塞。
 
 ## 产物与执行
 
