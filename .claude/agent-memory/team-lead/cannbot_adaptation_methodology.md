@@ -93,3 +93,26 @@ cannbot-adapter 的自然触发点是个架构关键点。**不能只依赖 adap
 **结论**：Reviewer 验收必须含**真实权重 fuzz**（加载 pretrained 跑 50+ 样本 op vs golden，覆盖实际模型配置），不能只 synthetic test_torch.py。Developer 的 test 套件常选安全路径，与生产路径脱节。cannbot-adapter.md §1.2 的 Reviewer 职责应明确要求真实权重端到端验证。两个算子都因此返工 Developer。
 
 **cannbot 算子集成 .contiguous() 通用规则（实测·重要）**：cannbot Ascend C 算子**按裸指针读输入、不遵守 torch strides**。集成 patch 必须对所有 op 输入 `.contiguous()`，尤其来自 `torch.split`/`transpose`/`view` 的张量。曾出现的真实根因（3 次误诊后定位）：上游库计算图里某张量是 torch.split 产生的非连续 view，直接喂 op → 读错位内存 → 输出发散（被误判为"bf16 精度悬崖"/"stream 取错流"）。修复：patch 对所有输入 `.contiguous()` → 输出 bit-exact。**隔离测试盲区**：`.detach().cpu().to(DEVICE)` 跨设备拷贝会静默使张量连续，掩盖此问题；真实 pipeline 计算图里张量保持非连续才暴露。所有 cannbot 算子集成都应遵守此规则。
+
+## ⚠️ 算子缺口分析必须基于完整官方推理流程（RoseTTAFold TRFold 重大教训，2026-08-25）
+
+**核心教训**：cannbot 触发判定的前提是"算子缺口分析准确"。而算子缺口分析**必须跑通官方完整推理流程（含 forward 之后的所有后处理/折叠/细化步骤）**才能准确，否则会误判"cannbot 不需要触发"。
+
+**RoseTTAFold 实踩**：
+- 第一次算子缺口分析**只看 forward**（且用缩减 config n_module=1 的 dry-run），得出"无算子缺口、cannbot 不触发"——**错的**。
+- 官方 `predict_e2e.py` 完整流程是：forward → softmax distogram → **TRFold 折叠后处理**（Adam 200步把 distogram 优化成 3D 结构）→ extend O原子 → write_pdb。这个 TRFold 阶段一开始完全没跑，算子缺口分析自然漏掉它。
+- 直到要和官方 PDB 对比、被迫跑官方完整流程（n_module=8 + TRFold），才暴露 TRFold 一连串 NPU 适配问题：float64 不被 aclnn 支持、float32 下 NaN、Adam CUDA health check 报错。
+
+**TRFold 的缺口性质（cannbot 仍不触发的正确理由）**：
+- TRFold 算子（norm/masked_fill/einsum/conv1d/svd/acos/atan2/cross）在 float32 下 **NPU 全部原生支持，0 CPU fallback**（profiling 实证）。
+- 真正问题是 **dtype 限制**（原版用 float64，NPU aclnn 不支持 DT_DOUBLE）+ **数值稳定性**（float32 下 Adam 梯度爆炸）。
+- 解法是纯 torch patch（float64→float32 + grad_clip + nan_to_num + Adam health check 绕过），**不是 cannbot 新算子**——算子本身 NPU 都有，只是 dtype/数值问题。
+- **cannbot 4 角色不触发**是正确结论，但这次是基于完整流程分析得出的，不是第一次漏 TRFold 的误判。
+
+**How to apply（cannbot 协同适配必做）**：
+1. **适配前先画完整 pipeline**：读官方代码，列出输入预处理→forward→所有后处理(折叠/细化/迭代优化/解码)→输出，逐个确认 NPU 可跑，再下"cannbot 不触发"结论。任何没跑过的步骤都藏缺口。
+2. **算子缺口分析用官方完整 config**（真实参数，非缩减 dry-run）+ 跑到**最终输出步骤**。dry-run 用缩减 config 只验证"能跑通"，会漏掉完整 config 才暴露的算子/数值问题。
+3. **区分"算子缺失"和"dtype/数值限制"**：profiling 显示 0 CPU fallback 但仍报错 → 不是缺算子，是 dtype（float64 不支持）或数值稳定性问题 → 纯 torch patch，不上 cannbot。cannbot 只在"NPU 真的没有该算子"时才触发。
+4. **和官方参考对比必须复现同一条流程到同一步骤**。RoseTTAFold 官方 example 的 t000_.e2e.pdb 是纯 predict_e2e.py 产物（无 PyRosetta），曾误以为"官方经 PyRosetta 细化"是偷懒借口——要跑通同一条流程对齐，不能用"流程不同"当挡箭牌。看到"流程不同"先怀疑自己漏了步骤。
+
+关联 [[understand-full-official-pipeline-before-adapt]] [[rosettafold-adaptation-issues]]。
