@@ -1,20 +1,0 @@
-[Setup] Model cache: /mnt/workspace/SLAI-AscendBridge2/adaptations/google_t5_t5_small/models
-[Device] NPU 0: free HBM 60.8 GiB
-[Device] NPU 1: free HBM 61.1 GiB
-[Device] Huawei Ascend NPU detected, selected npu:1
-[Setup] Using device: npu:1
-[Setup] Loading tokenizer for google-t5/t5-small...
-[Setup] Config loaded: model_type=t5, encoder/decoder layers=6
-[Setup] Attempting to load pre-trained weights...
-Loading weights:   0%|          | 0/131 [00:00<?, ?it/s]Loading weights: 100%|██████████| 131/131 [00:00<00:00, 10079.87it/s]
-/mnt/workspace/SLAI-AscendBridge2/adaptations/google_t5_t5_small/.venv/lib/python3.12/site-packages/transformers/models/t5/modeling_t5.py:258: UserWarning: Cannot create tensor with interal format while allow_internel_format=False, tensor will be created with base format. (Triggered internally at ../torch_npu/csrc/aten/common/TensorFactories.cpp:340.)
-  relative_position_if_large, torch.full_like(relative_position_if_large, num_buckets - 1)
-[Setup] Pre-trained weights loaded
-[Setup] Model on device: npu:1
-[Run] Input: translate English to German: The house is wonderful.
-[Run] Generating...
-[Run] Generated 7 tokens
-[Run] Output token ids: [0, 644, 4598, 229, 19250, 5, 1]
-[Run] Output: Das Haus ist wunderbar.
-[Run] Generation time: 0.2783 seconds
-[Success] Demo completed.

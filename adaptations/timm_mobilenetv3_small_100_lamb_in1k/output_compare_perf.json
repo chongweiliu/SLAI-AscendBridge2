@@ -1,8 +1,0 @@
-{
-  "text_match_rate": 1.0,
-  "top5_match_rate": 1.0,
-  "cosine_similarity": 1.0,
-  "baseline_samples": 50,
-  "perf_samples": 50,
-  "total_samples": 50
-}
