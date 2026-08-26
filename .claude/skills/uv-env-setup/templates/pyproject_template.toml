@@ -6,18 +6,34 @@ requires-python = ">=3.10, <3.13"
 dependencies = ["transformers", "accelerate"]
 
 [project.optional-dependencies]
-cuda = ["torch>=2.6.0", "torchaudio>=2.6.0"]
-ascend = ["torch>=2.6.0", "torch-npu>=2.6.0"]
+# CANN 9.0.0（最新主流版本，含 FlashAttention 内核）配套：torch 2.10.0 + torch-npu 2.10.0
+# 注意：8.3.RC1 及更早 CANN 无 FlashAttention 编译内核（headers 有但 .o 无），
+#   F.scaled_dot_product_attention 会报 "Cannot find binary for op FlashAttentionScore"。
+#   必须用 9.0.0（或 8.5.0）才能让 FA 算子可用。
+ascend = ["torch==2.10.0", "torch-npu==2.10.0"]
+cuda = ["torch==2.10.0", "torchaudio==2.10.0"]
 
 [tool.uv]
 index-strategy = "unsafe-best-match"
 conflicts = [[{ extra = "cuda" }, { extra = "ascend" }]]
 python-install-mirror = "https://ghfast.top/github.com/astral-sh/python-build-standalone/releases/download"
 
+# torch 取 PyTorch 官方 CPU index（download.pytorch.org/whl/cpu）。
+# ⚠️ 不要把 torch 指向 ascend-repo（repo.huaweicloud.com）：
+#    ascend-repo 的 torch wheel 是残缺 stub（缺 torch._vendor / torch._strobelight，
+#    torch._C 仅 ~132KB），import 直接 ModuleNotFoundError。torch 必须从 PyTorch 官方拿完整 wheel。
+# 国内 fallback：download.pytorch.org 在国内约 193KB/s（139MB 需 ~12 分钟），若太慢或不可达，
+#   把 torch 的 index 换成 pypi.tuna（https://pypi.tuna.tsinghua.edu.cn/simple），它镜像了完整 torch wheel 且 ~450KB/s。
 [[tool.uv.index]]
-name = "pytorch-cu124"
-url = "https://download.pytorch.org/whl/cu124"
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
 explicit = true
+
+# 国内 PyPI 镜像（torch 的 fallback；普通 wheel 也在 PyPI 上，完整 wheel）
+[[tool.uv.index]]
+name = "pypi-tuna"
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+explicit = false
 
 [[tool.uv.index]]
 name = "ascend-repo"
@@ -25,11 +41,11 @@ url = "https://repo.huaweicloud.com/repository/pypi/simple"
 explicit = true
 
 [tool.uv.sources]
-torch = [
-    { index = "pytorch-cu124", extra = "cuda" },
-    { index = "ascend-repo", extra = "ascend" },
-]
-torchaudio = [{ index = "pytorch-cu124", extra = "cuda" }]
+# torch / torchaudio 一律走 PyTorch 官方（完整 wheel），两个 extra 都如此
+# 国内慢时把 index 换成 "pypi-tuna"
+torch = [{ index = "pytorch-cpu", extra = "ascend" }, { index = "pytorch-cpu", extra = "cuda" }]
+torchaudio = [{ index = "pytorch-cpu", extra = "cuda" }]
+# torch-npu 走 ascend-repo（华为镜像，torch_npu 官方发布渠道）
 torch-npu = [{ index = "ascend-repo", extra = "ascend" }]
 
 [tool.ruff]
