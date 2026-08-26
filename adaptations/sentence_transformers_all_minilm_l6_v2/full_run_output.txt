@@ -1,18 +1,0 @@
-[Setup] Model cache: /mnt/workspace/SLAI-AscendBridge2/adaptations/sentence_transformers_all_minilm_l6_v2/models
-[Device] NPU 0: free HBM 60.9 GiB
-[Device] NPU 1: free HBM 61.1 GiB
-[Device] Huawei Ascend NPU detected, selected npu:1
-[Setup] Using device: npu:1
-[Setup] Loading tokenizer for sentence-transformers/all-MiniLM-L6-v2...
-[Setup] Config loaded: model_type=bert, layers=6
-[Setup] Attempting to load pre-trained weights...
-Loading weights:   0%|          | 0/103 [00:00<?, ?it/s]Loading weights: 100%|██████████| 103/103 [00:00<00:00, 9486.46it/s]
-[Setup] Pre-trained weights loaded
-[Setup] Model on device: npu:1
-[Run] Input: ['The cat sits on the mat.', 'A cat is sitting on a mat.', 'The stock market crashed yesterday.']
-[Run] Encoding sentences...
-[Run] Embedding dim: 384, dtype=torch.float32
-[Run] Output: cos(anchor, similar)=0.9717, cos(anchor, unrelated)=0.1048
-[Run] Encoding time: 0.2262 seconds
-[Run] Similarity ordering correct: similar sentence scored higher than unrelated one.
-[Success] Demo completed.

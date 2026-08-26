@@ -1,19 +1,0 @@
-[Setup] Model cache: /mnt/workspace/SLAI-AscendBridge2/adaptations/openai_community_gpt2/models
-[Device] NPU 0: free HBM 60.8 GiB
-[Device] NPU 1: free HBM 61.1 GiB
-[Device] Huawei Ascend NPU detected, selected npu:1
-[Setup] Using device: npu:1
-[Setup] Loading tokenizer for openai-community/gpt2...
-[Setup] Config loaded: model_type=gpt2, layers=12
-[Setup] Attempting to load pre-trained weights...
-Loading weights:   0%|          | 0/148 [00:00<?, ?it/s]Loading weights: 100%|██████████| 148/148 [00:00<00:00, 9908.33it/s]
-[Setup] Pre-trained weights loaded
-[Setup] Model on device: npu:1
-[Run] Input: Hello, this is a test run on Huawei Ascend NPU.
-[Run] Generating...
-[Run] Generated 33 tokens
-[Run] Output: Hello, this is a test run on Huawei Ascend NPU.
-
-The Huawei Ascend NPU is a dual-core, 2.5GHz quad-core
-[Run] Generation time: 0.3810 seconds
-[Success] Demo completed.
