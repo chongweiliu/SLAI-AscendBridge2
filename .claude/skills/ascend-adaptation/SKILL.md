@@ -76,9 +76,45 @@ uv run python demo.py > output.txt 2>&1
 - **视觉**：使用 `AutoImageProcessor` + `AutoModelForImageClassification`
 - **Pipeline**：若文档推荐 `pipeline`，优先 `pipeline(..., device=device)`
 
-## 8. 其他优化
+## 8. 其他优化与避坑（NPU 性能/精度共性经验）
 
-- **Flash Attention**：若模型使用，需确认 NPU 兼容版本或回退到标准 attention
+### 8.1 FlashAttention：CANN 版本决定可用性
+
+- `F.scaled_dot_product_attention` 在 NPU 上映射到 `aclnnFlashAttentionScore`，但**该算子的编译内核(.o)只在 CANN 8.5.0+ 才有**；8.3.RC1 及更早只有头文件、无内核，所有 head 配置都报 `Cannot find binary for op FlashAttentionScore`。
+- **先确认 CANN 版本**（`cat /usr/local/Ascend/cann-9.0.0/version.cfg` 或 `ls /usr/local/Ascend/`），不是 9.0.0/8.5.0 就先切环境（见 uv-env-setup skill 1.5 节）。
+- FA **不支持 fp32**：若模型里 RMSNorm/QKNorm 等用 `.float()` 把 q/k 转回 fp32，bf16 autocast 也救不了 SDPA。需在 SDPA 前显式 `q=q.to(torch.bfloat16)` 等。
+- 回退方案：手动 `matmul` attention（`softmax(QKᵀ·scale)·V`）数学等价 SDPA，但会物化 L×L 矩阵、慢且耗内存——只在没有 FA 内核时临时用。
+
+### 8.2 ⚠️ float64 是 NPU 上的隐藏杀手
+
+- **Ascend NPU 无原生 fp64**，`torch.arange(dtype=torch.float64)` / `cos/sin` 等 fp64 算子走**极慢模拟回退**，可让单步耗时暴增几十倍。
+- 高发场景：**RoPE**（很多实现用 `dtype=torch.float64` 求高精度频率）、某些 norm/位置编码。
+- CONFLUX 实测：RoPE fp64→fp32，采样 **56s→1.04s/50步（54× 加速），输出 std 完全相同**（fp32 与 fp64 差异在 bf16 量化之下）。
+- **规则**：NPU 上凡 `float64` 一律先转 `float32`（医学影像/生成模型 bf16 推理不需要 fp64 精度）。grep 模型代码 `dtype=torch.float64\|\.double()\|float64` 全部改 float32。
+
+### 8.3 性能 profiling 的 sync 假象——用 A/B 对照定位真瓶颈
+
+- 在某算子里插 `torch.npu.synchronize()` 计时，会**等待前面所有排队的异步算子**，把整段开销都记到该算子头上 → 误判瓶颈。
+- 正确做法：(a) 隔离计时每个算子要 `warmup + N 轮 + 末尾单次 sync`；(b) **定位瓶颈用 A/B 对照**：改一个变量（如 RoPE 的 dtype），同 seed 同权重跑两次比耗时——差异即该变量的真实影响。
+- 隔离 matmul 计时可达近峰值（240 TFLOPS），但链式 block 执行可能慢几百倍——差距来自 dispatch/fp32 回退，不是单算子慢。
+
+### 8.4 TorchAir 图模式（torch.compile）的限制
+
+- 自定义模型整模 `torch.compile(backend=torchair.get_npu_backend(...))` 常失败：
+  - **SDPA 缺 Converter**：图里 `npu.npu_fusion_attention_v3` 在 torch_npu 2.10.0 未注册 AscendIR 转换器 → 编译报错。手动 matmul attention 只用标准 ATen 算子（有 Converter），能入图。
+  - meshgrid / 动态 padding / 自定义算子常导致 GE `EZ9999 Inner Error / Compile graph failed`。
+- Skill 经验：对自定义非标准模型，**不承诺整图成功**；先最小 compile probe，失败则保留 Eager。图模式适合标准 transformers/LLM，自定义 DiT/VAE 等优先靠 8.2 的 fp64→fp32 等低风险优化。
+
+### 8.5 通用验证与调优方法论（模型无关）
+
+适配/优化后建议按以下范式验证，适用于所有 NPU 模型：
+
+1. **精度门 = 确定性复现**：同 seed 跑两次，`max|diff|` 应为 0（或 < 1e-3）。NPU 推理应可复现；不可复现说明有非确定性算子（如某些 atomic 算子）需排查。这是精度可信的前提。
+2. **优化前后 A/B 对照**（不是单次计时）：改一变量（dtype/算子/配置），同 seed 同权重跑两次比耗时与输出差异。`max|diff| < 容差` 才算"精度无损"。CONFLUX 的 fp64→fp32 就靠此法证明 54× 加速且输出 std 完全一致。
+3. **真/模拟双样本验证**：从数据集抽真实样本、用其标签作条件生成、对比生成体与真实体统计（std/mean/air/值域）+ 随机构造模拟样本验证泛化。比"只跑一个固定 prompt"更全面。
+4. **warmup 后再计时**：首个样本含编译/初始化/缓存预热开销（CONFLUX 首样本 3.8s vs 稳态 1.5s）。基准测试丢弃前 2-3 次再取均值。
+5. **bf16 解码降显存**：VAE/diffusion decoder 的全分辨率 conv 是 HBM 峰值来源，bf16 解码省一半显存且精度无损（CONFLUX VAE 解码 fp32 12.5s→bf16 2.8s，且 std 不变）。
+6. **bulk 下载前估总量**：下 1 个样本测大小 × 总数估总规模，避免 TB 级数据盲目全下（CONFLUX 数据集 200K 样本 ≈ 1.68TB，按需取子集）。
 
 ## 9. 自定义模型库（Custom Repo Models）
 
