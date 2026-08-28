@@ -84,7 +84,7 @@
 - **Ascend950PR 单卡 128GB**（torch 2.12 + torch_npu 2.12）：DiT 1.419B，fp32+bf16 autocast+NpuFusedAdamW+grad-ckpt；latent `[1,16,6,60,104]`（21 帧 832×480）；50 步 45s(~0.9s/step)，loss 1.63→0.41，velocity MSE base 1.99→CPT 0.37（降 81%）。全程 NPU 算子通过。
 - **Ascend910 单卡 64GB**（torch 2.8.0+cpu + torch_npu 2.8.0.post4 + transformers 5.15.1 + diffusers 0.40，cross-chip 回归验证）：同一 FastWan2.1-T2V-1.3B-Diffusers，MixKit 80 视频(16帧 256×448)；latent `[1,16,4,32,56]`；50 步 63s(~1.3s/step)，loss 21.14→8.77，velocity MSE 17.63→6.27（降 64%）。**910 暴露了 950PR 未遇的 3 个跨栈 gap**：#52(那次 latent 归一化乘反致 loss ~10×虚高)、#53(UMT5 用 T5EncoderModel 丢偏置)、#54(`from_pretrained`+keep_in_fp32 崩，950PR 的 transformers 版未触发)。说明：**技能每支持一种新芯片/版本栈都应在该栈实跑回归**（见 skill_change_verify_protocol）。
 
-## 阶段3 · RL 后训练（GRPO，可选第三阶段）
+## RL 后训练（GRPO，可选第三阶段）
 
 > 适用：论文含 "RL Post-Training" / "GRPO" / "reward" / "faithfulness" 的扩散模型。
 > CONFLUX (arXiv:2607.02998) = VAE + 修正流 DiT + GRPO 三阶段，910C 实证。
