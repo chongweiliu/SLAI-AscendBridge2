@@ -11,7 +11,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 
 **这是一个通用 CPT 技能，不是仅针对文本 LM**：按模型类型自动选择训练范式——
 - **文本 decoder-only LM（CausalLM）**：next-token CE loss，`model(input_ids, labels)`，评估 PPL/acc/F1。多模态模型的"文本头"也走此路（见 references/multimodal-remap.md）。
-- **文生视频/文生图扩散模型（diffusers pipeline：DiT/U-Net + VAE + text_encoder + scheduler）**：流匹配/DDPM velocity/epsilon loss on VAE latents，`transformer(noisy_latent, timestep, text_emb)`，评估 velocity MSE + 采样生成。若论文含 RL Post-Training（GRPO），阶段3 可选做 RL 后训练（奖励分类器 + 组相对策略优化 + KL 正则），见 `references/generative-diffusion-cpt.md`「阶段3 RL 后训练」。
+- **文生视频/文生图扩散模型（diffusers pipeline：DiT/U-Net + VAE + text_encoder + scheduler）**：流匹配/DDPM velocity/epsilon loss on VAE latents，`transformer(noisy_latent, timestep, text_emb)`，评估 velocity MSE + 采样生成。若论文含 RL Post-Training（GRPO），可选做 RL 后训练（奖励分类器 + 组相对策略优化 + KL 正则），见 `references/generative-diffusion-cpt.md`「RL 后训练」。
 - **音频-LLM（audio-text-to-text：audio_tower + projector + CausalLM，如 Qwen2-Audio）**：冻结 audio_tower+projector，训 language_model 全量/LoRA；chat template(audio+transcribe 指令)→`input_features`(mel)+labels(只对 transcript 算 CE，mask audio 特殊 token)；评估 held-out 转写 CE loss。见 `references/audio-llm-cpt.md`，模板 `cpt_audio_llm.py.tmpl`。
 - 其它生成式范式（文生音频生成/全模态等）按同理：先判 backbone（可训练生成主干）+ 冻结编解码器，再据其原生损失训练。
 
@@ -278,7 +278,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - `references/resume.md` — 断点续训（存/载 optimizer+step+sampler）
 - `references/eval-metrics.md` — PPL/acc/F1/Recall/EM 定义 + held-out 重建 + FSDP2 实战案例 + MMLU how-to
 - `references/multimodal-remap.md` — 多模态 checkpoint → 文本头权重重映射
-- `references/generative-diffusion-cpt.md` — **文生视频/文生图 diffusers 扩散 DiT CPT 全流程**（MLX→PyTorch 基座、组件分离、VAE 编码上 NPU、流匹配 loss、预计算 latent、text_encoder 缓存/零嵌入兜底、采样评估、**阶段3 RL 后训练 GRPO + 奖励分类器 OOD 泛化 + KL 正则**）
+- `references/generative-diffusion-cpt.md` — **文生视频/文生图 diffusers 扩散 DiT CPT 全流程**（MLX→PyTorch 基座、组件分离、VAE 编码上 NPU、流匹配 loss、预计算 latent、text_encoder 缓存/零嵌入兜底、采样评估、**可选 RL 后训练 GRPO + 奖励分类器 OOD 泛化 + KL 正则**）
 
 ## scripts（标准模板，新模型微调即用）
 见 `scripts/*.tmpl`。生成时复制到 `${WS_DIR}/`（即 `training-ws/<模型名>-cpt/`）并按当前模型/语料/选型替换占位。模板已规避多数踩坑（set_to_none=False、gradient_as_bucket_view=False、expandable_segments、autocast、grad-ckpt）。其中 `run_env.sh.tmpl` 的 `WS_DIR` 已自动指向 `training-ws/<模型名>-cpt/` 并 `mkdir -p`；`timing_table.py.tmpl` 用于全程实时用时表（见核心原则 9）。
