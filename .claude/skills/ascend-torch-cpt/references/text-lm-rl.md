@@ -30,6 +30,7 @@ log_prob = Σ_t log p_policy(token_t | token_<t, context)   # 每个回复的 to
 loss = -mean(advantage.detach() * log_prob)                # REINFORCE/GRPO surrogate
 ```
 - 通过 **token log-prob** 反传（与扩散 RL 的可微去噪采样反传不同）
+- **标准 GRPO 目标**用 PPO-style clipped ratio 代替纯 log-prob（见下「NPU 注意事项」PPO clip），实践优于纯 REINFORCE
 
 ### 6. KL-to-参考策略正则
 ```
@@ -75,7 +76,7 @@ loss += β * kl
 - **log_prob 精度**：token log-prob 在 bf16 下可能有数值精度问题，建议 log_softmax 在 fp32 计算（`logits.float().log_softmax(-1)`）
 - **参考模型显存**：需同时加载 policy + reference 两个模型（2× 显存），小模型(1-7B)单卡可行，大模型需模型并行
 - **GRPO group 采样**：G=4-8 个回复并行生成，可用 `torch.cat` 拼成 batch 一次 forward
-- **PPO clip**：`ratio = exp(log_ratio); clipped = clamp(ratio, 1-ε, 1+ε); loss = -mean(min(advantage*ratio, advantage*clipped))`
+- **PPO clip（标准 GRPO 目标，优于纯 REINFORCE）**：`ratio = exp(log_ratio); clipped = clamp(ratio, 1-ε, 1+ε); loss = -mean(min(advantage.detach()*ratio, advantage.detach()*clipped))`
 
 ## 实施流程（在 CPT 阶段 9 之后，可选）
 
