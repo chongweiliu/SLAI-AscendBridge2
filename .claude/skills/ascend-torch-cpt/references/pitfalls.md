@@ -473,3 +473,29 @@ sys.meta_path.insert(0, _StubFinder())
 - **判定要点**：reward 分类器训练数据 == CPT 训练数据 → 循环，须独立 split。
 
 > 注：#67-68 是通用数据加载/优化器坑（适用所有 CPT 范式）；#69-72 是扩散 RL 后训练特有。
+
+## 73. 文本 LM RL 的 KL 用 token log-prob 比率，不用速度 L2（与扩散 RL 不可混用）
+- **症状**：文本 LM RL 用扩散 RL 的速度 L2 KL → KL 计算无意义（文本 LM 无速度场）→ 正则失效/报错。
+- **根因**：文本 LM 的策略是离散 token 分布，KL 须在 token log-prob 空间计算；扩散 RL 的策略是连续速度场，KL 在速度空间计算。两者数学上不等价。
+- **解法**：文本 LM RL 用 `KL = mean(log_prob_policy - log_prob_ref)`（token log-prob 比率），或 PPO-style clip `ratio=exp(log_ratio); clamp(ratio,1-ε,1+ε)`。扩散 RL 用 `KL ≈ mean(‖v_policy-v_ref‖²)`。**不可混用**。
+- **判定要点**：模型是 CausalLM → KL 用 log-prob 比率；模型是 DiT/U-Net → KL 用速度 L2。
+
+## 74. 文本 LM reward 是偏好模型/规则，不用 latent 分类器
+- **症状**：文本 LM RL 用扩散 RL 的 latent-space 分类器作 reward → 无法计算（文本 LM 无 latent）→ 报错/无意义。
+- **根因**：文本 LM 的 reward 是对**完整文本回复**打分（偏好模型/规则），不是对 latent 打分。扩散 RL 的 reward 是对生成 latent/image 的 faithfulness 分类器。两种 reward 在不同空间。
+- **解法**：文本 LM RL 用偏好 reward model（human preference 训的打分模型）或规则 reward（数学正确性、代码执行、格式合规）。扩散 RL 用 latent/image 分类器。
+- **判定要点**：reward 是对"文本回复"还是"生成 latent/image" → 前者用偏好模型，后者用分类器。
+
+## 75. GRPO group 采样：文本 LM 采 G 个不同回复，不用 G 个不同噪声
+- **症状**：文本 LM GRPO 用扩散的"不同噪声 z0"采样 → 无法应用（文本 LM 无 z0）→ 报错。
+- **根因**：GRPO 的 group = 同一 prompt 下采 G 个**不同样本**。文本 LM 的"不同"来自 temperature>0 的随机 token 采样；扩散的"不同"来自不同初始噪声 z0。
+- **解法**：文本 LM：`for g in range(G): response = model.generate(prompt, do_sample=True, temperature=0.7)` 采 G 个不同回复。扩散：`z0 = randn(G, ...)` 采 G 个不同噪声。
+- **判定要点**：group 采样方式 → 文本 LM 用 temperature 采样，扩散用不同噪声。
+
+## 76. 音频 LLM RL = 文本 LM RL（token 级），仅语音生成走扩散 RL
+- **症状**：对音频 LLM（audio→text 转写模型）套扩散 RL → 策略不匹配（转写模型生成 token 不是去噪）→ 报错/无意义。
+- **根因**：音频 LLM（如 Qwen2-Audio/MOSS）的 policy 是 language_model 的 token 分布，audio 是固定输入上下文。RL 在 token 级（同文本 LM），不在去噪/latent 级。仅当模型是**语音生成**（text→audio, diffusion-based）时才走扩散 RL。
+- **解法**：音频 LLM RL → 用文本 LM RL 范式（token log-prob 策略梯度 + WER/偏好奖励 + log-prob KL）。冻结 audio_tower+projector，训 language_model。
+- **判定要点**：模型"生成什么" → 生成 token(转写)走文本 LM RL，生成 audio(语音合成)走扩散 RL。
+
+> 注：#73-76 是文本 LM / 音频 LLM RL 后训练特有，与扩散 RL（#69-72）是不同范式，不可混用。
