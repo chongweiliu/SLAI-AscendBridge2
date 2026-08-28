@@ -435,3 +435,41 @@ sys.meta_path.insert(0, _StubFinder())
 - **判定要点**：数据标注非纯文本 → 写转换器（TextGrid/RTTM/JSON → model-output-format）。
 
 > 注：#61/#62 是**通用**规律（适用于文本 LM / 扩散 / 音频-LLM 所有 CPT 范式），#63-66 是音频-LLM 特有。数据规模 vs 泛化规律详见 `references/audio-llm-cpt.md`「数据规模 vs 泛化」节。
+
+## 67. NpuFusedAdamW 不支持 `set_to_none=True`（CONFLUX CPT 实证）
+- **症状**：`opt.zero_grad(set_to_none=True)` 报 `ValueError: set_to_none is not supported in fused optimizers`。
+- **根因**：torch_npu 的融合优化器（NpuFusedAdamW/NpuFusedSGD 等）不支持 `set_to_none=True`（与标准 torch.optim.AdamW 的默认行为不同）。
+- **解法**：用 `opt.zero_grad(set_to_none=False)` 或 `opt.zero_grad()`（默认 False）。模板 `cpt_train.py.tmpl`/`cpt_diffusion.py.tmpl` 已用 `set_to_none=False`。
+- **判定要点**：fused optimizer 报 set_to_none 错 → 改 False。
+
+## 68. 损坏/截断的压缩数据文件致 EOFError 崩溃（CONFLUX CPT 实证）
+- **症状**：`nib.load(file).get_fdata()` 报 `EOFError: Compressed file ended before the end-of-stream marker`，训练数据加载中途崩溃。
+- **根因**：flaky mirror 下载的大文件(.nii.gz/.tar.gz 等)可能截断（下载中断 + 续传不完整），gzip 解压时 EOF。文件 size 可能 >=8MB 但内容截断。
+- **解法**：数据加载包 try/except，跳过损坏文件继续。`prepare_data*.py` 加 `try: vol=load(file) except: print('SKIP corrupt'); continue`。
+- **判定要点**：`EOFError` + gzip 文件 → 下载截断，跳过该文件。
+
+## 69. ⚠️ 扩散 RL 奖励分类器 OOD 泛化 > 训练数据量（CONFLUX GRPO 实证，重要）
+- **症状**：奖励分类器从 299→2000 样本训练(6.7×)，但 GRPO faithfulness 未改善(v2 -0.057 ≈ v3 -0.069)。
+- **根因**：奖励分类器在**真实 latent** 上训练，但 GRPO 需要它在**生成(OOD) latent** 上给准奖励。生成 latent 的分布与真实 latent 有偏移 → 分类器在 OOD 上预测不准 → 奖励信号失真 → GRPO 被误导。**更多真实数据只提升分类器在真实分布上的表现，不改善对生成分布的泛化**。
+- **解法**：①奖励分类器在**生成 latent** 上训练/微调（先用参考策略生成一批 latent + 真实标签 → 训分类器）；②用**image-space 独立评判分类器**（在 decoded 生成体上评判，论文方法，避免 latent 空间 OOD）；③接受小规模 demo 的限制，说明需论文级数据量(200K+) + 完整 Flow-GRPO。
+- **判定要点**：GRPO reward 不改善 + 增加分类器数据量不改善 → 瓶颈在 OOD 泛化不在数据量。
+
+## 70. ⚠️ 扩散 GRPO 必须 KL-to-参考策略正则（CONFLUX GRPO 实证，重要）
+- **症状**：GRPO 无 KL 正则 → DiT 策略漂移 → faithfulness 劣化(base 0.84→0.72, Δ=-0.104)。
+- **根因**：扩散 RL 的策略梯度通过可微采样轨迹反传，无约束时 DiT 会往 reward hack 方向漂移，偏离参考策略过远 → 生成质量劣化。
+- **解法**：加 KL-to-参考策略正则项。实用近似：`loss = -(advantage.detach() * reward).mean() + β * mean(||v_policy - v_ref||²)`（采样轨迹上加速度预测 L2，β=0.5）。实测：有 KL → 劣化从 -0.104 降到 -0.057（**改善 45%**），KL 有界(0.02-0.05)。
+- **判定要点**：GRPO faithfulness 下降 + 无 KL 正则 → 加 KL 项(β=0.1-1.0)。
+
+## 71. 跨数据集标签不匹配（CONFLUX CPT 实证）
+- **症状**：下载 CT-RATE(390 样本)想用于 CONFLUX 奖励分类器训练，但 CT-RATE 的标签(DICOM 参数+自有异常标签)≠ CONFLUX 的 18 findings → 无法训 CONFLUX 奖励分类器。
+- **根因**：不同数据集的标签空间(label space)可能不同——CONFLUX 有 18 个特定 finding 标签，CT-RATE 有 DICOM 扫描参数 + 自己的异常标签，不能直接映射。
+- **解法**：下载跨数据集前先查其 metadata 列名 + 标签定义，验证与目标模型的标签空间兼容。不兼容时：①只用该数据做 CPT 增强(不需要标签，只需真实 latent)；②用该数据训独立评判分类器(用其自己的标签，作论文的 independent judge)。
+- **判定要点**：跨数据集标签不匹配 → 不能训目标模型特定的奖励分类器，只能做 CPT 增强/独立评判。
+
+## 72. 奖励分类器循环泄露（CONFLUX GRPO 实证）
+- **症状**：用 CPT 训练数据训奖励分类器 → 分类器记住了 CPT 数据的分布 → 评判生成体时失真。
+- **根因**：奖励分类器 + CPT 用同一批数据 → 循环泄露。论文明确要求用**独立 held-out 分类器**做评判。
+- **解法**：①独立 split——奖励分类器训练集 / judge held-out / GRPO 条件 三者不重叠；②论文方法：用**独立 image-space 分类器**(在 decoded real volumes 上训，从不作奖励)做最终评判；③奖励分类器自己也要独立 split(train/judge)。
+- **判定要点**：reward 分类器训练数据 == CPT 训练数据 → 循环，须独立 split。
+
+> 注：#67-68 是通用数据加载/优化器坑（适用所有 CPT 范式）；#69-72 是扩散 RL 后训练特有。

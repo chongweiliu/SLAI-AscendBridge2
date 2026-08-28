@@ -83,3 +83,48 @@
 ## 实战数据点（跨芯片交叉验证）
 - **Ascend950PR 单卡 128GB**（torch 2.12 + torch_npu 2.12）：DiT 1.419B，fp32+bf16 autocast+NpuFusedAdamW+grad-ckpt；latent `[1,16,6,60,104]`（21 帧 832×480）；50 步 45s(~0.9s/step)，loss 1.63→0.41，velocity MSE base 1.99→CPT 0.37（降 81%）。全程 NPU 算子通过。
 - **Ascend910 单卡 64GB**（torch 2.8.0+cpu + torch_npu 2.8.0.post4 + transformers 5.15.1 + diffusers 0.40，cross-chip 回归验证）：同一 FastWan2.1-T2V-1.3B-Diffusers，MixKit 80 视频(16帧 256×448)；latent `[1,16,4,32,56]`；50 步 63s(~1.3s/step)，loss 21.14→8.77，velocity MSE 17.63→6.27（降 64%）。**910 暴露了 950PR 未遇的 3 个跨栈 gap**：#52(那次 latent 归一化乘反致 loss ~10×虚高)、#53(UMT5 用 T5EncoderModel 丢偏置)、#54(`from_pretrained`+keep_in_fp32 崩，950PR 的 transformers 版未触发)。说明：**技能每支持一种新芯片/版本栈都应在该栈实跑回归**（见 skill_change_verify_protocol）。
+
+## 阶段3 · RL 后训练（GRPO，可选第三阶段）
+
+> 适用：论文含 "RL Post-Training" / "GRPO" / "reward" / "faithfulness" 的扩散模型。
+> CONFLUX (arXiv:2607.02998) = VAE + 修正流 DiT + GRPO 三阶段，910C 实证。
+
+### 方法论
+
+扩散 RL 把去噪视为多步决策过程，用组相对策略优化（GRPO）微调 DiT backbone：
+
+1. **奖励分类器**：在**latent 空间**训练（latent→finding/label 分类器），奖励 = 分类器对生成 latent 的预测与请求条件的吻合度(faithfulness)。分类器 + 参考策略(CPT DiT)冻结。
+2. **可微采样轨迹**：从噪声 z0 经 K 步 Euler 去噪→生成 latent z1，全程保留 DiT 的 grad（不 detach），策略梯度通过轨迹反传。
+3. **组相对优势**：每步采样 G 个体，reward = 分类器评分，advantage = (r - mean)/std（组内相对，替代价值函数）。
+4. **KL-to-参考策略正则**：`loss = -(advantage.detach() * reward).mean() + β * KL`，KL ≈ `mean(||v_policy - v_ref||²)`（轨迹上加速度预测 L2，参考=冻结 CPT DiT）。**β=0.5 实测有效**。
+5. **评估**：faithfulness = 独立 judge 分类器对生成体的 finding 预测与请求条件吻合度。velocity MSE 不适用 RL（RL 优化 faithfulness 非 velocity）。
+
+### ⚠️ 关键坑（详见 pitfalls.md #69-#72）
+
+- **#69 奖励分类器 OOD 泛化 > 数据量**：分类器在**真实 latent** 上训，但 GRPO 在**生成(OOD) latent** 上用。更多真实数据(299→2000)不改善 GRPO——瓶颈在 OOD 泛化。**解法**：分类器在生成 latent 上训/微调，或用 image-space 独立评判。
+- **#70 KL 正则必须**：无 KL→漂移致 faithfulness 劣化(-0.104)；有 KL(β=0.5)→劣化减 45%(-0.057)。
+- **#71 跨数据集标签不匹配**：CT-RATE 标签≠CONFLUX 18 findings，不能训 CONFLUX 奖励分类器。先验标签空间兼容性。
+- **#72 循环泄露**：奖励分类器+CPT 用同一数据=循环。独立 split（分类器 train/judge/GRPO 条件 三者不重叠），或用独立 image-space 评判。
+
+### 实战数据点（CONFLUX 910C，v1/v2/v3 对比）
+
+CONFLUX (VAE3D+修正流DiT3D+GRPO)，Ascend 910C 64GB，CANN 9.0.0 + torch_npu 2.10.0：
+
+| 版本 | 分类器数据 | 正则化 | KL | 分类器 judge_bce | faithfulness | Δ vs base |
+|---|---|---|---|---|---|---|
+| base | — | — | — | — | 0.833 | — |
+| CPT(阶段2) | — | — | — | — | 0.822 | -0.011 |
+| GRPO v1 | 299 | 无 | ❌ | 0.59(过拟合) | 0.730 | **-0.104** |
+| GRPO v2 | 299 | dropout0.5+wd0.1 | ✅ β=0.5 | 0.353 | 0.776 | **-0.057** |
+| GRPO v3 | 2000 | dropout0.4+wd0.05 | ✅ β=0.5 | 0.339 | 0.765 | -0.069 |
+
+**关键结论**：①KL 正则有效（v2 比 v1 劣化减 45%）；②更多分类器数据(2000 vs 299)未改善 GRPO（OOD 泛化瓶颈）；③论文 +47% 需 200K+ 分类器数据 + 完整 Flow-GRPO(importance sampling + ODE→SDE) + 独立 image-space 评判。
+
+### 论文级 GRPO 需要的（本 demo 未达）
+
+| 维度 | 论文 | 本 demo |
+|---|---|---|
+| 奖励分类器数据 | ~200K 真实 CT | 2000(100×少) |
+| GRPO 算法 | Flow-GRPO(ODE→SDE + importance sampling + KL clip) | DDPO 式(可微奖励 + KL 近似) |
+| 独立评判 | image-space 分类器(decoded real volumes) | 同一 latent 分类器(循环) |
+| 训练规模 | 大规模 RL | 300 步 demo |
