@@ -1,0 +1,91 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# prepare_data.py.tmpl — 抽样 + 转 chat messages 格式 (供 lora_train.py.tmpl 使用)
+# 用法: python prepare_data.py
+# 输入格式(自动识别):
+#   A) 每行 {"messages":[{"role":"user"/"assistant"/"system","content":...}, ...]}  -> 原样(补 system 若无)
+#   B) 每条 {"dialogue":[{"student":...,"teacher":...}, ...]} 或同构多轮 -> 转 user/assistant
+# 也支持单文件 JSON 数组 (DATA_IS_ARRAY=1)
+import os, json, random
+
+SRC = os.environ.get("DATA_SRC", "/path/to/dataset.json")          # 必填: 原始数据集
+OUT = os.environ.get("DATA_OUT", os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "outputs", "train.jsonl"))
+OUT = os.path.abspath(OUT); os.makedirs(os.path.dirname(OUT), exist_ok=True)
+RATIO = float(os.environ.get("SAMPLE_RATIO", "0.5"))              # 抽样比例; 1.0=全量
+SEED = int(os.environ.get("SAMPLE_SEED", "42"))
+SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", "你是一名乐于助人的助手。")
+USER_FIELD = os.environ.get("USER_FIELD", "student")              # B 格式: user 端字段名
+ASSIST_FIELD = os.environ.get("ASSIST_FIELD", "teacher")           # B 格式: assistant 端字段名
+DIALOGUE_FIELD = os.environ.get("DIALOGUE_FIELD", "dialogue")     # B 格式: 多轮数组字段名
+IS_ARRAY = os.environ.get("DATA_IS_ARRAY", "0") == "1"
+MIN_TURNS = int(os.environ.get("MIN_TURNS", "1"))                  # 至少几轮 user/assistant
+
+
+def load_records():
+    if IS_ARRAY or SRC.endswith((".json",)):
+        raw = json.load(open(SRC, encoding="utf-8"))
+        if isinstance(raw, list):
+            return raw
+        if isinstance(raw, dict) and "data" in raw:
+            return raw["data"]
+        return [raw]
+    # jsonl
+    return [json.loads(l) for l in open(SRC, encoding="utf-8") if l.strip()]
+
+
+def to_messages(rec):
+    """把一条记录转成 [{role,content}, ...] (含 system)"""
+    if "messages" in rec:
+        msgs = rec["messages"]
+        if not any(m.get("role") == "system" for m in msgs):
+            msgs = [{"role": "system", "content": SYSTEM_PROMPT}] + msgs
+        return msgs
+    # C: Alpaca 格式 (instruction / input / output) -> 单轮 user/assistant
+    if "instruction" in rec:
+        user = rec.get("instruction", "")
+        if rec.get("input"):
+            user = user + "\n" + rec["input"]
+        return [{"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user},
+                {"role": "assistant", "content": rec.get("output", "")}]
+    # B: dialogue 多轮
+    dlg = rec.get(DIALOGUE_FIELD) or []
+    msgs = [{"role": "system", "content": SYSTEM_PROMPT}]
+    for turn in dlg:
+        u = (turn.get(USER_FIELD) or "").strip()
+        a = (turn.get(ASSIST_FIELD) or "").strip()
+        if u:
+            msgs.append({"role": "user", "content": u})
+        if a:
+            msgs.append({"role": "assistant", "content": a})
+    return msgs
+
+
+def main():
+    data = load_records()
+    total = len(data)
+    n_sel = int(total * RATIO)
+    rng = random.Random(SEED)
+    idxs = sorted(rng.sample(range(total), n_sel))
+    written = skipped = 0
+    with open(OUT, "w", encoding="utf-8") as f:
+        for i in idxs:
+            msgs = to_messages(data[i])
+            # 统计 user/assistant 轮数
+            ua = sum(1 for m in msgs if m["role"] in ("user", "assistant"))
+            if ua < MIN_TURNS * 2:
+                skipped += 1
+                continue
+            f.write(json.dumps({"messages": msgs}, ensure_ascii=False) + "\n")
+            written += 1
+    print(f"[prepare] total={total} select={n_sel}({RATIO*100:.0f}%) written={written} skipped={skipped}")
+    print(f"[prepare] out={OUT}")
+    # 抽样自检: 打印首条轮数
+    if written:
+        first = json.loads(open(OUT).readline())
+        print(f"[prepare] first record messages={len(first['messages'])}")
+
+
+if __name__ == "__main__":
+    main()

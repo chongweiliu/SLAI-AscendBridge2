@@ -1,0 +1,201 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# validate.py.tmpl — base vs LoRA teacher-forced 多轮验证 (ROUGE-L/字符重叠/生成长度)
+# 用法: python validate.py
+# 从未参与训练的数据选 N 条, 逐 assistant 轮生成 teacher, 与 GT 对比
+import os, json, random, time
+from collections import Counter
+
+os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+os.environ.setdefault("TASK_QUEUE_ENABLE", "1")
+os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+import torch
+import torch_npu  # noqa
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import PeftModel
+
+MODEL_DIR = os.environ.get("MODEL_DIR", "/mnt/model/Qwen3.5-0.8B")
+WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ADAPTER_DIR = os.environ.get("ADAPTER_DIR", os.path.join(WS, "outputs", "lora_adapter"))
+SRC = os.environ.get("VAL_SRC", os.environ.get("DATA_SRC", "/path/to/dataset.json"))
+OUT_JSON = os.path.join(WS, "outputs", "validation_results.json")
+OUT_MD = os.path.join(WS, "outputs", "validation_report.md")
+SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", "你是一名乐于助人的助手。")
+N_VAL = int(os.environ.get("N_VAL", "10"))
+TRAIN_SEED = int(os.environ.get("SAMPLE_SEED", "42"))
+TRAIN_RATIO = float(os.environ.get("SAMPLE_RATIO", "0.5"))
+VAL_SEED = int(os.environ.get("VAL_SEED", "123"))
+DEV = os.environ.get("NPU_DEV", "npu:0")
+DEVICE_MAP = os.environ.get("DEVICE_MAP", "")
+MAX_MEMORY = os.environ.get("MAX_MEMORY", "")
+MAX_NEW = int(os.environ.get("VAL_MAX_NEW", "200"))
+USER_FIELD = os.environ.get("USER_FIELD", "student")
+ASSIST_FIELD = os.environ.get("ASSIST_FIELD", "teacher")
+DIALOGUE_FIELD = os.environ.get("DIALOGUE_FIELD", "dialogue")
+IS_ARRAY = os.environ.get("DATA_IS_ARRAY", "0") == "1"
+
+
+def lcs_len(a, b):
+    la, lb = len(a), len(b)
+    if la == 0 or lb == 0:
+        return 0
+    dp = [0] * (lb + 1)
+    for i in range(1, la + 1):
+        prev = 0
+        for j in range(1, lb + 1):
+            cur = dp[j]
+            dp[j] = prev + 1 if a[i-1] == b[j-1] else max(dp[j-1], dp[j])
+            prev = cur
+    return dp[lb]
+
+
+def rouge_l_f1(gt, pred):
+    gt, pred = gt or "", pred or ""
+    if not gt and not pred:
+        return 1.0
+    if not gt or not pred:
+        return 0.0
+    l = lcs_len(gt, pred)
+    if l == 0:
+        return 0.0
+    p, r = l / len(pred), l / len(gt)
+    return 2 * p * r / (p + r) if (p + r) > 0 else 0.0
+
+
+def char_overlap(gt, pred):
+    cg, cp = Counter(gt or ""), Counter(pred or "")
+    inter = sum((cg & cp).values())
+    union = sum((cg | cp).values())
+    return inter / union if union > 0 else 0.0
+
+
+def gen_once(model, tok, msgs):
+    ids = tok.apply_chat_template(msgs, tokenize=True, add_generation_prompt=True,
+                                  return_dict=True, return_tensors="pt")["input_ids"].to(next(model.parameters()).device)
+    with torch.no_grad():
+        out = model.generate(input_ids=ids, max_new_tokens=MAX_NEW, do_sample=False,
+                             pad_token_id=tok.eos_token_id, eos_token_id=tok.eos_token_id)
+    new = out[0][ids.shape[1]:]
+    return tok.decode(new, skip_special_tokens=True).strip()
+
+
+def build_turns(rec):
+    """转成 [(context_msgs, gt_teacher), ...]; context 用 GT 历史 teacher-forced"""
+    turns = []
+    context = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if "messages" in rec:
+        # 已是 messages; 逐 assistant 轮切, context = system + 之前所有轮(含 GT assistant, teacher-forced)
+        prefix = []
+        for m in rec["messages"]:
+            if m["role"] == "system":
+                continue
+            prefix.append(m)
+            if m["role"] == "assistant":
+                turns.append((list(prefix), m["content"]))
+        return turns
+    # Alpaca 单轮 (instruction/input/output)
+    if "instruction" in rec:
+        user = rec.get("instruction", "")
+        if rec.get("input"):
+            user = user + "\n" + rec["input"]
+        ctx = [{"role": "system", "content": SYSTEM_PROMPT},
+               {"role": "user", "content": user}]
+        return [(ctx, rec.get("output", ""))]
+    dlg = rec.get(DIALOGUE_FIELD) or []
+    for t in dlg:
+        u = (t.get(USER_FIELD) or "").strip()
+        a = (t.get(ASSIST_FIELD) or "").strip()
+        if u:
+            context.append({"role": "user", "content": u})
+        if a:
+            turns.append((list(context), a))
+            context.append({"role": "assistant", "content": a})
+    return turns
+
+
+def evaluate(model, tok, records, tag):
+    results = []
+    for ri, rec in enumerate(records):
+        turns = build_turns(rec)
+        rec_m = []
+        for ti, (ctx, gt) in enumerate(turns):
+            try:
+                pred = gen_once(model, tok, ctx)
+            except Exception as e:
+                pred = f"[ERR {e}]"
+            r = rouge_l_f1(gt, pred)
+            co = char_overlap(gt, pred)
+            m = {"turn": ti, "gt": gt[:120], "pred": pred[:160], "rouge_l": round(r, 4),
+                 "char_overlap": round(co, 4), "gt_len": len(gt), "pred_len": len(pred)}
+            rec_m.append(m); results.append(m)
+        avg = sum(m["rouge_l"] for m in rec_m) / max(1, len(rec_m))
+        print(f"[{tag}] rec{ri+1}/{N_VAL} turns={len(rec_m)} avg_rougeL={avg:.3f}", flush=True)
+    o = sum(m["rouge_l"] for m in results) / max(1, len(results))
+    co = sum(m["char_overlap"] for m in results) / max(1, len(results))
+    return {"per_turn": results, "rouge_l_mean": round(o, 4),
+            "char_overlap_mean": round(co, 4), "n_turns": len(results)}
+
+
+def main():
+    t0 = time.time()
+    torch.npu.set_device(DEV)
+    print(f"[env] npu available={torch.npu.is_available()}", flush=True)
+
+    # 选 N 条未用数据 (复现训练抽样求补集)
+    raw = json.load(open(SRC, encoding="utf-8")) if (IS_ARRAY or SRC.endswith(".json")) else \
+        [json.loads(l) for l in open(SRC, encoding="utf-8") if l.strip()]
+    total = len(raw)
+    used = set(random.Random(TRAIN_SEED).sample(range(total), int(total * TRAIN_RATIO)))
+    unused = [i for i in range(total) if i not in used]
+    val_idx = random.Random(VAL_SEED).sample(unused, min(N_VAL, len(unused)))
+    records = [raw[i] for i in val_idx]
+    print(f"[data] total={total} used={len(used)} unused={len(unused)} picked={len(records)}", flush=True)
+
+    tok = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
+    print("[model] base loading...", flush=True)
+    load_kwargs = dict(dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="eager")
+    if DEVICE_MAP:
+        load_kwargs["device_map"] = DEVICE_MAP
+        if MAX_MEMORY:
+            mm = {}
+            for part in MAX_MEMORY.split(";"):
+                k, v = part.split(":")
+                mm[int(k)] = v.strip()
+            load_kwargs["max_memory"] = mm
+        base = AutoModelForCausalLM.from_pretrained(MODEL_DIR, **load_kwargs)
+    else:
+        base = AutoModelForCausalLM.from_pretrained(MODEL_DIR, **load_kwargs).to(DEV)
+    base.eval(); base.config.use_cache = True
+
+    print("[eval] BASE ...", flush=True); te = time.time()
+    base_res = evaluate(base, tok, records, "base")
+    base_res["eval_s"] = round(time.time() - te, 1)
+    print(f"[eval] BASE rougeL={base_res['rouge_l_mean']} overlap={base_res['char_overlap_mean']} ({base_res['eval_s']}s)", flush=True)
+
+    print("[model] LoRA loading...", flush=True)
+    lora_model = PeftModel.from_pretrained(base, ADAPTER_DIR)
+    lora_model.eval(); lora_model.config.use_cache = True
+
+    print("[eval] LORA ...", flush=True); te = time.time()
+    lora_res = evaluate(lora_model, tok, records, "lora")
+    lora_res["eval_s"] = round(time.time() - te, 1)
+    print(f"[eval] LORA rougeL={lora_res['rouge_l_mean']} overlap={lora_res['char_overlap_mean']} ({lora_res['eval_s']}s)", flush=True)
+
+    summary = {"n_records": len(records), "val_indices": val_idx, "model": MODEL_DIR,
+               "adapter": ADAPTER_DIR, "base": base_res, "lora": lora_res,
+               "delta_rouge_l": round(lora_res["rouge_l_mean"] - base_res["rouge_l_mean"], 4),
+               "delta_char_overlap": round(lora_res["char_overlap_mean"] - base_res["char_overlap_mean"], 4),
+               "total_s": round(time.time() - t0, 1)}
+    with open(OUT_JSON, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+    print(f"[save] {OUT_JSON}", flush=True)
+    print(f"\n=== 验证结果 ===\nbase  ROUGE-L={base_res['rouge_l_mean']} 重叠={base_res['char_overlap_mean']}"
+          f"\nlora  ROUGE-L={lora_res['rouge_l_mean']} 重叠={lora_res['char_overlap_mean']}"
+          f"\nΔ ROUGE-L={summary['delta_rouge_l']:+.4f}  Δ重叠={summary['delta_char_overlap']:+.4f}"
+          f"\n总用时 {summary['total_s']}s")
+
+
+if __name__ == "__main__":
+    main()

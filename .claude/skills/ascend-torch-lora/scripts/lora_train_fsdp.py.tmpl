@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# lora_train_fsdp.py — 昇腾 NPU 大模型 LoRA SFT (FSDP2 数据并行分片, 无流水线气泡)
+# 启动: torchrun --nproc_per_node=4 lora_train_fsdp.py
+# 精度无损: FSDP2 仅分片参数/梯度/优化器, 数值与单卡等价; bf16 autocast 与 device_map 版一致
+# 踩坑已规避: hccl init; fully_shard mp_policy; AdamW(非NpuFused); grad_ckpt use_reentrant=False; enable_input_require_grads
+import os, json, math, time, random, datetime
+os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+os.environ.setdefault("TASK_QUEUE_ENABLE", "1")
+# 【关键坑】FSDP2 禁用 expandable_segments! 它破坏 all-gather buffer 跨层复用, 致逐层 buffer
+# 累积到全模型大小(~54GB)→OOM (实测: expandable_segments 下 OOM@60GB; 系统默认 max_split_size_mb:256 下 11.3GB 分片+前向 17.8GB 正常)
+if "PYTORCH_NPU_ALLOC_CONF" not in os.environ or "expandable_segments" in os.environ.get("PYTORCH_NPU_ALLOC_CONF", ""):
+    os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+import torch
+import torch_npu  # noqa
+import torch.distributed as dist
+from torch.distributed.fsdp import fully_shard, MixedPrecisionPolicy, CPUOffloadPolicy
+import transformers
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig, get_peft_model
+
+MODEL_DIR = os.environ.get("MODEL_DIR", "/mnt/model/Qwen3.5-27B")
+WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.environ.get("DATA_FILE", os.path.join(WS, "outputs", "train.jsonl"))
+OUT_DIR = os.path.join(WS, "outputs"); os.makedirs(OUT_DIR, exist_ok=True)
+LOSS_LOG = os.path.join(OUT_DIR, "loss_fsdp.jsonl")
+LOSS_RAW = os.path.join(OUT_DIR, "loss_raw_fsdp.json")
+ADAPTER_DIR = os.path.join(OUT_DIR, "lora_adapter_fsdp")
+NUM_STEPS = int(os.environ.get("NUM_STEPS", "150"))
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "1"))   # 每卡 batch; 有效 batch = BATCH_SIZE*WORLD_SIZE
+MAX_LEN = int(os.environ.get("MAX_LEN", "2048"))
+LR = float(os.environ.get("LR", "1e-4"))
+WARMUP = int(os.environ.get("WARMUP", "15"))
+LORA_R = int(os.environ.get("LORA_R", "16")); LORA_ALPHA = int(os.environ.get("LORA_ALPHA", "32"))
+LORA_DROPOUT = float(os.environ.get("LORA_DROPOUT", "0.05"))
+MAX_GRAD_NORM = 1.0; SEED = 42
+ASTART = os.environ.get("ASSISTANT_START", "<|im_start|>assistant\n")
+AEND = os.environ.get("ASSISTANT_END", "<|im_end|>")
+
+
+def lr_at(step, ns, wu, lr):
+    if step < wu: return lr * (step + 1) / wu
+    p = (step - wu) / max(1, ns - wu); return lr * 0.5 * (1 + math.cos(math.pi * min(1.0, p)))
+
+
+def build_examples(tok):
+    """字符偏移法对 assistant token 标 label (同 lora_train.py)"""
+    examples, skipped = [], 0
+    with open(DATA, encoding="utf-8") as f:
+        for line in f:
+            msgs = json.loads(line)["messages"]
+            try:
+                enc = tok.apply_chat_template(msgs, tokenize=True, add_generation_prompt=False,
+                    return_assistant_tokens_mask=True, return_dict=True, return_tensors="pt")
+                am = enc.get("assistant_masks")
+                if am is not None and int(am.sum()) > 0:
+                    ids = enc["input_ids"][0]; lb = ids.clone(); lb[am[0] == 0] = -100
+                    use_char = False
+                else:
+                    raise ValueError("no mask")
+            except Exception:
+                rendered = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False)
+                enc = tok(rendered, return_offsets_mapping=True, add_special_tokens=False)
+                ids_l = enc["input_ids"]; offs = enc["offset_mapping"]
+                spans, pos = [], 0
+                while True:
+                    idx = rendered.find(ASTART, pos)
+                    if idx == -1: break
+                    eidx = rendered.find(AEND, idx)
+                    if eidx == -1: break
+                    end = eidx + len(AEND)
+                    if end < len(rendered) and rendered[end] == "\n": end += 1
+                    spans.append((idx, end)); pos = end
+                lb = [-100] * len(ids_l)
+                for ti, (cs, ce) in enumerate(offs):
+                    if cs == ce: continue
+                    for (a, b) in spans:
+                        if cs < b and ce > a: lb[ti] = ids_l[ti]; break
+                ids = torch.tensor(ids_l, dtype=torch.long)
+            lb_t = torch.tensor(lb, dtype=torch.long) if isinstance(lb, list) else lb
+            if int((lb_t != -100).sum()) == 0:
+                skipped += 1; continue
+            examples.append({"input_ids": ids, "labels": lb_t})
+    return examples, skipped
+
+
+def find_layers(model):
+    """通用: 找 transformer 层 ModuleList (peft 包装下也能命中 .layers)"""
+    best = None
+    for name, mod in model.named_modules():
+        if isinstance(mod, torch.nn.ModuleList) and name.endswith(".layers"):
+            best = mod
+    return best
+
+
+def main():
+    rank = int(os.environ["RANK"]); ws = int(os.environ["WORLD_SIZE"]); lr_ = int(os.environ["LOCAL_RANK"])
+    dist.init_process_group("hccl", rank=rank, world_size=ws, timeout=datetime.timedelta(seconds=1800))
+    torch.npu.set_device(lr_)
+    dev = f"npu:{lr_}"
+    is_main = rank == 0
+
+    tok = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
+    if is_main:
+        print(f"[env] torch={torch.__version__} torch_npu={torch_npu.__version__} transformers={transformers.__version__}", flush=True)
+        print(f"[env] FSDP2 world={ws} dev={dev}", flush=True)
+
+    # 诊断已验证的加载路径 (fsdp_diag.py): bf16 CPU low_cpu_mem 加载(不 .to(dev)) → peft →
+    # 逐层 fully_shard(848 参数全变 DTensor, 每 rank shard ~11.3GB) → 顶层参数搬 NPU。
+    # 注意: 不能用 init_empty_weights+from_config/load_state_dict —— Qwen3.5 VL 键名零重叠灌不进。
+    if is_main: print(f"[model] loading {MODEL_DIR} (bf16→CPU, low_cpu_mem) ...", flush=True)
+    tm = time.time()
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_DIR, dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="eager",
+        low_cpu_mem_usage=True)
+    model.config.use_cache = False
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+    dist.barrier()  # 加载完同步, 防 ranks 反同步
+    if is_main: print(f"[model] loaded {time.time()-tm:.1f}s on CPU", flush=True)
+
+    # LoRA (在 CPU 上挂, 不占卡显存)
+    linear_names = {n.split(".")[-1] for n, m in model.named_modules() if type(m).__name__ == "Linear"}
+    candidates = ["q_proj","k_proj","v_proj","o_proj","gate_proj","up_proj","down_proj",
+                  "in_proj_qkv","in_proj_a","in_proj_b","in_proj_z","out_proj"]
+    targets = sorted([c for c in candidates if c in linear_names])
+    if is_main: print(f"[lora] targets={targets}", flush=True)
+    lora_cfg = LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
+                          target_modules=targets, bias="none", task_type="CAUSAL_LM")
+    model = get_peft_model(model, lora_cfg)
+    model.enable_input_require_grads()
+
+    # FSDP2 逐层分片 (无顶层: 顶层会在前向一次性 all-gather 整模型; 逐层每层只 all-gather 一个 layer)
+    mp = MixedPrecisionPolicy(param_dtype=torch.bfloat16, reduce_dtype=torch.bfloat16)
+    layers = find_layers(model)
+    assert layers is not None, "找不到 .layers ModuleList"
+    for layer in layers:
+        fully_shard(layer, mp_policy=mp, reshard_after_forward=True)
+    from torch.distributed.tensor import DTensor
+    if is_main:
+        n_dt = sum(1 for L in layers for p in L.parameters() if isinstance(p, DTensor))
+        tp = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"[fsdp] sharded {len(layers)} layers ({n_dt} DTensor params), trainable={tp/1e6:.1f}M", flush=True)
+
+    # 顶层(embed/lm_head/norm, ~5GB)未分片是普通 tensor, 搬到 NPU (否则 embedding 报设备不匹配)
+    moved = 0
+    for p in model.parameters():
+        if not isinstance(p, DTensor) and p.device.type != "npu":
+            p.data = p.data.to(dev); moved += 1
+    if is_main: print(f"[fsdp] moved {moved} top params to {dev}; NPU alloc={torch.npu.memory_allocated()/2**30:.2f}GB (期望~16GB)", flush=True)
+
+    # 优化器: FSDP2 必用 AdamW (NpuFusedAdamW 与 FSDP2 meta/fake 不兼容)
+    trainable = [p for p in model.parameters() if p.requires_grad]
+    opt = torch.optim.AdamW(trainable, lr=LR, betas=(0.9, 0.95), weight_decay=0.01, eps=1e-8)
+
+    # 【关键】train 模式! from_pretrained 默认 eval, 而 transformers 的 gradient_checkpointing
+    # 只在 self.training=True 时生效 —— 不调 train() 则 GC 被跳过, 全层激活(~43GB@seq2048)全压
+    # 单卡(数据并行每卡过全模型) → OOM。device_map 流水线版没炸是因激活分摊到各卡。
+    model.train()
+    gc_on = getattr(getattr(model, "base_model", model).model, "gradient_checkpointing", False)
+    if is_main: print(f"[model] train() called, gradient_checkpointing flag={gc_on}", flush=True)
+
+    # 数据 (每 rank 都建, 确定性一致)
+    if is_main: print(f"[data] building from {DATA} ...", flush=True)
+    examples, skipped = build_examples(tok)
+    n = len(examples)
+    if is_main: print(f"[data] {n} examples, skipped {skipped}", flush=True)
+
+    # DistributedSampler: 各 rank 取不同样本 (数据并行)
+    sampler = torch.utils.data.distributed.DistributedSampler(
+        list(range(n)), num_replicas=ws, rank=rank, shuffle=True, seed=SEED, drop_last=True)
+    sampler.set_epoch(0)
+    idxs = list(sampler)
+    nb = max(1, len(idxs) // BATCH_SIZE)
+
+    if is_main:
+        print(f"[train] {NUM_STEPS} steps, bs/rank={BATCH_SIZE}, eff_batch={BATCH_SIZE*ws}, "
+              f"lr={LR}, lora_r={LORA_R}, warmup={WARMUP}, max_len={MAX_LEN}", flush=True)
+        open(LOSS_LOG, "w").close()
+    dist.barrier()
+    rng = random.Random(SEED)
+    step_log = []; t0 = time.time(); step = 0; bi = 0
+    opt.zero_grad(set_to_none=False)
+    while step < NUM_STEPS:
+        bi = step % nb
+        bidx = idxs[bi * BATCH_SIZE:(bi + 1) * BATCH_SIZE]
+        if not bidx:
+            bi = 0; bidx = idxs[0:BATCH_SIZE]
+        ids = torch.stack([examples[i]["input_ids"][:MAX_LEN] for i in bidx]).to(dev)
+        lbl = torch.stack([examples[i]["labels"][:MAX_LEN] for i in bidx]).to(dev)
+        attn = torch.ones_like(ids)
+        cur_lr = lr_at(step, NUM_STEPS, WARMUP, LR)
+        for g in opt.param_groups: g["lr"] = cur_lr
+        with torch.autocast("npu", dtype=torch.bfloat16):
+            out = model(input_ids=ids, attention_mask=attn, labels=lbl)
+            loss = out.loss
+        loss.backward()
+        torch.nn.utils.clip_grad_norm_(trainable, MAX_GRAD_NORM)
+        opt.step(); opt.zero_grad(set_to_none=False)
+        # all-reduce loss 取均
+        lt = loss.detach().clone()
+        dist.all_reduce(lt, op=dist.ReduceOp.AVG)
+        ls = float(lt.cpu())
+        el = time.time() - t0
+        rec = {"step": step + 1, "loss": round(ls, 6), "lr": round(cur_lr, 8), "elapsed_s": round(el, 2)}
+        step_log.append(rec)
+        if is_main:
+            with open(LOSS_LOG, "a") as f: f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            if (step + 1) % 10 == 0 or step == 0:
+                print(f"[train] step {step+1}/{NUM_STEPS} loss={ls:.4f} lr={cur_lr:.2e} "
+                      f"elapsed={el:.1f}s ({el/(step+1):.2f}s/step)", flush=True)
+        step += 1
+
+    total = time.time() - t0
+    # 保存 adapter: 只取 requires_grad 的 LoRA 参数; DTensor.full_tensor() 是集合通信,
+    # 所有 rank 都必须执行 (放 if is_main 里会挂死), 只 rank0 落盘; peft save_pretrained
+    # 对 FSDP2 DTensor state 会炸("invalid python storage"), 手动存
+    from torch.distributed.tensor import DTensor
+    if is_main:
+        print(f"[train] done. {NUM_STEPS} steps in {total:.1f}s ({total/NUM_STEPS:.2f}s/step)", flush=True)
+        os.makedirs(ADAPTER_DIR, exist_ok=True)
+    lora_sd = {}
+    for name, p in model.named_parameters():
+        if p.requires_grad:
+            t = p.full_tensor() if isinstance(p, DTensor) else p.detach()
+            lora_sd[name] = t.detach().cpu()
+    if is_main:
+        torch.save(lora_sd, os.path.join(ADAPTER_DIR, "adapter_lora_state.pt"))
+        try:
+            model.peft_config["default"].save_pretrained(ADAPTER_DIR)
+        except Exception:
+            pass
+        tok.save_pretrained(ADAPTER_DIR)
+        nparam = sum(v.numel() for v in lora_sd.values())
+        print(f"[save] LoRA adapter ({len(lora_sd)} tensors, {nparam/1e6:.1f}M params) -> {ADAPTER_DIR}", flush=True)
+    if is_main:
+        with open(LOSS_RAW, "w") as f:
+            json.dump({"steps": step_log, "num_steps": NUM_STEPS, "total_train_s": round(total, 2),
+                       "world_size": ws, "eff_batch": BATCH_SIZE*ws,
+                       "config": {"model": MODEL_DIR, "lora_r": LORA_R, "lora_alpha": LORA_ALPHA, "lr": LR,
+                                  "batch": BATCH_SIZE, "max_len": MAX_LEN, "warmup": WARMUP, "n_examples": n}},
+                      f, indent=2, ensure_ascii=False)
+        print(f"[save] loss -> {LOSS_RAW}; [done] {total:.1f}s", flush=True)
+    dist.barrier()
+    dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    main()
