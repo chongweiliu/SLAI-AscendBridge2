@@ -43,13 +43,19 @@
 ## 显存估算公式（route_select 内置，bf16 + grad-ckpt）
 
 ```
-权重     = params × 2B                     (FSDP2: /N; device_map: /N; 单卡: 全量)
-优化器   = params × 0.8% × 12B             (LoRA AdamW fp32 状态)
+权重     = params × 2B                     (FSDP2: /N; device_map: /N; 单卡: 全量; MoE=全专家总参数)
+优化器   = params × 0.8% × 12B             (LoRA AdamW fp32 状态; MoE 融合专家挂不上 LoRA 时实际更小)
 激活     ≈ [L×seq×H×2 + seq×(4H+2I)×2 + seq×V×10] × batch × 1.5   (GC 生效: 各层输入+单层重算+logits/CE)
+           I: dense=intermediate; MoE=top_k×moe_intermediate+shared (有效激活中间维)
            FSDP2: 每卡全量(数据并行); device_map: /N(流水线分摊); 单卡: 全量
 可用预算 = 0.85 × 卡 HBM
 ```
-27B/seq2048 实测对照：估 17.4GB(16卡) vs 实测 16 卡运行正常；4 卡估 27.8GB vs 实测静态 16.3+工作 ~25GB——公式偏保守方向，安全。
+实测对照（--probe 遥测账本持续校准）：
+- 27B dense/seq2048/16卡: 估 17.4GB, 运行正常; 4卡估 27.8GB vs 实测 ~25GB（偏保守，安全）
+- 35.95B MoE/seq1024/16卡: 估 14.8GB vs **实测 9.25GB**（偏保守 37%，MoE 激活高估是主因之一）
+
+**步时/ETA 必须用稳态口径**：首步含 NPU 算子编译（大模型可达 38~210s，稳态的 2~10 倍），
+ETA = 末步增量 × 总步数。probe 已内置（曾实测平均法把 45min 报成 285min）。
 
 ## 精度安全默认（所有路线一致，不可为性能牺牲）
 

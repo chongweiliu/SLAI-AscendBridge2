@@ -47,7 +47,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 
 ### 2. 自动选路与超参（`route_select.py.tmpl`）——精度优先，性能自动最优
 ```bash
-python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | --epochs E --data train.jsonl] [--max-cards K] [--scale-up]
+python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | --epochs E --data train.jsonl] [--max-cards K] [--scale-up] [--probe --ws-dir <ws>]
 ```
 选路器读**模型参数量/层数/hidden/vocab（safetensors+config）+ npu-smi 空闲卡 + seq/steps/数据量**，输出：
 - **路线决策**（按"精度安全前提下性能最优"排序）：
@@ -57,6 +57,10 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 - **显存估算**（27B/seq2048 实测对照校准过）
 - **自动超参**（模型尺寸/步数/数据量感知，规则见 references/hyperparam-selection.md）：LR（<1B→2e-4, 1-30B→1e-4, >30B→5e-5）、r=16/alpha=32、warmup=10%×步数、grad_accum 凑有效 batch≈8、epochs↔steps 换算
 - **可直接复制的 export 启动块**（含 ASCEND_RT_VISIBLE_DEVICES 与对应启动命令）
+- **`--probe`（强烈推荐）**：自动跑 2 步试训（输出隔离到 ws/probe_run/ 不污染正式产物），一次性完成：
+  ① **兼容性实测**（含 MoE——架构能否跑通、loss 是否合理，替代"理论支持"）
+  ② **显存校准**：实测峰值 vs 公式预测，偏差落盘遥测账本 `outputs/route_calibration.jsonl`（积累越多尺寸越准）
+  ③ **ETA 外推**：用**末步增量（稳态步时）**×总步数——首步含 NPU 算子编译（可达数倍步时），平均法会高估 ETA 数倍（实测 45min 被均法报成 285min）
 **精度优先的保证**：三条路线的训练数值配置完全一致（bf16 autocast + grad-ckpt + eager + cosine），路线只影响并行方式不影响精度；训练前标签自检 + 训练后 base vs LoRA 验证门为强制步骤（见核心原则）。
 
 ### 3. 数据准备（`prepare_data.py.tmpl`）
@@ -106,7 +110,7 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 | HF CausalLM 纯文本（Qwen2/3/3.5、Llama-2/3、GLM、Mistral、DeepSeek、Yi 等） | ✅ 完整验证 | 0.8B（单卡）~27B（FSDP2 8-die）两端实测 |
 | 多模态模型文本头（Qwen3.5-VL / Qwen2-VL 系） | ✅ 验证 | `AutoModelForCausalLM` 加载即文本头，纯文本 SFT 无需图像（pitfalls #10） |
 | 混合注意力（gated delta / linear attention） | ✅ 验证 | LoRA 目标自动发现含 in_proj_* 系列 |
-| MoE 模型 | ⚠️ 理论支持未实测 | 目标发现与逐层分片通用；首跑先 2 步探针验证 loss 合理（route_select 会提示） |
+| MoE 模型 | ✅ 实测（Qwen3.6-35B-A3B, 16卡FSDP2） | 跑通且 loss 正常；**限制**：融合路由专家非 nn.Linear 挂不上 LoRA，仅注意力+共享专家被适配（21.2M 参数），见 pitfalls #21 |
 | 数据格式：messages / dialogue(student-teacher) / Alpaca | ✅ 验证 | prepare_data 三格式自动识别 |
 | chat 模板：ChatML / Llama-3 / Llama-2 / Mistral / DeepSeek | ✅ | 定界符表见 label-masking.md，可 env 覆盖 |
 | QLoRA / 量化基座 | ❌ 不支持 | 后续可扩展（NPU 量化路线另议） |

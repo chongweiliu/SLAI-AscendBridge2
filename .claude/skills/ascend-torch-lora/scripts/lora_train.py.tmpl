@@ -240,6 +240,14 @@ def main():
 
     total = time.time() - t_train
     print(f"[train] done. {NUM_STEPS} steps in {total:.1f}s ({total/NUM_STEPS:.2f}s/step)", flush=True)
+    # probe 上报行: route_select --probe 解析用 (实测 s/step + 峰值显存 + 末步 loss)
+    try:
+        # 稳态步时 = 末步增量(首步含算子编译预热, 平均法会高估 ETA 数倍)
+        steady = (step_log[-1]["elapsed_s"] - step_log[-2]["elapsed_s"]) if len(step_log) >= 2 else total / NUM_STEPS
+        print(f"[probe] s_per_step={steady:.2f} s_per_step_avg={total/NUM_STEPS:.2f} "
+              f"mem_peak_gb={torch.npu.max_memory_allocated()/2**30:.2f} last_loss={step_log[-1]['loss']}", flush=True)
+    except Exception:
+        pass
     model.save_pretrained(ADAPTER_DIR); tok.save_pretrained(ADAPTER_DIR)
     print(f"[save] adapter -> {ADAPTER_DIR}", flush=True)
     with open(LOSS_RAW, "w", encoding="utf-8") as f:
