@@ -41,6 +41,8 @@
 - `find_unused_parameters=True`（有 tie/embedding 未用参数时安全，但有开销；确认无未用参数时可 False 提速）。
 
 ## 何时用 FSDP2
+
+> ⚠️ FSDP2 与 `expandable_segments:True` 不兼容（all-gather buffer 累积致假性 OOM，曾误判为"fully_shard 不分片"）——cpt_fsdp.py.tmpl 已内置守卫自动禁用；本文中 FSDP2 的卡数阈值/吞吐结论（"9B 需 8 卡""12B/4卡 50s/step 通信-bound"）可能部分被该混杂变量污染，expandable_segments 关闭后需重新标定。见 pitfalls #77。
 - 模型单卡装不下（权重+优化器超单卡显存）。
 - `torch.distributed.fsdp.fully_shard` 逐 module 分片；每卡持 1/N 参数/梯度/优化器。
 - 通信更重（前向 all-gather + 反向 all-gather+reduce-scatter）。

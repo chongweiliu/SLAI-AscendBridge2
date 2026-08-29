@@ -7,6 +7,15 @@
 #  - NpuFusedAdamW 与 FSDP2 不兼容（FSDP2 用 meta tensor，npu.get_npu_format 无 fake impl）→ 用 torch.optim.AdamW
 #  - 融合路径靠 SDPA→npu fusion attention + TASK_QUEUE；bf16 靠 FSDP2 MixedPrecisionPolicy
 #  - 显存预算：每卡 ≈ 参数×16字节/N + 激活；9B 需 8 卡(~18GB/卡)，卡数不足会 OOM
+# 【关键】FSDP2 禁用 expandable_segments! (必须在 import torch 前改)
+# run_env.sh 按惯例 export 了 PYTORCH_NPU_ALLOC_CONF=expandable_segments:True（对单卡/融合优化器有益），
+# 但它破坏 FSDP2 逐层 all-gather buffer 的跨层复用 → 64 层 buffer 累积 ≈ 全模型大小 → 假性"未分片"OOM。
+# 实测 (27B/4-die): expandable_segments 下 OOM@60GB; 系统默认/max_split_size_mb 下 shard 11.3GB+前向 17.8GB 正常。
+# 详见 pitfalls #77。
+import os as _os
+if "expandable_segments" in _os.environ.get("PYTORCH_NPU_ALLOC_CONF", ""):
+    _os.environ["PYTORCH_NPU_ALLOC_CONF"] = "max_split_size_mb:256"
+
 import os, json, math, time, random, sys, subprocess
 import torch, torch_npu  # noqa: F401
 import torch.distributed as dist
