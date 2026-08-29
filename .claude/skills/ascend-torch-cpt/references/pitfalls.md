@@ -499,3 +499,11 @@ sys.meta_path.insert(0, _StubFinder())
 - **判定要点**：模型"生成什么" → 生成 token(转写)走文本 LM RL，生成 audio(语音合成)走扩散 RL。
 
 > 注：#73-76 是文本 LM / 音频 LLM RL 后训练特有，与扩散 RL（#69-72）是不同范式，不可混用。
+
+## 77. FSDP2 与 `expandable_segments:True` 不兼容：all-gather buffer 累积致假性"未分片"OOM
+
+- **症状**：`fully_shard` 逐层分片后训练前向 OOM，每卡 resident ≈ 全模型大小（如 27B → 60GB/卡），表象极像"FSDP2 没分片/每卡全量副本"；多加卡也不缓解（每卡同样 OOM）。
+- **根因**：本 skill 的 `run_env.sh.tmpl` 按惯例 `export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`（对单卡/NpuFusedAdamW 减碎片有益）。但 expandable_segments 分配器使 FSDP2 **逐层 all-gather 的输出 buffer 无法跨层复用回收**——64 层的 buffer 累积 ≈ 全模型大小，叠加在正常 shard（~参数/N）之上 → OOM。它是**混杂变量**：曾据此误判"torch_npu fully_shard 不实现真分片"，后经逐阶段显存测量推翻（分片本身完全正常：848 层参数全 DTensor，27B 4-die 每 rank shard 11.34GB，无 expandable_segments 时前向 peak 17.8GB）。
+- **解法**：FSDP2 训练**禁用 expandable_segments**（cpt_fsdp.py.tmpl 已加守卫：检测到即改 `max_split_size_mb:256`，必须在 import torch 前生效）。单卡/DDP/融合优化器路径不受影响，仍可用 expandable_segments。
+- **连带修正**：cpt_fsdp 的显存预算"每卡 ≈ 参数×16字节/N + 激活"在 expandable_segments 生效时**偏乐观**（漏算 buffer 累积 ≈ 全模型大小）；历史上"FSDP2 卡数不足会 OOM / 通信-bound 慢"的观察可能部分被此混杂变量污染（memory 压力会改变 reshard 行为）。在 expandable_segments 关闭后重新标定卡数阈值与吞吐再下结论。
+- **同源坑（对照）**：ascend-torch-lora skill 的 pitfalls #19/#20 记录了同一问题在 LoRA SFT 上的完整定位过程（含第二个根因：漏调 `model.train()` 致 GC 被跳过——cpt_fsdp 有 `model.train()`，此坑不在 CPT）。
