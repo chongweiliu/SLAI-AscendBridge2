@@ -1,0 +1,255 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# lora_train.py.tmpl — 昇腾 NPU LoRA SFT 训练（单卡 Eager, NpuFusedAdamW, bf16 autocast）
+# 用法: python lora_train.py   (所有参数走环境变量, 见下)
+# 踩坑已规避: autoload=0 手动 import torch_npu; CANN 9.0.0; set_to_none=False;
+#   apply_chat_template 返回 BatchEncoding 取 ['input_ids']; assistant 掩码用字符偏移法
+import os, json, math, time, random
+
+# ---- NPU 环境变量 (必须在 import torch 前) ----
+os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+os.environ.setdefault("TASK_QUEUE_ENABLE", "1")
+os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+import torch
+import torch_npu  # noqa: F401  必须，autoload=0 时手动注册 NPU 后端
+from torch_npu.optim import NpuFusedAdamW
+import transformers
+from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig, get_peft_model
+
+# ====== 可配置参数（环境变量覆盖） ======
+MODEL_DIR = os.environ.get("MODEL_DIR", "/mnt/model/Qwen3.5-0.8B")          # 必填：模型权重路径
+WS = os.environ.get("WS_DIR", os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+DATA = os.environ.get("DATA_FILE", os.path.join(WS, "outputs", "train.jsonl"))
+OUT_DIR = os.environ.get("OUT_DIR", os.path.join(WS, "outputs"))
+LOSS_LOG = os.path.join(OUT_DIR, "loss.jsonl")
+LOSS_RAW = os.path.join(OUT_DIR, "loss_raw.json")
+ADAPTER_DIR = os.path.join(OUT_DIR, "lora_adapter")
+NUM_STEPS = int(os.environ.get("NUM_STEPS", "150"))
+BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "1"))
+GRAD_ACCUM = int(os.environ.get("GRAD_ACCUM", "4"))      # 有效 batch = BATCH_SIZE * GRAD_ACCUM
+MAX_LEN = int(os.environ.get("MAX_LEN", "1536"))
+LR = float(os.environ.get("LR", "1e-4"))
+WARMUP = int(os.environ.get("WARMUP", "15"))
+LORA_R = int(os.environ.get("LORA_R", "16"))
+LORA_ALPHA = int(os.environ.get("LORA_ALPHA", "32"))
+LORA_DROPOUT = float(os.environ.get("LORA_DROPOUT", "0.05"))
+MAX_GRAD_NORM = 1.0
+SEED = int(os.environ.get("SEED", "42"))
+DEV = os.environ.get("NPU_DEV", "npu:0")
+# 大模型(>=13B)必用: DEVICE_MAP="auto" 跨多 die 切分权重(单卡放不下); GRADIENT_CHECKPOINTING=1 省激活显存
+DEVICE_MAP = os.environ.get("DEVICE_MAP", "")            # ""=单卡 .to(DEV); "auto"=device_map="auto"
+GRADIENT_CHECKPOINTING = os.environ.get("GRADIENT_CHECKPOINTING", "0") == "1"
+# 强制多 die 切分: device_map="auto" 默认不切(模型能塞下单卡就全塞). 用 MAX_MEMORY 强制分散
+# 如 "0:16GiB;1:16GiB;2:16GiB;3:16GiB" (每 die 最多放这么多权重, 激活另占物理显存)
+MAX_MEMORY = os.environ.get("MAX_MEMORY", "")
+# assistant 块的起止特殊标记（用于字符偏移法标 label）—— 按目标模型 chat template 调整
+# ChatML 系(Qwen/GLM/ChatML): <|im_start|>assistant\n ... <|im_end|>\n
+# Llama-3: <|start_header_id|>assistant<|end_header_id|>\n\n ... <|eot_id|>
+ASTART = os.environ.get("ASSISTANT_START", "<|im_start|>assistant\n")
+AEND = os.environ.get("ASSISTANT_END", "<|im_end|>")
+
+
+def lr_at(step, num_steps, warmup, lr):
+    if step < warmup:
+        return lr * (step + 1) / warmup
+    prog = (step - warmup) / max(1, num_steps - warmup)
+    return lr * 0.5 * (1 + math.cos(math.pi * min(1.0, prog)))
+
+
+def build_examples(tok):
+    """读 train.jsonl (每行 {messages:[...]}), 用字符偏移法对 assistant token 标 label。
+    方法: 渲染全字符串 -> tok(offsets) -> 在字符串定位 assistant 块字符区间 -> token offset 落入即 label。
+    优先用 return_assistant_tokens_mask；若全 0 则用字符偏移法。
+    """
+    examples, skipped = [], 0
+    with open(DATA, encoding="utf-8") as f:
+        for line in f:
+            msgs = json.loads(line)["messages"]
+            # 优先 assistant_masks
+            use_char = True
+            try:
+                enc = tok.apply_chat_template(
+                    msgs, tokenize=True, add_generation_prompt=False,
+                    return_assistant_tokens_mask=True, return_dict=True, return_tensors="pt")
+                am = enc.get("assistant_masks", None)
+                if am is not None and int(am.sum()) > 0:
+                    input_ids = enc["input_ids"][0]
+                    labels = input_ids.clone()
+                    labels[am[0] == 0] = -100
+                    use_char = False
+            except Exception:
+                pass
+            if use_char:
+                rendered = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False)
+                enc = tok(rendered, return_offsets_mapping=True, add_special_tokens=False)
+                input_ids = enc["input_ids"]
+                offsets = enc["offset_mapping"]
+                spans, pos = [], 0
+                while True:
+                    idx = rendered.find(ASTART, pos)
+                    if idx == -1:
+                        break
+                    eidx = rendered.find(AEND, idx)
+                    if eidx == -1:
+                        break
+                    end = eidx + len(AEND)
+                    if end < len(rendered) and rendered[end] == "\n":
+                        end += 1
+                    spans.append((idx, end))
+                    pos = end
+                labels = [-100] * len(input_ids)
+                for ti, (cs, ce) in enumerate(offsets):
+                    if cs == ce:
+                        continue
+                    for (sp_st, sp_en) in spans:
+                        if cs < sp_en and ce > sp_st:
+                            labels[ti] = input_ids[ti]
+                            break
+                input_ids = torch.tensor(input_ids, dtype=torch.long)
+            n_label = int((torch.tensor(labels) != -100).sum())
+            if n_label == 0:
+                skipped += 1
+                continue
+            labels_t = input_ids.clone() if isinstance(labels, list) else labels
+            if isinstance(labels, list):
+                labels_t = torch.tensor(labels, dtype=torch.long)
+            examples.append({"input_ids": input_ids, "labels": labels_t,
+                             "attn": torch.ones_like(input_ids)})
+    print(f"[data] built {len(examples)}, skipped(no assistant label) {skipped}", flush=True)
+    if skipped:
+        print("[WARN] 有样本 assistant label=0！检查 ASSISTANT_START/END 标记是否匹配该模型的 chat template"
+              "（渲染一条 tokenize=False 看 assistant 块的实际定界符）", flush=True)
+    return examples
+
+
+def main():
+    t0 = time.time()
+    torch.manual_seed(SEED); random.seed(SEED)
+    os.makedirs(OUT_DIR, exist_ok=True); os.makedirs(ADAPTER_DIR, exist_ok=True)
+    print(f"[env] torch={torch.__version__} torch_npu={torch_npu.__version__} "
+          f"transformers={transformers.__version__}", flush=True)
+    torch.npu.set_device(DEV)
+    print(f"[env] npu available={torch.npu.is_available()} device={DEV}", flush=True)
+    x = torch.randn(8, 8, device=DEV)
+    print(f"[env] matmul ok sum={(x @ x).sum().item():.3f}", flush=True)
+
+    tok = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
+    print(f"[tok] vocab={len(tok)}", flush=True)
+
+    print(f"[model] loading {MODEL_DIR} ...", flush=True)
+    tm = time.time()
+    load_kwargs = dict(dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="eager")
+    if DEVICE_MAP:
+        load_kwargs["device_map"] = DEVICE_MAP
+        if MAX_MEMORY:
+            mm = {}
+            for part in MAX_MEMORY.split(";"):
+                k, v = part.split(":")
+                mm[int(k)] = v.strip()
+            load_kwargs["max_memory"] = mm
+            print(f"[model] device_map={DEVICE_MAP} max_memory={mm}", flush=True)
+        else:
+            print(f"[model] device_map={DEVICE_MAP} (注意: 模型能塞下单卡时 auto 不切, 大模型须配 MAX_MEMORY)", flush=True)
+    model = AutoModelForCausalLM.from_pretrained(MODEL_DIR, **load_kwargs)
+    if not DEVICE_MAP:
+        model = model.to(DEV)
+    model.config.use_cache = False
+    if GRADIENT_CHECKPOINTING:
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+        print("[model] gradient_checkpointing enabled", flush=True)
+    INPUT_DEV = next(model.parameters()).device if DEVICE_MAP else DEV
+    print(f"[model] loaded {time.time()-tm:.1f}s params={sum(p.numel() for p in model.parameters())/1e6:.1f}M input_dev={INPUT_DEV}", flush=True)
+
+    # 自动发现 LoRA 目标
+    linear_names = {n.split(".")[-1] for n, m in model.named_modules()
+                    if type(m).__name__ == "Linear"}
+    candidates = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj",
+                  "in_proj_qkv", "in_proj_a", "in_proj_b", "in_proj_z", "out_proj",
+                  "q_a_proj", "q_b_proj", "kv_a_proj", "kv_b_proj", "lm_head"]
+    targets = sorted([c for c in candidates if c in linear_names])
+    print(f"[lora] linear layer names: {sorted(linear_names)}", flush=True)
+    print(f"[lora] target_modules={targets}", flush=True)
+    if not targets:
+        targets = sorted(linear_names - {"lm_head"})[:8]
+        print(f"[lora] fallback targets={targets}", flush=True)
+
+    lora_cfg = LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA, lora_dropout=LORA_DROPOUT,
+                          target_modules=targets, bias="none", task_type="CAUSAL_LM")
+    model = get_peft_model(model, lora_cfg)
+    if GRADIENT_CHECKPOINTING:
+        model.enable_input_require_grads()  # peft + grad ckpt 必需, 否则 backward 报 no grad
+    model.print_trainable_parameters()
+    trainable = [p for p in model.parameters() if p.requires_grad]
+
+    print(f"[data] building from {DATA} ...", flush=True)
+    examples = build_examples(tok)
+    lens = [len(e["input_ids"]) for e in examples]
+    print(f"[data] {len(examples)} examples, token len min/median/max={min(lens)}/"
+          f"{sorted(lens)[len(lens)//2]}/{max(lens)}", flush=True)
+
+    # 优化器: 单卡用 NpuFusedAdamW(快); 多 die device_map 时 LoRA 参数跨设备, 融合优化器不支持, 退回 AdamW
+    if DEVICE_MAP:
+        opt = torch.optim.AdamW(trainable, lr=LR, betas=(0.9, 0.95), weight_decay=0.01, eps=1e-8)
+        print("[opt] AdamW (device_map 模式, 非融合)", flush=True)
+    else:
+        opt = NpuFusedAdamW(trainable, lr=LR, betas=(0.9, 0.95), weight_decay=0.01, eps=1e-8)
+
+    model.train()  # 【关键】from_pretrained 默认 eval; transformers GC 只在 training=True 生效
+    rng = random.Random(SEED); n = len(examples)
+    step_log = []
+    opt.zero_grad(set_to_none=False)  # NpuFusedAdamW 不支持 set_to_none=True
+    print(f"[train] {NUM_STEPS} steps, bs={BATCH_SIZE}, grad_accum={GRAD_ACCUM}, lr={LR}, "
+          f"lora_r={LORA_R}, warmup={WARMUP}, max_len={MAX_LEN}", flush=True)
+    t_train = time.time(); step = 0
+    while step < NUM_STEPS:
+        accum_loss = 0.0
+        for _ in range(GRAD_ACCUM):
+            if step >= NUM_STEPS:
+                break
+            ex = examples[rng.randint(0, n - 1)]
+            ids = ex["input_ids"][:MAX_LEN].to(INPUT_DEV)
+            lbl = ex["labels"][:MAX_LEN].to(INPUT_DEV)
+            attn = ex["attn"][:MAX_LEN].to(INPUT_DEV)
+            with torch.autocast("npu", dtype=torch.bfloat16):
+                out = model(input_ids=ids.unsqueeze(0), attention_mask=attn.unsqueeze(0),
+                            labels=lbl.unsqueeze(0))
+                loss = out.loss / GRAD_ACCUM
+            loss.backward()
+            accum_loss += out.loss.item()
+        if step >= NUM_STEPS:
+            break
+        cur_lr = lr_at(step, NUM_STEPS, WARMUP, LR)
+        for g in opt.param_groups:
+            g["lr"] = cur_lr
+        torch.nn.utils.clip_grad_norm_(trainable, MAX_GRAD_NORM)
+        opt.step()
+        opt.zero_grad(set_to_none=False)
+        avg = accum_loss / GRAD_ACCUM
+        el = time.time() - t_train
+        rec = {"step": step + 1, "loss": round(avg, 6), "lr": round(cur_lr, 8), "elapsed_s": round(el, 2)}
+        step_log.append(rec)
+        with open(LOSS_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        if (step + 1) % 10 == 0 or step == 0:
+            print(f"[train] step {step+1}/{NUM_STEPS} loss={avg:.4f} lr={cur_lr:.2e} elapsed={el:.1f}s", flush=True)
+        step += 1
+
+    total = time.time() - t_train
+    print(f"[train] done. {NUM_STEPS} steps in {total:.1f}s ({total/NUM_STEPS:.2f}s/step)", flush=True)
+    model.save_pretrained(ADAPTER_DIR); tok.save_pretrained(ADAPTER_DIR)
+    print(f"[save] adapter -> {ADAPTER_DIR}", flush=True)
+    with open(LOSS_RAW, "w", encoding="utf-8") as f:
+        json.dump({"steps": step_log, "num_steps": NUM_STEPS, "total_train_s": round(total, 2),
+                   "config": {"model": MODEL_DIR, "lora_r": LORA_R, "lora_alpha": LORA_ALPHA, "lr": LR,
+                              "batch": BATCH_SIZE, "grad_accum": GRAD_ACCUM, "max_len": MAX_LEN,
+                              "warmup": WARMUP, "n_examples": len(examples)}},
+                  f, indent=2, ensure_ascii=False)
+    print(f"[save] loss -> {LOSS_RAW}; [done] {time.time()-t0:.1f}s", flush=True)
+
+
+if __name__ == "__main__":
+    main()

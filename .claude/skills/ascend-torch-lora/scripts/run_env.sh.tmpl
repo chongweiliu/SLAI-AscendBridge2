@@ -1,0 +1,40 @@
+#!/bin/bash
+# run_env.sh.tmpl — 昇腾 NPU LoRA SFT 运行环境 (source 或 bash 执行)
+# 用途: 统一设置 CANN / torch_npu / NPU 卡选择 等环境变量
+# 踩坑已规避: CANN 必 source 9.0.0 (latest 常指向 8.3.RC1 无 FA 内核); autoload=0; expandable_segments
+
+# ---------- CANN: 优先 9.0.0, fallback latest ----------
+if [ -f /usr/local/Ascend/cann-9.0.0/set_env.sh ]; then
+  source /usr/local/Ascend/cann-9.0.0/set_env.sh > /dev/null 2>&1
+elif [ -f /usr/local/Ascend/ascend-toolkit/latest/set_env.sh ]; then
+  source /usr/local/Ascend/ascend-toolkit/latest/set_env.sh > /dev/null 2>&1
+fi
+
+# ---------- torch_npu / NPU 运行时 ----------
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0             # 规避 torch_npu autoload 崩, 手动 import torch_npu
+export TASK_QUEUE_ENABLE=1                         # 异步算子下发, +5~15% 加速
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True  # 减显存碎片
+export TOKENIZERS_PARALLELISM=false
+export HF_ENDPOINT=https://hf-mirror.com           # 国内下载
+
+# ---------- 选空闲单卡 (不默认写死 0 号) ----------
+if [ -z "$ASCEND_RT_VISIBLE_DEVICES" ]; then
+  # 取一张空闲卡 (HBM 占用最低); npu-smi 输出按芯片, visible device = 芯片序号
+  export ASCEND_RT_VISIBLE_DEVICES="${NPU_CARD:-0}"
+fi
+
+# ---------- 任务参数 (环境变量覆盖) ----------
+export MODEL_DIR="${MODEL_DIR:-/mnt/model/Qwen3.5-0.8B}"
+export DATA_SRC="${DATA_SRC:-/path/to/dataset.json}"
+export NUM_STEPS="${NUM_STEPS:-150}"
+export LR="${LR:-1e-4}"
+export LORA_R="${LORA_R:-16}"
+export LORA_ALPHA="${LORA_ALPHA:-32}"
+export SAMPLE_RATIO="${SAMPLE_RATIO:-0.5}"
+
+echo "[env] CANN=$ASCEND_OPP_PATH"
+echo "[env] ASCEND_RT_VISIBLE_DEVICES=$ASCEND_RT_VISIBLE_DEVICES"
+echo "[env] MODEL_DIR=$MODEL_DIR DATA_SRC=$DATA_SRC NUM_STEPS=$NUM_STEPS"
+
+# 健康检查
+"$WS_DIR/.venv/bin/python" -c "import torch,torch_npu; torch.npu.set_device(0); print('npu', torch.npu.is_available(), 'matmul', float((torch.randn(4,4,device='npu:0')@torch.randn(4,4,device='npu:0')).sum()))" 2>/dev/null

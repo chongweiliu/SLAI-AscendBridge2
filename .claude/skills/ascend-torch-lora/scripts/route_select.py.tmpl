@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+# route_select.py — ascend-torch-lora 自动选路器（纯标准库, 无需 torch）
+# 输入: --model-dir --seq-len --steps/--epochs [--data train.jsonl] [--batch]
+# 读取: npu-smi 空闲卡、safetensors 参数量、config 层数/hidden/vocab
+# 输出: 路线(single_card|fsdp2|device_map) + world_size + 显存估算 + 推荐超参 export 块
+# 原则: 精度优先(全路线均为精度安全配置: bf16+GC+eager) → 性能其次(单卡→FSDP2→device_map)
+import os, sys, json, math, argparse, re, subprocess
+
+# ---------- 模型信息 ----------
+def model_info(model_dir):
+    """从 safetensors index/config 取 参数量/层数/hidden/intermediate/vocab (bf16 假设)"""
+    params = None
+    idx_p = os.path.join(model_dir, "model.safetensors.index.json")
+    if os.path.isfile(idx_p):
+        idx = json.load(open(idx_p))
+        params = idx.get("metadata", {}).get("total_size", 0) / 2  # bf16
+    else:  # 单文件
+        tot = sum(os.path.getsize(os.path.join(model_dir, f))
+                  for f in os.listdir(model_dir) if f.endswith(".safetensors"))
+        if tot: params = tot / 2
+    cfg = json.load(open(os.path.join(model_dir, "config.json")))
+    tc = cfg.get("text_config", cfg)  # 多模态取 text_config
+    layers = tc.get("num_hidden_layers") or cfg.get("num_hidden_layers") or 32
+    hidden = tc.get("hidden_size") or cfg.get("hidden_size") or 4096
+    inter = tc.get("intermediate_size") or cfg.get("intermediate_size") or int(hidden * 4)
+    vocab = cfg.get("vocab_size") or tc.get("vocab_size") or 128000
+    # MoE 检测
+    moe = bool(tc.get("num_experts") or cfg.get("num_experts"))
+    return dict(params=params, layers=layers, hidden=hidden, inter=inter, vocab=vocab, moe=moe)
+
+# ---------- NPU 空闲卡 ----------
+def free_cards(used_ratio=0.20):
+    """解析 npu-smi info, 返回 [(idx, used_mb, total_mb)] 中 used_ratio 以下的卡"""
+    try:
+        out = subprocess.run(["npu-smi", "info"], capture_output=True, text=True, timeout=30).stdout
+    except Exception:
+        return []
+    cards = []
+    for line in out.splitlines():
+        ms = re.findall(r"(\d+)\s*/\s*(\d+)", line)
+        if not ms: continue
+        used, total = map(int, ms[-1])  # 行末最后一对 = HBM-Usage
+        if total > 1000:  # MB 量级才算 die 行
+            cards.append((used, total))
+    return [(i, u, t) for i, (u, t) in enumerate(cards) if u / t <= used_ratio]
+
+# ---------- 显存估算 (GB, bf16 + grad-ckpt) ----------
+def est_mem(mi, seq, batch, world, route):
+    """返回每卡显存估算 (GB)"""
+    P = mi["params"]; L = mi["layers"]; H = mi["hidden"]; I = mi["inter"]; V = mi["vocab"]
+    W = P * 2 / 1e9                                # 权重 bf16
+    opt = P * 0.008 * 12 / 1e9                     # LoRA AdamW fp32 状态(可训练~0.8%)
+    # 激活 (grad-ckpt 生效): 各层 checkpoint 输入 + 单层重算峰值 + logits/CE
+    act = (L * seq * H * 2 + seq * (4 * H + 2 * I) * 2 + seq * V * 10) * batch / 1e9
+    act *= 1.5  # 工作缓冲安全系数
+    if route == "single":
+        return W + opt + act, W, opt, act
+    if route == "fsdp2":   # 数据并行: 激活不分片(每卡过全模型); 权重分片; +单层all-gather瞬态
+        return W / world + opt + act + W / L * 1.5, W / world, opt, act
+    # device_map 流水线: 权重与激活都按卡分摊
+    return (W + act) / world + opt, W / world, opt, act / world
+
+# ---------- 超参自动选择 (LoRA 专家规则, 见 references/hyperparam-selection.md) ----------
+def pick_hparams(params, steps, batch, world, n_samples=None, epochs=None):
+    P = params or 1e9
+    lr = 2e-4 if P < 1e9 else (1e-4 if P <= 3e10 else 5e-5)   # <1B:2e-4; 1-30B:1e-4; >30B:5e-5
+    lora_r = 16; lora_alpha = 32; dropout = 0.05               # 风格/格式类任务默认; 知识注入建议 r=32-64
+    if steps is None and epochs and n_samples:                 # 未给步数但有 epochs → 推导
+        eff = max(1, batch * world)
+        steps = math.ceil(epochs * n_samples / eff)
+    steps = steps or 150
+    warmup = max(10, math.ceil(0.1 * steps))                   # warmup=10% 步数
+    grad_accum = max(1, math.ceil(8 / (batch * world)))        # 凑有效 batch≈8
+    return dict(lr=lr, lora_r=lora_r, lora_alpha=lora_alpha, dropout=dropout,
+                warmup=warmup, grad_accum=grad_accum, steps=steps)
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model-dir", required=True)
+    ap.add_argument("--seq-len", type=int, default=2048)
+    ap.add_argument("--batch", type=int, default=1)
+    ap.add_argument("--steps", type=int, default=None)
+    ap.add_argument("--epochs", type=float, default=None)
+    ap.add_argument("--data", default=None, help="train.jsonl (数样本数算 steps)")
+    ap.add_argument("--trainable-ratio", type=float, default=0.008)
+    ap.add_argument("--max-cards", type=int, default=None, help="限制最大用卡数(共享机器时); 默认用满空闲卡")
+    ap.add_argument("--scale-up", action="store_true",
+                    help="小模型也用多卡数据并行(FSDP2)扩吞吐; 默认小模型走单卡(最快迭代)")
+    args = ap.parse_args()
+
+    mi = model_info(args.model_dir)
+    cards = free_cards()
+    n_free = len(cards)
+    if args.max_cards: n_free = min(n_free, args.max_cards)
+    n_samples = None
+    if args.data and os.path.isfile(args.data):
+        with open(args.data) as f: n_samples = sum(1 for _ in f)
+    if not mi["params"]:
+        print("[route] FATAL: 读不到模型参数量(safetensors)"); sys.exit(1)
+    if n_free == 0:
+        print("[route] FATAL: npu-smi 无空闲卡(阈值 used<20%)"); sys.exit(1)
+    hbm_gb = cards[0][2] / 1024  # 用第一张空闲卡的总量
+    usable = 0.85 * hbm_gb
+
+    print(f"[model] params={mi['params']/1e9:.2f}B layers={mi['layers']} hidden={mi['hidden']} "
+          f"vocab={mi['vocab']}{' [MoE]' if mi['moe'] else ''}")
+    print(f"[npu]   空闲卡 {n_free} 张 (HBM {hbm_gb:.0f}GB/卡, 可用预算 {usable:.1f}GB/卡)")
+
+    # ---- 决策: 精度安全前提下按性能排序选路线 ----
+    # 大模型(单卡放不下): FSDP2 用满空闲卡(数据并行, 卡越多 shard 越小吞吐越高, HCCS 下不被通信卡死)
+    # 小模型(单卡放得下): 默认单卡(零通信最快迭代); --scale-up 才多卡扩吞吐
+    route = world = None
+    m1 = est_mem(mi, args.seq_len, args.batch, 1, "single")
+    if m1[0] <= usable and not args.scale_up:
+        route, world = "single_card", 1
+        print(f"[route] ① 单卡可行: 总显存 {m1[0]:.1f}GB ≤ {usable:.1f}GB → **single_card**(无通信, 最快)")
+        if n_free >= 2:
+            print(f"[route]    (大数据集要扩吞吐可加 --scale-up: FSDP2 用满 {n_free} 卡数据并行)")
+    else:
+        mn = est_mem(mi, args.seq_len, args.batch, n_free, "fsdp2")
+        if mn[0] <= usable:
+            route, world = "fsdp2", n_free
+            why = "单卡放不下" if m1[0] > usable else "--scale-up 吞吐扩展"
+            print(f"[route] ② FSDP2 {n_free} 卡({why}): shard {mn[1]:.1f}GB + 激活 {mn[3]:.1f}GB + opt = "
+                  f"{mn[0]:.1f}GB ≤ {usable:.1f}GB → **fsdp2**(数据并行吞吐最优, HCCS 实测 device_map 的 2.2-4.7×/样本)")
+        else:
+            for n in range(2, n_free + 1):  # device_map: 权重+激活都分摊(大 seq 兜底)
+                mnd = est_mem(mi, args.seq_len, args.batch, n, "device_map")
+                if mnd[0] <= usable:
+                    route, world = "device_map", n
+                    print(f"[route] ③ device_map {n} 卡: (权重+激活)/{n} + opt = {mnd[0]:.1f}GB ≤ {usable:.1f}GB "
+                          f"→ **device_map**(激活也分摊, 大 seq 兜底; 有流水线气泡)")
+                    break
+    if route is None:
+        print(f"[route] FATAL: {n_free} 卡都放不下 (FSDP2 需权重/N+激活 ≤ {usable:.1f}GB)。"
+              f"建议: 减 seq_len / 用满全部卡 / 升级 >{hbm_gb:.0f}GB HBM 卡"); sys.exit(1)
+
+    hp = pick_hparams(mi["params"], args.steps, args.batch, world, n_samples, args.epochs)
+    devs = ",".join(str(c[0]) for c in cards[:world])
+    print(f"\n[hyper] 自动超参 (模型 {mi['params']/1e9:.1f}B): LR={hp['lr']} "
+          f"(规则: <1B→2e-4, 1-30B→1e-4, >30B→5e-5), lora_r={hp['lora_r']}, alpha={hp['lora_alpha']}, "
+          f"warmup={hp['warmup']}(10%步数), grad_accum={hp['grad_accum']}(凑有效batch≈8), steps={hp['steps']}")
+    if mi["moe"]:
+        print("[note]  MoE 模型: 目标模块自动发现与逐层分片通用, 但未经完整实测; 首跑建议先 2 步探针验证 loss 合理再放量")
+    print("\n===== 复制以下环境变量启动训练 =====")
+    if route == "single_card":
+        print(f"export MODEL_DIR={args.model_dir}")
+        print(f"export NUM_STEPS={hp['steps']} LR={hp['lr']} LORA_R={hp['lora_r']} LORA_ALPHA={hp['lora_alpha']} "
+              f"WARMUP={hp['warmup']} GRAD_ACCUM={hp['grad_accum']} MAX_LEN={args.seq_len} BATCH_SIZE={args.batch}")
+        print(f"export ASCEND_RT_VISIBLE_DEVICES={cards[0][0]}   # 单卡(融合优化器 NpuFusedAdamW)")
+        print("# 启动: python scripts/lora_train.py")
+    elif route == "fsdp2":
+        print(f"export MODEL_DIR={args.model_dir}")
+        print(f"export NUM_STEPS={hp['steps']} LR={hp['lr']} LORA_R={hp['lora_r']} LORA_ALPHA={hp['lora_alpha']} "
+              f"WARMUP={hp['warmup']} MAX_LEN={args.seq_len} BATCH_SIZE={args.batch}")
+        print(f"export ASCEND_RT_VISIBLE_DEVICES={devs}")
+        print("# 启动: python -m torch.distributed.run --nproc_per_node=%d scripts/lora_train_fsdp.py" % world)
+    else:
+        print(f"export MODEL_DIR={args.model_dir}")
+        print(f"export NUM_STEPS={hp['steps']} LR={hp['lr']} LORA_R={hp['lora_r']} LORA_ALPHA={hp['lora_alpha']} "
+              f"WARMUP={hp['warmup']} GRAD_ACCUM={hp['grad_accum']} MAX_LEN={args.seq_len} BATCH_SIZE={args.batch}")
+        print(f"export ASCEND_RT_VISIBLE_DEVICES={devs}")
+        mm = " ".join(f"{i}:{hbm_gb*0.9:.0f}GiB" for i in [c[0] for c in cards[:world]])
+        print(f'export DEVICE_MAP=auto MAX_MEMORY="{mm}" GRADIENT_CHECKPOINTING=1')
+        print("# 启动: python scripts/lora_train.py")
+    print("# 精度门(训练前后必过): ①标签自检 n_label>0 且无 user 泄漏 ②eager 基线 ③训练后 base vs LoRA 验证")
+
+if __name__ == "__main__":
+    main()
