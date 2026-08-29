@@ -71,6 +71,13 @@ def char_overlap(gt, pred):
     return inter / union if union > 0 else 0.0
 
 
+def extract_boxed(text):
+    """抽取 \\boxed{...} 内容(可验证任务的最终答案); 无则 None"""
+    import re as _re
+    ms = _re.findall(r"\\boxed\{([^{}]*)\}", text or "")
+    return ms[-1].strip() if ms else None
+
+
 def gen_once(model, tok, msgs):
     ids = tok.apply_chat_template(msgs, tokenize=True, add_generation_prompt=True,
                                   return_dict=True, return_tensors="pt")["input_ids"].to(next(model.parameters()).device)
@@ -129,13 +136,22 @@ def evaluate(model, tok, records, tag):
             co = char_overlap(gt, pred)
             m = {"turn": ti, "gt": gt[:120], "pred": pred[:160], "rouge_l": round(r, 4),
                  "char_overlap": round(co, 4), "gt_len": len(gt), "pred_len": len(pred)}
+            # 答案抽取精确匹配(③): 双方都有 boxed 时才计(可验证任务的最优客观指标)
+            bg, bp = extract_boxed(gt), extract_boxed(pred)
+            if bg is not None:
+                m["answer_match"] = int(bp is not None and bp == bg)
             rec_m.append(m); results.append(m)
         avg = sum(m["rouge_l"] for m in rec_m) / max(1, len(rec_m))
         print(f"[{tag}] rec{ri+1}/{N_VAL} turns={len(rec_m)} avg_rougeL={avg:.3f}", flush=True)
     o = sum(m["rouge_l"] for m in results) / max(1, len(results))
     co = sum(m["char_overlap"] for m in results) / max(1, len(results))
-    return {"per_turn": results, "rouge_l_mean": round(o, 4),
-            "char_overlap_mean": round(co, 4), "n_turns": len(results)}
+    am = [m["answer_match"] for m in results if "answer_match" in m]
+    out = {"per_turn": results, "rouge_l_mean": round(o, 4),
+           "char_overlap_mean": round(co, 4), "n_turns": len(results)}
+    if am:
+        out["answer_match_mean"] = round(sum(am) / len(am), 4)  # 可验证任务的最终答案命中率
+        out["n_answer_turns"] = len(am)
+    return out
 
 
 def main():

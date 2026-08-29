@@ -165,3 +165,12 @@ if "expandable_segments" in os.environ.get("PYTORCH_NPU_ALLOC_CONF", ""):
 | FSDP2（8-die） | 实测见运行记录 | shard 6.75GB/卡，有效 batch=8 |
 
 两路线都可用；大模型吞吐优先 FSDP2（按 pitfalls #19 配置），稳妥/简单优先 device_map。
+
+## #21 MoE 模型 LoRA 实测（Qwen3.6-35B-A3B, 2026-08-29）：融合路由专家挂不上 LoRA
+
+**实测结论**（16 卡 FSDP2, 2 步 probe + 完整探针）：
+- **兼容性 ✅**：`qwen3_5_moe` 在 transformers 5.16.1 可加载（Qwen3_5MoeConfig）；FSDP2 逐层分片正常（40 层 1310 DTensor 参数）；训练跑通、loss 正常下降（1.93→1.79）。
+- **关键限制：融合实现的 256 路由专家不是 `nn.Linear`，peft 的 target_modules 按名匹配挂不上**。实测 adapter 只覆盖 `linear_attn`(300 张量) + `self_attn`(80) + `mlp`=共享专家(240)，共 **21.2M 可训练参数**（若能挂上路由专家应 ~250M）。即 LoRA 只适配注意力+共享专家，路由专家不动——对风格/格式类 SFT 通常够用（共享专家承担了 FFN 适配），知识注入任务需知悉此限制。
+- **显存**：权重按总参数（35.95B→71.9GB，所有专家驻留）；激活按 top-k 有效中间维（256 专家 top-8 × 512 + shared 512 = 4608）。实测 9.25GB/rank(16卡) vs 公式预测 14.8GB（公式偏保守 37%，安全向）。
+- **步时陷阱（probe 稳态修正的由来）**：首步含 NPU 算子编译（38~210s），稳态仅 18~21s/step——**ETA 必须用末步增量（稳态），不能用平均值**（平均法曾把 45min 高估成 285min）。probe 已改为稳态口径。
+- **瞬时不稳定**：16-rank 大模型运行后紧接重跑可能报 driver 级 OOM（`aclnnMm` 207001, "Failed to apply for memory"），卡显存却基本干净——等 30s 重试即可（同 #17 变体）。
