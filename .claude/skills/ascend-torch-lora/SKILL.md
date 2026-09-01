@@ -1,6 +1,6 @@
 ---
 name: ascend-torch-lora
-description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTorch + torch_npu + peft 对任意 HuggingFace CausalLM（含多模态模型的文本头，如 Qwen3/3.5、Qwen2、Llama、GLM、Mistral 等）做 LoRA 监督微调（SFT / instruction tuning）的端到端技能。用户只需给出【模型权重路径】+【对话/指令数据集路径】即可启动：自动探测环境/依赖、数据自动转 chat 格式并对 assistant 轮做 loss 掩掩、自动发现 LoRA 目标模块、**自动选路（route_select：按模型大小+空闲卡自动决策单卡/FSDP2 数据并行/device_map 流水线，超参按模型尺寸/步数自动择优，精度优先性能自动最优）**、bf16 autocast + grad-ckpt + cosine 调度、默认产出 loss 曲线图+公网可访问直链（catbox.moe/0x0.st/uguu.se 顺序尝试，外网全不通则降级表格）、概要总结、base vs LoRA 验证对比（ROUGE-L/字符重叠/生成长度）。只要用户要在昇腾上“LoRA 微调/SFT/指令微调/对话微调”某模型，或提到 NPU + LoRA + 对话数据 + loss 曲线 + 验证，就应使用本技能——即使用户没明说“skill”。本技能基于 PyTorch + torch_npu + peft（不是 CUDA/deepspeed/unsloth）。与 [[ascend-torch-cpt]]（继续预训练，喂原始语料）区分：本技能是 SFT，喂的是 chat/指令对话数据并只对 assistant 回复算 loss。
+description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTorch + torch_npu + peft 对任意 HuggingFace CausalLM（含多模态模型的文本头，如 Qwen3/3.5、Qwen2、Llama、GLM、Mistral 等）做 LoRA 监督微调（SFT / instruction tuning）的端到端技能。用户只需给出【模型权重路径】+【对话/指令数据集路径】即可启动：自动探测环境/依赖、数据自动转 chat 格式并对 assistant 轮做 loss 掩掩、自动发现 LoRA 目标模块、**自动选路（route_select：按模型大小+空闲卡自动决策单卡/FSDP2 数据并行/device_map 流水线，超参按模型尺寸/步数自动择优，精度优先性能自动最优）**、bf16 autocast + grad-ckpt + cosine 调度、**MoE 模型训练提速（MOE_IMPL=dense/gmm 数学等价补丁，短序列 -34% 步时 / 长序列 3-8×）**、报"昇腾不支持某算子"前的三步算子发现法（本机 CANN 接口 → gitcode.com/cann → 文档案例）、默认产出 loss 曲线图+公网可访问直链（catbox.moe/0x0.st/uguu.se 顺序尝试，外网全不通则降级表格）、概要总结、base vs LoRA 验证对比（ROUGE-L/字符重叠/生成长度）。只要用户要在昇腾上"LoRA 微调/SFT/指令微调/对话微调"某模型（含 MoE 模型如 Qwen3.6-A3B/DeepSeek 系），或提到 NPU + LoRA + 对话数据 + loss 曲线 + 验证，或 MoE 训练慢要提速，就应使用本技能——即使用户没明说"skill"。本技能基于 PyTorch + torch_npu + peft（不是 CUDA/deepspeed/unsloth）。与 [[ascend-torch-cpt]]（继续预训练，喂原始语料）区分：本技能是 SFT，喂的是 chat/指令对话数据并只对 assistant 回复算 loss。
 ---
 
 # Ascend NPU LoRA 监督微调（SFT）技能
@@ -70,6 +70,7 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 
 ### 4. 训练脚本（`lora_train.py.tmpl` / `lora_train_fsdp.py.tmpl`，由第 2 步选定）
 - 加载：`AutoModelForCausalLM.from_pretrained(MODEL_DIR, dtype=torch.bfloat16, attn_implementation="eager")`。eager attention 在 NPU 纯 torch 算子可用，无 FA 内核依赖（CANN 8.3.RC1 也能跑，只是慢）。若 CANN 9.0.0 + 模型支持可试 sdpa。
+- **MoE 模型提速开关（fsdp 模板）**：`MOE_IMPL=eager|dense|gmm`（默认 eager）。dense=稠密 bmm 补丁（短序列 T≲500 最快，实测 -34% 步时）；gmm=npu_grouped_matmul 分发（长序列 T≥1024 单层 3-8×、显存省 30%）。两者数学等价，选型与等价性验证协议见 references/moe-optimization.md。
 - **LoRA 目标自动发现**：扫 `model.named_modules()`，取所有 `nn.Linear` 的末名，与候选 `[q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj, ...]` 交集作为 target_modules。混合注意力架构（如 Qwen3.5 的 gated delta network）还会命中 `in_proj_qkv/in_proj_a/in_proj_b/in_proj_z/out_proj` 等——自动发现可覆盖，无需手填。
 - 优化器：**`NpuFusedAdamW`**（昇腾融合优化器），`zero_grad(set_to_none=False)`（True 会报错，pitfalls #5）。
 - 精度：bf16 autocast（`torch.autocast("npu", dtype=torch.bfloat16)`）。base 冻结，只 LoRA 参数 `requires_grad`。
@@ -102,6 +103,9 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 5. **NpuFusedAdamW 的 `zero_grad(set_to_none=False)`**；否则报 "set_to_none is not supported in fused optimizers"。
 6. **`apply_chat_template(tokenize=True)` 返回 BatchEncoding（dict），`len()` 是键数（通常 2）不是 token 数。** 取 token 数用 `seg['input_ids']`（pitfalls #4）。
 7. **精度优先于速度。** 若怀疑融合/量化改变数值，先用验证集 ROUGE-L/生成样例校验 base 一致性再接受加速。
+8. **MoE 模型训练慢先查专家分发，优化前必须分相实测。** transformers 的 MoE eager 实现是 Python 逐专家循环（短序列下纯调度开销，每前向 7万+ 微小内核）。两条数学等价补丁：`MOE_IMPL=dense`（短序列 -34% 步时）/ `MOE_IMPL=gmm`（grouped GEMM，长序列 3-8×/省显存 30%），见 references/moe-optimization.md。优化决策靠分相计时探针（fwd/bwd/opt/comm），不靠直觉——GC 直觉上该关、实测该开。
+9. **报"昇腾不支持 X"之前，先走三步算子发现法**（见 references/npu-op-discovery.md）：① 盘点本机 CANN 注册接口（aclnnop 头文件 / torch_npu custom_ops / 二进制 schema）→ ② 搜 https://gitcode.com/cann 官方仓（ops-transformer / torchtitan-npu / catlass / cann-recipes-train）→ ③ 结合文档与参考案例写最小用例实测。PyTorch/CUDA 的函数在昇腾上几乎都有对应物；"NPU 无此内核"绝大多数时候只是"没找到入口"（grouped GEMM 曾被误判，次日即推翻）。结论必须写明排查范围与实测数据。
+10. **改动训练数值路径后必须做等价性验证**（三层）：微观 dx/dw 对照 → 同种子 step1 loss 近逐位 → 多步轨迹在噪声带内重合。注意 LoRA A 随机初始化导致 step2+ 天然有 ~0.5-2% 重跑偏差，勿误判（pitfalls #25）。
 
 ## 通用性矩阵（适用范围）
 
@@ -110,7 +114,7 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 | HF CausalLM 纯文本（Qwen2/3/3.5、Llama-2/3、GLM、Mistral、DeepSeek、Yi 等） | ✅ 完整验证 | 0.8B（单卡）~27B（FSDP2 8-die）两端实测 |
 | 多模态模型文本头（Qwen3.5-VL / Qwen2-VL 系） | ✅ 验证 | `AutoModelForCausalLM` 加载即文本头，纯文本 SFT 无需图像（pitfalls #10） |
 | 混合注意力（gated delta / linear attention） | ✅ 验证 | LoRA 目标自动发现含 in_proj_* 系列 |
-| MoE 模型 | ✅ 实测（Qwen3.6-35B-A3B, 16卡FSDP2） | 跑通且 loss 正常；**限制**：融合路由专家非 nn.Linear 挂不上 LoRA，仅注意力+共享专家被适配（21.2M 参数），见 pitfalls #21 |
+| MoE 模型 | ✅ 实测（Qwen3.6-35B-A3B, 14卡FSDP2） | 跑通且 loss 正常；**限制**：融合路由专家非 nn.Linear 挂不上 LoRA，仅注意力+共享专家被适配（21.2M 参数），见 pitfalls #21；**训练提速**：`MOE_IMPL=dense/gmm` 数学等价补丁（-34% 步时 / 长序列 3-8×），见 moe-optimization.md |
 | 数据格式：messages / dialogue(student-teacher) / Alpaca | ✅ 验证 | prepare_data 三格式自动识别 |
 | chat 模板：ChatML / Llama-3 / Llama-2 / Mistral / DeepSeek | ✅ | 定界符表见 label-masking.md，可 env 覆盖 |
 | QLoRA / 量化基座 | ❌ 不支持 | 后续可扩展（NPU 量化路线另议） |
@@ -127,11 +131,13 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 - `scripts/route_select.py.tmpl` — 自动选路器：模型大小+空闲卡+seq/steps → 单卡/FSDP2/device_map + 显存估算 + 自动超参 + export 启动块（纯标准库，无需 torch）
 - `scripts/prepare_data.py.tmpl` — 数据抽样 + 转 chat + loss 掩掩（字符偏移法）
 - `scripts/lora_train.py.tmpl` — LoRA SFT 训练（自动发现目标、NpuFusedAdamW、bf16、loss 记录）
-- `scripts/lora_train_fsdp.py.tmpl` — 大模型 FSDP2 数据并行训练（27B 实测 2.18×/样本；含 expandable_segments 禁用与 train() 两个关键修复）
+- `scripts/lora_train_fsdp.py.tmpl` — 大模型 FSDP2 数据并行训练（27B 实测 2.18×/样本；含 expandable_segments 禁用与 train() 两个关键修复；MoE 可选 dense/gmm 等价提速补丁 + batch>1 右填充）
 - `scripts/plot_loss.py.tmpl` — loss 曲线 + 公网上传
 - `scripts/validate.py.tmpl` — base vs LoRA teacher-forced 多轮验证
 - `scripts/run_env.sh.tmpl` — 环境变量与 CANN source
-- `references/pitfalls.md` — 踩坑全集（7 条，避免重复浪费时间）
+- `references/pitfalls.md` — 踩坑全集（25 条，避免重复浪费时间）
+- `references/moe-optimization.md` — MoE 训练提速双路线（dense/gmm 补丁代码、选型表、等价性验证协议、已试错清单）
+- `references/npu-op-discovery.md` — 三步算子发现法（本机 CANN 接口盘点 → gitcode.com/cann 搜索 → 文档案例落地；报"不支持"前的强制排查流程）
 - `references/label-masking.md` — loss 掩掩三种方法 + 自检
 - `references/hyperparam-selection.md` — LoRA 超参自动选择规则（LR 按模型尺寸/warmup=10%步数/有效batch≈8/显存估算公式）
 - `references/eval-metrics.md` — ROUGE-L/字符重叠/长度 三指标意义与选择

@@ -39,6 +39,76 @@ LORA_DROPOUT = float(os.environ.get("LORA_DROPOUT", "0.05"))
 MAX_GRAD_NORM = 1.0; SEED = 42
 ASTART = os.environ.get("ASSISTANT_START", "<|im_start|>assistant\n")
 AEND = os.environ.get("ASSISTANT_END", "<|im_end|>")
+# 【MoE 优化】transformers 对 MoE 的 eager 专家分发是 Python 逐专家 for 循环, 短序列下纯调度开销
+# (每前向 7万+ 微小内核)。MOE_IMPL 可选: eager(默认原样) / dense(稠密 bmm, 短序列-34%步时) /
+# gmm(npu_grouped_matmul, 长序列/省显存)。三者数学等价, 详见 references/moe-optimization.md
+MOE_IMPL = os.environ.get("MOE_IMPL", "eager").lower()   # eager | dense | gmm
+
+
+def patch_moe_impl():
+    """按 MOE_IMPL 给 transformers 的 MoE 专家前向打补丁 (仅 qwen3_5_moe 系实测; 其它 MoE 结构需按
+    references/moe-optimization.md 的方法适配类名与权重布局)。两条补丁路线数学上均等价于逐专家循环。"""
+    if MOE_IMPL == "eager":
+        return
+    from transformers.models.qwen3_5_moe import modeling_qwen3_5_moe as M
+
+    if MOE_IMPL == "dense":
+        # 稠密: 2 次批量 bmm 算全部专家再 gather top-k (多算的丢弃)。短序列(T≲500)最快。
+        def dense_forward(self, hidden_states, top_k_index, top_k_weights):
+            T, H = hidden_states.shape; E = self.num_experts
+            x = hidden_states.unsqueeze(0).expand(E, T, H)
+            gu = torch.matmul(x, self.gate_up_proj.transpose(1, 2))
+            gate, up = gu.chunk(2, dim=-1); h = self.act_fn(gate) * up
+            y = torch.matmul(h, self.down_proj.transpose(1, 2)).permute(1, 0, 2)
+            y_sel = y.gather(1, top_k_index.unsqueeze(-1).expand(-1, -1, H))
+            return ((y_sel * top_k_weights.unsqueeze(-1)).sum(dim=1)).to(hidden_states.dtype)
+        M.Qwen3_5MoeExperts.forward = dense_forward
+        print("[moe] dense patch ON (短序列最快, 数学等价)", flush=True)
+        return
+
+    if MOE_IMPL == "gmm":
+        # grouped GEMM: npu_grouped_matmul 只算被选中的 token-专家对(零浪费), 显存 ∝ topK×T。
+        # 自定义 autograd: 冻结专家权重只需 dx = dy @ W_native (模型原生布局, 无需转置)。
+        import torch_npu as tnp
+        from torch.distributed.tensor import DTensor
+
+        class _Gmm(torch.autograd.Function):
+            @staticmethod
+            def forward(ctx, x, w_c, w_nat, offs64):
+                ctx.save_for_backward(w_nat, offs64)
+                return tnp.npu_grouped_matmul([x], [w_c], group_list=offs64,
+                                              group_list_type=0, split_item=2, group_type=0)[0]
+
+            @staticmethod
+            def backward(ctx, dy):
+                w_nat, offs64 = ctx.saved_tensors
+                dx = None
+                if ctx.needs_input_grad[0]:
+                    dx = tnp.npu_grouped_matmul([dy], [w_nat], group_list=offs64,
+                                                group_list_type=0, split_item=2, group_type=0)[0]
+                return dx, None, None, None
+
+        def gmm_forward(self, hidden_states, top_k_index, top_k_weights):
+            T, H = hidden_states.shape; E = self.num_experts; K = top_k_index.size(-1)
+            w_gu, w_dn = self.gate_up_proj, self.down_proj
+            # FSDP2 下权重是 DTensor: 前向时已 all-gather 为 Replicate, to_local() 零拷贝
+            if isinstance(w_gu, DTensor): w_gu = w_gu.to_local()
+            if isinstance(w_dn, DTensor): w_dn = w_dn.to_local()
+            flat = top_k_index.reshape(-1)
+            order = torch.argsort(flat, stable=True)          # 按专家排序, 同专家 token 连续
+            token_rows = torch.arange(T, device=hidden_states.device).repeat_interleave(K)
+            gather_rows = token_rows[order]
+            # npu_grouped_matmul 的 group_list = 各组行数的累计值(前缀和), 空组(0 token)允许重复值
+            offs = torch.cumsum(torch.bincount(flat[order], minlength=E), 0).to(torch.int64)
+            x_perm = hidden_states[gather_rows]
+            gu = _Gmm.apply(x_perm, w_gu.transpose(1, 2), w_gu, offs)   # (E,H,2I) 计算布局
+            gate, up = gu.chunk(2, dim=-1); h = self.act_fn(gate) * up
+            y = _Gmm.apply(h, w_dn.transpose(1, 2), w_dn, offs)
+            w_sorted = top_k_weights.reshape(-1)[order].unsqueeze(-1)
+            y_w = (y * w_sorted).to(hidden_states.dtype)
+            return torch.index_add(torch.zeros_like(hidden_states), 0, gather_rows, y_w)
+        M.Qwen3_5MoeExperts.forward = gmm_forward
+        print("[moe] grouped-GEMM patch ON (长序列/省显存, 数学等价)", flush=True)
 
 
 def lr_at(step, ns, wu, lr):
@@ -104,6 +174,7 @@ def main():
     is_main = rank == 0
 
     tok = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
+    patch_moe_impl()  # MoE_IMPL=dense/gmm 时替换专家前向 (数学等价提速, 见 references/moe-optimization.md)
     if is_main:
         print(f"[env] torch={torch.__version__} torch_npu={torch_npu.__version__} transformers={transformers.__version__}", flush=True)
         print(f"[env] FSDP2 world={ws} dev={dev}", flush=True)
@@ -183,14 +254,27 @@ def main():
     rng = random.Random(SEED)
     step_log = []; t0 = time.time(); step = 0; bi = 0
     opt.zero_grad(set_to_none=False)
+    pad_id = tok.pad_token_id if tok.pad_token_id is not None else tok.eos_token_id
+
+    def collate(bidx):
+        """BATCH_SIZE>1 时右填充到批内最长 (pad 处 label=-100, attn=0); bs=1 时零开销等价 stack"""
+        ids_l = [examples[i]["input_ids"][:MAX_LEN] for i in bidx]
+        lbl_l = [examples[i]["labels"][:MAX_LEN] for i in bidx]
+        L = max(x.shape[0] for x in ids_l)
+        ids = torch.full((len(bidx), L), pad_id, dtype=torch.long)
+        lbl = torch.full((len(bidx), L), -100, dtype=torch.long)
+        attn = torch.zeros((len(bidx), L), dtype=torch.long)
+        for r, (ii, ll) in enumerate(zip(ids_l, lbl_l)):
+            ids[r, :ii.shape[0]] = ii; lbl[r, :ll.shape[0]] = ll; attn[r, :ii.shape[0]] = 1
+        return ids, lbl, attn
+
     while step < NUM_STEPS:
         bi = step % nb
         bidx = idxs[bi * BATCH_SIZE:(bi + 1) * BATCH_SIZE]
         if not bidx:
             bi = 0; bidx = idxs[0:BATCH_SIZE]
-        ids = torch.stack([examples[i]["input_ids"][:MAX_LEN] for i in bidx]).to(dev)
-        lbl = torch.stack([examples[i]["labels"][:MAX_LEN] for i in bidx]).to(dev)
-        attn = torch.ones_like(ids)
+        ids, lbl, attn = collate(bidx)
+        ids, lbl, attn = ids.to(dev), lbl.to(dev), attn.to(dev)
         cur_lr = lr_at(step, NUM_STEPS, WARMUP, LR)
         for g in opt.param_groups: g["lr"] = cur_lr
         with torch.autocast("npu", dtype=torch.bfloat16):
