@@ -14,6 +14,7 @@
 | 短训练(100步)防发散 | 取保守值，不要激进 |
 | 大模型(≥7B) CPT | 5e-6 ~ 1e-5 |
 - warmup：~10% 步数线性；余弦衰减到 0。
+- **基座自带"从零训练"调度不可照抄**（pitfalls #82 实证）：原仓库/论文的 Noam/大 warmup 大峰值调度按随机初始化设计，从已收敛 checkpoint 出发 CPT 会**发散**（train loss 不降反升）。照抄时峰值 lr 至少降 4–10×、warmup 缩到 CPT 总步数的 5–10%；判定：CPT 前几轮 train loss 持续上升 = lr 过大，降 factor/峰值重启，勿在发散点续训。
 
 ## 优化器
 - `NpuFusedAdamW`（融合）。betas=(0.9,0.95)，eps=1e-8，weight_decay=0.01（embedding/norm/bias 的 wd=0），grad_clip=1.0。

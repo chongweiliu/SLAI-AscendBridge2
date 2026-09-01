@@ -38,3 +38,11 @@ prepare_data 已打印：总样本/子集/总 token/原始块数/训练块数/ep
 - 语料 < 步数需求时，prepare_data 循环重采样补齐（已实现），但 epoch 数会很高（如 24×）→ 过拟合风险。
 - **更好**：样本不足先扩充语料（下更多数据/用候选数据集），而非 24× 循环。本仓库 `scripts/dataset_mapping.py --candidates` + `download_datasets.py` 可找候选。
 - 评估时若 held-out 改善但 train loss 远低于 held-out，是过拟合信号——需加数据或减 epoch。
+
+## 8. 重预处理数据集：一次性并行缓存替代 per-epoch 重建
+非 tokenize-即用型语料（科学数据/图结构/需逐条解析的原始文件）常带重预处理（解析→特征化每条几十~几百 ms）。若基座训练管线是 **per-epoch 重建数据**（每 epoch 重采样/重解析），在 NPU 机器上单轮构建可能远超训练本身（实证 30–60min/epoch vs 训练 9min/epoch，见 pitfalls #83）。
+- **做法**：`multiprocessing.Pool(N)` **fork** 一次性预处理全部样本——worker 内完成"原始文件→模型输入张量"全链路，返回 numpy 数组（IPC 友好）；主进程落盘 `.pt` 缓存，训练每 epoch 只做分组/洗牌。
+- **实测收益**：21088 样本 20s 建完（1300+/s，64 worker），后续 epoch 数据成本归零；训练总时长从数据绑架（≈构建时间×epoch 数）降为纯计算时间。
+- **细节**：①worker 数取 CPU 核数的 1/10~1/8 起步（IO 混合型再调）；②传给 worker 的大字典用 **fork 继承全局变量**（父进程 Pool 前赋值），勿 pickle 进 `initargs`（N worker × 大 dict 全量重复传）；③缓存加载 `torch.load(..., weights_only=False)`（含 numpy，pitfalls #81）；④预处理脚本**不 import torch_npu**（纯 CPU，fork 子进程干净，也不会误触 NPU fork 警告）。
+- **代价声明**：固定了每 epoch 的采样（失去重采样多样性）——短程 CPT（≤10 epoch）可接受，README/notes 必须写明；依赖 per-epoch 重采样的长训练不适用。
+- **判据**：数据构建时间 > 单 epoch 训练时间 → 转此模式。
