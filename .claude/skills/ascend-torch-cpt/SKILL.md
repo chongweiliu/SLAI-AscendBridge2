@@ -58,6 +58,8 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
     - 多模态 `ForConditionalGeneration` 但目标是文本 → 走文本头 remap（references/multimodal-remap.md）。
     范式决定后续阶段 3(数据)/6(脚本)/8(评估) 全部分支，判定错则全盘错。把判定结果写进 `env_probe.json` 的 `model_type`/`train_paradigm`。
 
+11. **确定性 NPU 崩溃用"插桩→单批复现→二分"定位，变长 batch 必开 expandable_segments**。`EE9999`/507035 类异步设备错误没有 Python 堆栈，唯一可靠路径是：每步训练前把 batch 形状先落盘（本地盘）→ 崩溃日志最后一行=凶手批 → 离线单批复现 → 按 phase/配置（如 checkpoint 区域）二分（完整四步法见 pitfalls #79；多区域 `torch.utils.checkpoint` 反传 bug 见 #78）。每批 tensor 形状变化大（变长序列/动态图）时 `expandable_segments:True` 是必需项，否则 s/step 渐进劣化到 5×+（失效特征见 pitfalls #80）。
+
 ## 工作流（9 阶段，每阶段都要在屏幕实时更新用时表）
 
 ### 阶段 0 · 意图确认与路径核对
@@ -85,6 +87,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 ### 阶段 2 · 模型与数据集获取
 - 模型：本地有就用本地；否则从 modelscope（国内优先，`modelscope` CLI 或 git clone）或 `hf-mirror.com`（`git clone` + `git-lfs`）下载。`huggingface.co` 国内通常不可达。**大权重文件优先 ModelScope 的 `resolve/master/<file>` 直链（`wget -c`）**：新版 `hf` CLI 从 hf-mirror 拉大文件默认走 Xet 后端会 `401 Unauthorized`（`cas-server.xethub.hf.co`），且美区 CDN 慢；必须用 hf-mirror 时设 `HF_HUB_DISABLE_XET=1` 回退普通 LFS（pitfalls #38）。下完比对 `model.safetensors.index.json` 元数据字节数校验。
 - 语料：同上。`/mnt/share/...` 等用户给的理想路径不存在时，搜本机或下载。
+- **大文件下载与开发并行（省关键路径）**：大语料/权重下载挂后台后，立刻用**官方 sample/小子集**（或随机抽 N 条）先行推进阶段 3-6（数据管线、脚本、smoke、彩排），下载完成只做正式跑——不要干等下载。多个 GB 级 tarball 下载完必须做流级完整性校验（`gzip -t`/`tar -tzf`，分块下载器"每块尺寸对"≠内容对，见 pitfalls #68）再解压。
 - 数据集若只有 train 分割、用户要“验证集”：用 `seed` 重建训练划分取 held-out（见 references/eval-metrics.md）。
 
 ### 阶段 3 · 语料格式转换与打包
@@ -176,6 +179,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
   - **纯文本数据**（无 messages，如 base 模型喂网页/代码文本）：只算 PPL/NLL/next-token acc（无"末轮 assistant"可生成比对）。
 - 指标选择要"据训练数据与模型合理"：方言/领域语料用域内 PPL/acc/生成 F1；**不要**强行套英文 MMLU/HellaSwag（不对齐且需额外下载 lm-eval-harness）。若用户模型是**通用知识型**（非领域方言）且明确要英文基准，按 `references/eval-metrics.md` 的 MMLU how-to 跑小子集并说明局限。
 - **NLL 公式务必取负**：`nll = -log_probs.gather(...).mean()`（漏取负会得负值，见 pitfalls.md）。
+- **【所有范式通用】base vs CPT 对比三原则**（详见 references/eval-metrics.md「对比设计/结论判定」）：①**严格同条件**——两模型用相同种子驱动一切随机源（解码顺序/采样/数据顺序），对比前先做确定性自检（同权重同种子两轮应逐位一致）；②**协议锚定**——base 的关键指标与论文/官方数字交叉验证同量级，锚上了才证明评估协议没写错；③**持平可能是正确结论**——CPT 语料是基座原训练分布子集且基座已充分收敛时，短程 CPT 预期就是持平（±1%），如实报告为"符合预期"；train loss 上升则是 lr 发散（pitfalls #82），与"持平"分开报告。
 
 **B. diffusers 生成式范式** → 用 `scripts/eval_diffusion.py.tmpl`：
   - **量化**：固定 σ（如 0.5）对 base vs CPT 算 **velocity MSE**（越低=速度预测越准；Δ<0 训练有效）。取 held-out latent。

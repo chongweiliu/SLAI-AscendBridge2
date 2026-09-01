@@ -507,3 +507,43 @@ sys.meta_path.insert(0, _StubFinder())
 - **解法**：FSDP2 训练**禁用 expandable_segments**（cpt_fsdp.py.tmpl 已加守卫：检测到即改 `max_split_size_mb:256`，必须在 import torch 前生效）。单卡/DDP/融合优化器路径不受影响，仍可用 expandable_segments。
 - **连带修正**：cpt_fsdp 的显存预算"每卡 ≈ 参数×16字节/N + 激活"在 expandable_segments 生效时**偏乐观**（漏算 buffer 累积 ≈ 全模型大小）；历史上"FSDP2 卡数不足会 OOM / 通信-bound 慢"的观察可能部分被此混杂变量污染（memory 压力会改变 reshard 行为）。在 expandable_segments 关闭后重新标定卡数阈值与吞吐再下结论。
 - **同源坑（对照）**：ascend-torch-lora skill 的 pitfalls #19/#20 记录了同一问题在 LoRA SFT 上的完整定位过程（含第二个根因：漏调 `model.train()` 致 GC 被跳过——cpt_fsdp 有 `model.train()`，此坑不在 CPT）。
+
+## 78. ⚠️ `torch.utils.checkpoint` 多区域包裹反传 → vector core 异常 507035（ProteinMPNN CPT 实证，重要）
+- **症状**：训练数百~数千步后崩 `EE9999 ... vector core execution is abnormal (507035)` / `npuSynchronizeDevice` 失败；**同一 batch 确定性复现**（重启后崩在同一批）；Python 堆栈只有设备同步错误，无算子名。
+- **根因**：torch_npu 2.10 + CANN 8.3.RC1 下，模型里**多个 checkpoint 区域**（如 encoder 和 decoder 都用 `torch.utils.checkpoint.checkpoint` 包裹）的反传组合在特定 batch 触发 vector core 异常。实测二分：**双侧 ckpt 崩、只保留任一侧 OK、完全去 ckpt OK**；与 `use_reentrant` True/False、`preserve_rng_state` 均无关；forward 单独跑正常、无 ckpt 的 fwd+bwd 正常。
+- **解法**：显存装得下就**去掉 checkpoint 直调 layer**（实测 64GB 卡装 1.66M~亿级参数模型的 no-ckpt 激活峰值 ~16GB，且省重算还提速 ~15%）；显存紧张时只保留**单侧/单个** checkpoint 区域（勿多区域同时包裹）。
+- **判定要点**：确定性崩溃（同批必崩）+ 模型含 ≥2 个 checkpoint 区域 + 507035 → 按"双侧→单侧→无"二分 ckpt。
+
+## 79. 确定性 NPU 崩溃的标准定位法：批次插桩 + 离线单批复现 + 分阶段二分（ProteinMPNN CPT 实证，方法论）
+- **适用**：`UNKNOWN application exception`/EE9999 类异步设备错误——错误在 sync 时才浮出，日志回溯**没有 Python 层堆栈**，无法直接看崩在哪。
+- **四步法**：
+  1. **批次插桩**：每步训练前把 batch 形状/样本 ID 先 append 到**本地盘**日志（`/root/xx.log`，勿写网络 FS——网络 FS 每步 open/close 会拖慢训练）再执行；崩溃后日志最后一行 = 凶手批。
+  2. **离线单批复现**：写独立 repro 脚本（model+权重+单批 fwd/bwd）只跑该批。能复现 = 与累积内存状态无关，可快速二分；不能复现 = 内存/状态累积类问题（转向 plog 查 OOM/fragmentation）。
+  3. **分阶段二分**：把模型 forward 拆 phase（特征→encoder→完整 forward→loss→backward）逐段跑，找崩的最小片段。
+  4. **配置矩阵二分**：对可疑机制开关做矩阵（ckpt 双侧/单侧/无、reentrant、RNG state、autocast on/off）。
+- **要点**：每个实验用**独立进程**（EE9999 后进程和设备上下文已死，进程内无法恢复）；同 seed 的批次顺序可离线重建（确定性分组函数复制到分析脚本里即可反查崩溃批的形状/内容）。
+
+## 80. 变长 batch（每批 tensor shape 不同）必须 expandable_segments，否则渐进劣化（ProteinMPNN CPT 实证）
+- **症状**：训练**越跑越慢**（s/step 从 0.37 单调劣化到 5+，ETA 爆炸），不崩；`/root/ascend/log/debug/plog/` 里大量 `207001 out of memory` 的 700MB~1.2GB 大块申请失败重试。
+- **根因**：无 `expandable_segments` 的 caching allocator 对每个新 shape 分配新块；batch 形状高度变化（如变长序列 padding 到各批不同 L_max）时碎片化，大块申请反复 free/retry（重试风暴本身吃掉时间）。
+- **解法**：`PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`（run_env 模板已默认；**FSDP2 例外**必须关，见 #77）。变长 batch 场景这是**必需项**而非可选项。
+- **判定要点**：s/step **渐进**劣化（非恒定慢）+ plog 有 207001 → expandable_segments 没开；区别于"恒定慢"（数据管线/IO 问题）与"确定性崩"（#78/#79 路径）。
+
+## 81. torch 2.10+ `torch.load` 默认 `weights_only=True`，自产 numpy 缓存 UnpicklingError（ProteinMPNN CPT 实证）
+- **症状**：`_pickle.UnpicklingError: Unsupported global: numpy.core.multiarray._reconstruct was not an allowed global by default`。
+- **根因**：新版 torch 把 `torch.load` 默认改为 `weights_only=True`（安全沙箱），任何含 numpy 数组的自产缓存/预处理产物都无法反序列化。
+- **解法**：对**自己生成的可信缓存**显式 `torch.load(path, map_location="cpu", weights_only=False)`；下载的第三方权重仍走默认（保持安全）。
+- **判定要点**：报 `Unsupported global: numpy` → 加 `weights_only=False`。
+
+## 82. ⚠️ CPT 照抄基座"从零训练"的优化器调度会发散（ProteinMPNN CPT 实证，重要）
+- **症状**：从已收敛 checkpoint 出发 CPT，**train loss 不降反升**（train ppl 与 valid ppl **双升**），不是过拟合（过拟合 = train 降 valid 升）。
+- **根因**：官方 release 的训练脚本/论文配置按**从零初始化**设计（如 NoamOpt factor=2/warmup=4000，峰值 lr 2.8e-3；或大 warmup 大峰值调度）。从收敛点出发，大 lr 把模型推离收敛盆地，Adam 二阶矩冷启动放大扰动。
+- **解法**：CPT 的峰值 lr 按从零配置降 **~4–10×**（实测 NoamOpt factor 2→0.25 即 8×、warmup 4000→500 后正常收敛：train ppl 5.19→4.96 单调降）；warmup 按 CPT 总步数缩短（~5–10%）。保留调度结构只调 factor/warmup，便于对照。超参总原则见 hyperparam-selection.md（CPT 基线 1e-5 量级）。
+- **判定要点**：CPT 前几轮 train loss 持续上升 → 先降 lr（factor/峰值）再看别的；发现晚已发散时，丢弃该 run 从原 ckpt 重启，勿在发散点上续救。
+
+## 83. 基座自带 per-epoch 数据重建管线在 NPU/慢 FS 上不可用 → 一次性并行预处理缓存（ProteinMPNN CPT 实证）
+- **症状**：官方训练代码每 epoch 重建数据（重采样/重组装 + 逐条解析），单轮数据构建 30–60min **远超**训练本身（数分钟），整体被数据构建绑架。
+- **根因**（三因子叠加）：① spawn DataLoader 每个 worker 重 import torch（慢启动 10s+/worker）；② 逐条后处理（格式转换/过滤）在单进程串行；③ 几十万小文件随机 IO 慢。
+- **解法**：**fork `multiprocessing.Pool(N)` 一次性预处理**——worker 内完成"原始数据→模型输入 tensor"全链路转换，返回 numpy 数组（IPC 友好，勿返回 Python list 嵌套大对象），主进程落盘 `.pt` 缓存；训练每 epoch 只做分组/洗牌（秒级加载）。实测 21088 组装体 20s 建完缓存（1300+/s），后续 epoch 零构建成本。两个细节：大 dict 用 **fork 继承全局变量**传 worker（勿 pickle 进 initargs，64 worker×15MB 白传）；加载缓存要 `weights_only=False`（#81）。
+- **代价与边界**：缓存固定了每 epoch 的采样（失去官方 per-epoch 重采样多样性）——短程 CPT（≤10 epoch）可接受，**必须在 README/notes 声明**；长训练或依赖重采样的任务不适用。
+- **判定要点**：数据构建时间 > 单 epoch 训练时间 → 立即转一次性缓存模式。
