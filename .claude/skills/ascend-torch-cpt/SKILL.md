@@ -9,296 +9,170 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 
 把一个 HF 模型 + 一个语料，在昇腾 NPU 上端到端跑一遍继续预训练，并产出：训练脚本、loss 曲线（含公网直链）、概要总结、训练前后域内评估。全程在保证精度与正确性前提下尽量提效降时。
 
-**这是一个通用 CPT 技能，不是仅针对文本 LM**：按模型类型自动选择训练范式——
-- **文本 decoder-only LM（CausalLM）**：next-token CE loss，`model(input_ids, labels)`，评估 PPL/acc/F1。多模态模型的"文本头"也走此路（见 references/multimodal-remap.md）。若论文含 RLHF/GRPO，可选做 RL 后训练（token log-prob 策略梯度 + 偏好奖励 + log-prob KL），见 `references/text-lm-rl.md`。
-- **文生视频/文生图扩散模型（diffusers pipeline：DiT/U-Net + VAE + text_encoder + scheduler）**：流匹配/DDPM velocity/epsilon loss on VAE latents，`transformer(noisy_latent, timestep, text_emb)`，评估 velocity MSE + 采样生成。若论文含 RL Post-Training（GRPO），可选做 RL 后训练（奖励分类器 + 组相对策略优化 + KL 正则），见 `references/generative-diffusion-cpt.md`「RL 后训练」。
-- **音频-LLM（audio-text-to-text：audio_tower + projector + CausalLM，如 Qwen2-Audio）**：冻结 audio_tower+projector，训 language_model 全量/LoRA；chat template(audio+transcribe 指令)→`input_features`(mel)+labels(只对 transcript 算 CE，mask audio 特殊 token)；评估 held-out 转写 CE loss。见 `references/audio-llm-cpt.md`，模板 `cpt_audio_llm.py.tmpl`。若论文含 RLHF/GRPO，可选做 RL 后训练（与文本 LM RL 同范式：token log-prob + WER/偏好奖励 + log-prob KL），见 `references/text-lm-rl.md`。
-- 其它生成式范式（文生音频生成/全模态等）按同理：先判 backbone（可训练生成主干）+ 冻结编解码器，再据其原生损失训练。
+**这是通用 CPT 技能，不止文本 LM**——按模型类型自动选范式（文本 LM / diffusers 生成式 / 音频-LLM / Keras→PyTorch 权重迁移 / MLIP 力场，见核心原则 10 与「自动选型速查」）。核心方法论通用：①判定模型类型与格式 → ②拆出可训练 backbone + 冻结编解码器/条件编码器 → ③按范式构造数据流水线 → ④用原生损失训练 backbone → ⑤按范式选评估指标。
 
-**核心方法论（对所有模型类型通用）**：①判定模型类型与格式 → ②拆出可训练 backbone + 冻结的编解码器/条件编码器 → ③据范式构造数据流水线（文本 tokenize / 视频 image decode+VAE 编码 / 音频 soundfile 读+processor mel）→ ④用原生损失训练 backbone → ⑤按范式选评估指标。文本走 `cpt_train.py.tmpl`；扩散生成走 `cpt_diffusion.py.tmpl`；音频-LLM 走 `cpt_audio_llm.py.tmpl`。
+## 维护与治理（本 skill 的自我纪律）
+
+- **分层加载**：本文每次触发全量加载（**红线 ≤350 行**）；细节只活在 `references/`（按需读）与 `scripts/`（按需复制，从不进上下文）。**加坑 = pitfalls.md 加完整条目 + 本文至多一行"触发特征一句话 + #编号"**，禁止把细节内联进本文。
+- **检索约定**：遇到症状**按关键词 grep `references/pitfalls.md` 取相关 1–2 条**，勿通读（94+ 条通读既慢又稀释注意力）。
+- **坑集生命周期**：同类合并（废弃条目标"并入 #N"）；版本敏感条目标注适用版本（CANN/torch 升级后归档）；**编号永不复用**（防引用漂移）；≥120 条触发一次整备。
+- **瘦身触发**：本文 >350 行或字符数 >28K → 执行一轮"内联细节压回 references"瘦身（回归验证：骨架完整 + 编号引用有效 + 被删细节在 references 有家）。
 
 ## 输入（用户给路径即可启动）
-- **模型权重路径**（必填）：HF 目录（含 config.json/safetensors/tokenizer）。可在命令里直接指定，如
-  `ascend-torch-cpt --model-dir /mnt/model/Qwen3-0.8B --data-file /path/train.jsonl`，
-  或由 `run_env.sh` 的 `MODEL_DIR` 注入。本地没有则按需从 modelscope / hf-mirror 下载。
-- **训练数据集路径**（必填）：jsonl/json/parquet/csv 均可；`{"messages":[...]}` chat 格式或 `{"text":...}` 纯文本均自动识别转换。由 `DATA_FILE` 指定，缺失则按需下载。
-- 可选：seq_len、batch_size、步数、并行方式（单卡/DDP/FSDP2）、语料比例（如取 30%/60%）、是否评估。未指定者由技能自动择优。
-- 工作目录：统一建在 **SLAI-AscendBridge2 仓库根目录下的 `training-ws/` 内**（`training-ws/` 无则新建，**位于仓库内部而非与仓库平行**），每个模型一个子目录 **`training-ws/<模型名>-cpt/`**。模型名取权重路径最后一段（如 `/mnt/model/gemma-4-12B-it` → `training-ws/gemma-4-12B-it-cpt/`）。所有脚本与产物统一归档于此，不散落到仓库根目录或其他位置。`run_env.sh` 的 `WS_DIR` 已自动指向该路径并 `mkdir -p`。
+
+- **模型权重路径**（必填）+ **训练数据集路径**（必填，jsonl/json/parquet/csv/xyz 均可）——缺失则按需从 modelscope / hf-mirror / Zenodo / GitHub 下载（阶段 2 源探测）。
+- 可选：seq_len、batch_size、步数、并行方式（单卡/DDP/FSDP2）、语料比例、是否评估。未指定者由技能自动择优。
+- 工作目录：`training-ws/<模型名>-cpt/`（模型名取权重路径最后一段），所有产物归档于此，不散落。
 
 ## 默认产出（loss 曲线 + 公网链接 为默认方式）
-每次训练**默认**产出 loss 曲线图（png）并尝试上传为**外部公网可访问直链**：
-- 上传顺序：`catbox.moe` → `0x0.st` → `uguu.se`（按可达性依次尝试，见 scripts/plot_loss.py.tmpl）。
-- 校验链接 HTTP 200 后告知用户直链。
-- **若外网全不通**（catbox/0x0/uguu 均不可用）：自动降级为**表格展示 loss 收敛趋势**（逐 step / 每 10 步 + first5→last5 + min）。
-- 不论是否拿到公网链接，本地 png 与 `losses.json`/`step_loss.jsonl` 始终保存。
-- **链接时效**：uguu.se 等临时直链会过期；永久留本地 png + `losses.json`，长期复看以本地为准。
-- 除曲线外另产出：训练前后 PPL/acc/F1 评估、`train_summary.json`、概要总结报告（README.md）、**resume ckpt**（`ckpt_latest.pt`，含模型+优化器+step，供续训）。
+
+- loss 曲线 png + 逐 step 日志；上传顺序 catbox → 0x0 → uguu（校验 HTTP 200 后告知直链；外网全不通降级表格展示；uguu 临时链会过期，本地 png 为准）。
+- 训练前后域内评估、`train_summary.json`、README 总结、`cpt_model_state.pt`（评估用）+ `ckpt_latest.pt`（含优化器，供续训）。
 
 ## 核心原则（务必内化）
 
-1. **先 Eager 基线，再谈融合/图模式。** 任何融合路径（torchair 图模式、NpuFusedAdamW 等）只在 Eager 单卡能跑通、loss 正常后才上。不要在没基线时归因到融合层。
-2. **精度优先于速度。** 融合算子/图模式若改变数值（如 bf16 纯前向 vs fp32 主权重+autocast），先用域内 PPL/acc 校验一致性再接受加速比。
-3. **不装 CUDA 专属核。** 昇腾上 flash-linear-attention / causal-conv1d 等 CUDA 库装不上也无用；走 torch_npu 自己的融合路径（SDPA→npu fusion、NpuFusedAdamW）或 torchair 图模式，参考 references/fusion-api.md。
-4. **每个产物都做本地预检再写库/交付。** 脚本能 `python -c "import ast; ast.parse(open(...).read())"` 过；真跑前先 `--dry-run` 或 2 步 smoke。
-5. **训练结束必须保存 ckpt。** CPT 的验收标准之一就是"训练前后对比评估"，因此训练脚本末尾必须落盘模型权重（`cpt_model_state.pt`），否则后续 PPL/acc/F1 评估无 ckpt 可用。DDP 用 `model.module.state_dict()`（每卡持全量，rank0 存即可）；FSDP2 用 `DTensor.full_tensor()` 聚合（见 references/pitfalls.md #20，否则只存到 1/N 分片）。
-6. **必须用昇腾 NPU 训练，禁止回退 CPU。** 继续预训练默认且只能跑在 Ascend NPU 上（`torch_npu`），不允许静默回退到 CPU 训练（如 `device='cpu'` 或 `torch.device('cpu')`）。若因算子缺失/环境异常确实必须回退 CPU，**必须先向用户说明原因并征得确认**后再进行。
-7. **后台长跑要有心跳输出。** 后台运行的脚本（训练/评估/下载）最长 **2–3 分钟**必须向 stdout 打印一次进度信息（step/loss/用时或"仍在运行"心跳），`print(..., flush=True)`，让人感知任务还在跑。不要在步数很少时才打印——打印间隔要按**时间**折算（如 50s/step 时每 2–3 步打一次），保证屏幕 ≤2–3 分钟必有输出。
-8. **所有产物统一归档到 `training-ws/<模型名>-cpt/` 子目录。** 训练/评估全过程的脚本、代码、README、ckpt 权重、loss 曲线、日志、summary 等全部放进 SLAI-AscendBridge2 仓库根目录下 `training-ws/` 内以"模型名-cpt"命名的子目录（见「产物目录约定」），**不得**散落到仓库根目录、与仓库平行的目录、或其他位置。
-
-9. **全程实时用时表（执行红线，不可省）**。整个 CPT 过程**必须**在屏幕上维护一张格式化用时表（见「用时表」节），让用户随时知道：每阶段预计/实际用时、整体总预估、以及剩余预估。工具是 `scripts/timing_table.py.tmpl`（读写 `outputs/timing.json`）；纪律是下面 **T1–T6 六个硬性刷新触发点**——每个触发点都要把**整张表**（或长跑期间的 `⏳doing` 行+ETA）重印到对话，用户全程任何时刻看屏幕都能知道"现在做到哪、还要多久"：
-   - **T1 开工基线**：阶段 0–1 勘察完，给出**全程总预估** + 9 阶段各自 est，打印第一张完整表。这是用户看到的第一个进度基准。
-   - **T2 进入即标**：每**进入**一个阶段（含其中的长跑子任务：下载、权重迁移/格式转换、脚本开发、smoke）**立即** `--doing <id> "说明"` 置 ⏳ 并重印——**严禁**实际在做事而表上还挂着 pending（状态滞后 = 汇报失真，ProteinBERT 实证教训）。
-   - **T3 完成即结**：每完成一个阶段**立即** `--set <id> actual <s>` 置 ✅ 并重印，不等"下个自然停顿点"。
-   - **T4 长跑心跳**：**任何**预计 >3min 的阶段（**下载/权重迁移/训练/评估**，不只是阶段 7 训练！）期间，agent 每 1–2min 轮询一次进度并把最新表/`⏳doing` 行（带已耗、百分比或 ETA）重印到对话。**"启动后台就埋头干活、阶段结束才想起表"是明确违规**。训练脚本自身另每 ~30s 调 `timing_table.py --doing 7 <已耗时> "X/N步 ETA Y loss Z"` 刷进训练日志（不依赖 agent 记得轮询）。
-   - **T5 评估切换**：阶段 8 每切换一个模型（base→CPT）重印整表。
-   - **T6 收尾汇总（不可省）**：**最终给用户的答复**与 README **都必须**包含**完整用时表**（9 阶段 预计/实际/说明 + 合计行 + 总预估 vs 总实际偏差的一句话解释）。只写进 README 不上屏、或只在中间打过表而收尾不带，都算未完成本项纪律。
-
-10. **按模型类型选训练范式（通用 CPT 的第一步，不可跳过）**。本技能不止做文本 LM。阶段 0 必须先**判定模型类型与格式**，再决定训练范式、数据流水线、评估指标（见「模型类型→训练范式」表）。判定方法：读 `config.json`/`model_index.json`/文件名——
-    - `architectures` 含 `ForCausalLM`/有 `config.json` + safetensors 标准权重 → **文本 LM 范式**（CE loss）。
-    - 有 `model_index.json` + `transformer/`(或 `unet/`) + `vae/` + `text_encoder/` + `scheduler/` → **diffusers 生成式范式**（流匹配/DDPM loss on VAE latents）。
-    - `architectures` 含 `Qwen2Audio*`/`*AudioForConditionalGeneration`/`pipeline_tag=audio-text-to-text` + audio_tower + language_model → **音频-LLM 范式**（转写 CE，见 references/audio-llm-cpt.md）。
-    - 出现 `mlx_*.json`/`mlx_*.safetensors`、或 README/library_name 标 `mlx` → **MLX(Apple) 格式**，NPU 无法直接加载，须找同源 PyTorch 基座（见 pitfalls #47，references/generative-diffusion-cpt.md）。
-    - 权重是 **Keras/TF 产物**（`.pkl`/`.h5`，无 `config.json`/safetensors，如 ProteinBERT）→ **PyTorch 复刻+权重迁移范式**：按官方源码逐层翻译架构、pickle 解包权重、严格形状校验+消融验证（pitfalls #84–#86），数据流水线与评估指标随原生范式走。
-    - **机器学习原子间势/力场（MLIP：输入=结构图(原子序数/坐标/晶胞)，输出=能量+力，如 MatterSim/MACE/NequIP）** → **能量+力联合回归范式**：loss = Huber/CE(能量 per-atom + 力×ratio)，力 = -∂E/∂x 由 forward 内部 autograd 求得（训练时 create_graph 保二阶图）；评估 = 能量 MAE(meV/atom) + 力 MAE(eV/Å)，**评估循环禁 @torch.no_grad()**（#92）；跨泛函/口径能量基准差用 **shift-only scaling** 对齐（#93）；官方库后端枚举只认 cuda/cpu/mps 需 patch（#91）。
-    - 多模态 `ForConditionalGeneration` 但目标是文本 → 走文本头 remap（references/multimodal-remap.md）。
-    范式决定后续阶段 3(数据)/6(脚本)/8(评估) 全部分支，判定错则全盘错。把判定结果写进 `env_probe.json` 的 `model_type`/`train_paradigm`。
-
-11. **确定性 NPU 崩溃用"插桩→单批复现→二分"定位，变长 batch 必开 expandable_segments**。`EE9999`/507035 类异步设备错误没有 Python 堆栈，唯一可靠路径是：每步训练前把 batch 形状先落盘（本地盘）→ 崩溃日志最后一行=凶手批 → 离线单批复现 → 按 phase/配置（如 checkpoint 区域）二分（完整四步法见 pitfalls #79；多区域 `torch.utils.checkpoint` 反传 bug 见 #78）。每批 tensor 形状变化大（变长序列/动态图）时 `expandable_segments:True` 是必需项，否则 s/step 渐进劣化到 5×+（失效特征见 pitfalls #80）。
+1. **先 Eager 基线，再谈融合/图模式。** 任何融合路径只在 Eager 单卡能跑通、loss 正常后才上；没基线时不要归因到融合层。
+2. **精度优先于速度。** 融合算子/图模式若改变数值，先用域内指标校验一致性再接受加速比（纯 bf16 前向会数值崩，见 pitfalls #4）。
+3. **不装 CUDA 专属核。** flash-linear-attention / causal-conv1d 等装不上也无用；走 torch_npu 自己的融合路径（references/fusion-api.md）。
+4. **每个产物本地预检再交付。** 脚本过 `ast.parse`；真跑前先 `--dry-run` 或 2 步 smoke。
+5. **训练结束必须保存 ckpt**（`cpt_model_state.pt`），否则前后对比评估无 ckpt 可用。DDP 用 `model.module.state_dict()`；FSDP2 用 `DTensor.full_tensor()` 聚合（#20，否则只存 1/N 分片）。
+6. **必须用昇腾 NPU 训练，禁止静默回退 CPU。** 因算子缺失/环境异常确实必须回退时，先向用户说明并征得确认。
+7. **后台长跑要有心跳输出。** 训练/评估/下载最长 2–3 分钟必须打一次进度（按时间折算间隔，`print(..., flush=True)`）。
+8. **所有产物统一归档到 `training-ws/<模型名>-cpt/` 子目录。**
+9. **全程实时用时表（执行红线，不可省）**。用 `scripts/timing_table.py.tmpl` 维护（读写 `outputs/timing.json`），纪律是 **T1–T6 六个硬性刷新触发点**——每个触发点把整表（或长跑期间的 `⏳doing` 行+ETA）重印到对话，用户任何时刻看屏幕都知道"现在做到哪、还要多久"：
+   - **T1 开工基线**：阶段 0–1 勘察完，给全程总预估 + 9 阶段各自 est，打印第一张完整表。
+   - **T2 进入即标**：每进入一个阶段（含长跑子任务：下载/权重迁移/脚本开发/smoke）立即 `--doing` 置 ⏳ 并重印——**严禁实际在做而表上挂 pending**。
+   - **T3 完成即结**：每完成一个阶段立即 `--set <id> actual <s>` 置 ✅ 并重印。
+   - **T4 长跑心跳**：任何预计 >3min 的阶段（下载/权重迁移/训练/评估，不只训练！）每 1–2min 轮询并重印进度（已耗/百分比/ETA）。**"挂后台就埋头干活"是明确违规**；训练脚本自身另每 ~30s 调 `timing_table.py --doing 7 ...` 刷训练日志。
+   - **T5 评估切换**：阶段 8 每切换一个模型重印整表。
+   - **T6 收尾汇总（不可省）**：**最终答复与 README 都必须含完整用时表**（9 阶段预计/实际/说明 + 合计 + 预估偏差一句话解释）。只写 README 不上屏算未完成。
+10. **按模型类型选训练范式（第一步，不可跳过）**，判定结果写进 `env_probe.json` 的 `model_type`/`train_paradigm`：
+    - `ForCausalLM`/config+safetensors → **文本 LM**（CE loss，`cpt_train.py.tmpl`）；多模态文本头同路（references/multimodal-remap.md）。
+    - `model_index.json`+transformer/vae/text_encoder/scheduler → **diffusers 生成式**（流匹配 loss，references/generative-diffusion-cpt.md）。
+    - `Qwen2Audio*`/audio-text-to-text → **音频-LLM**（转写 CE，references/audio-llm-cpt.md）。
+    - MLX 格式 → 须换同源 PyTorch 基座（#47）。
+    - Keras/TF `.pkl`/`.h5` → **PyTorch 复刻+权重迁移**（#84–#86）。
+    - **MLIP 力场（能量+力输出，如 MatterSim/MACE）** → **能量+力联合回归**（力=-∂E/∂x autograd；评估禁 no_grad #92、shift-only scaling #93、后端静默降级 patch #91）。
+11. **确定性 NPU 崩溃用"插桩→单批复现→二分"定位，变长 batch 必开 expandable_segments**（EE9999/507035 无 Python 堆栈；完整四步法 #79，多区域 checkpoint 反传 bug #78；s/step 渐进劣化特征 #80）。
 
 ## 工作流（9 阶段，每阶段都要在屏幕实时更新用时表）
 
 ### 阶段 0 · 意图确认与路径核对
-- 核对用户给的**模型路径**与**语料路径**是否真实存在（`ls`）。本类任务里用户常给理想化/不存在路径；不存在则搜索本机可用副本并**显式告知**用户用了哪个、改了什么。
-- 确认：模型 id/路径、语料路径、seq_len、batch_size、步数、是否要 DDP/FSDP2、是否要评估。用户未指定的超参由本技能自动择优（见下）。
-- **【范式判定，决定全局分支】** 按核心原则 10 判定模型类型与格式（文本 LM / diffusers 生成式 / 音频-LLM / MLX / 多模态文本头），写进 `env_probe.json`。判定决定阶段 3 数据流水线、阶段 6 训练脚本、阶段 8 评估指标。**扩散生成式模型**（文生视频/文生图）见 `references/generative-diffusion-cpt.md`；**音频-LLM**（audio-text-to-text）见 `references/audio-llm-cpt.md`——均不走文本 LM 模板。
+- 核对模型/语料路径是否真实存在（`ls`）；不存在则搜本机可用副本并**显式告知**用户用了哪个、改了什么。
+- 确认：模型 id/路径、语料、seq_len、batch_size、步数、并行方式、是否评估（未指定者自动择优）。
+- **【范式判定，决定全局分支】** 按核心原则 10 判定并写入 `env_probe.json`；判定错则全盘错。
 
-### 阶段 1 · 环境/依赖勘察
-探测并记录（写进 `${WS_DIR}/env_probe.json`，即 `training-ws/<模型名>-cpt/env_probe.json`）：
-- NPU：卡数、每卡显存（**以实际分配测试为准**，`mem_get_info` 的 free 可能为负，见 pitfalls #29）、CANN 版本、`npu-smi`/`/dev/davinci*`。
-- **容器 CPU 内存限制（强制查，别信 free）**：`cat /sys/fs/cgroup/memory.max`(v2) 或 `memory.limit_in_bytes`(v1)。容器（K8s/Docker）cgroup 限制常远小于宿主视图——`free -h` 的 total 是宿主机值会误导。≥4B 模型在 CPU 上做 remap/load（模型+ckpt+dtype 转换三份叠加可达 40GB+）极易撞 32GB 级限制被 `SIGKILL`(137)（pitfalls #44/#46）。查到限制 < 模型加载峰值 → 整个权重加载/remap 搬 NPU 做，不在 CPU 堆副本。env_probe 必记 `cgroup_mem_limit`。
-- **卡间互联**：`hccn_tool -i <devid> -ip -g` 看是否配了 RoCE IP（报 "no ip was preset" = 只能走慢速 PCIe，见 pitfalls #23）；**真实 CPU 核数**用 `nproc --all`/`os.cpu_count()`（`nproc` 会受 OMP_NUM_THREADS 误导，见 pitfalls #22）。
-- torch / torch_npu / transformers 版本；解释器路径。**注意 `torch==X.Y.Z+cpu` 不代表无 NPU**——昇腾镜像常用 +cpu build 配 torch_npu，NPU 后端由 torch_npu 注册，以 `torch.npu.is_available()` 为准（pitfalls #40）。
-- **新芯片 soc 不支持（Ascend950 系列：950PR/950DT）**：若 `torch.npu.set_device(0)` 报 `Unsupported soc version: Ascend950PR` 或 `Ascend950DT`（device_count 能返回但 lazy_init/算子执行失败），是 torch_npu 太旧不识别 950 系列芯片——升级 torch+torch_npu 到支持 950 系列的版本（**950PR 实测可行组合** `torch==2.12.0 + torch_npu==2.12.0`，pip 华为 mirror；**950DT** 同系列同 CANN 9.0.0-beta，预期同方案，需实机验证 set_device+matmul）。env_probe 必实测 `set_device` + 一次 `x@x` matmul，**不能只看 device_count 就认定 NPU 可用**（pitfalls #42）。`npu-smi info -t board -i 0` 的 Chip Name 匹配 `Ascend950(PR|DT)` 即 950 系列，都需检查 soc 支持。
-- **torchvision/torchaudio 与 torch ABI 错配（默认走正式版，不桩）**：升级 torch 后必须同步装匹配的**正式版** torchvision/torchaudio（torch 2.8↔torchvision 0.23+torchaudio 2.8.0、torch 2.12↔torchvision 0.27.1+torchaudio 2.12；pip 华为 mirror，系统 site 只读时 `pip install --user`），否则错配版 import 崩会挡住 transformers 多模态文本头导入链（`torchvision::nms does not exist` / `torchaudio undefined symbol`）。装正式版后**无需打桩**，模板默认 `import torchaudio, torchvision` 走正式版。**仅当 ≥3 次尝试装匹配正式版仍失败**（torch 太新无配套 release、离线无 mirror、aarch64 无 wheel）才 `export STUB_MM_FALLBACK=1` 启用桩兜底（pitfalls #39/#43）。env_probe 验证 `from transformers.models.<mm> import XxxForCausalLM` 不崩才算依赖就绪。
-- CANN env：`source /usr/local/Ascend/ascend-toolkit/set_env.sh`（**部分镜像该路径不存在或 env 已在 base 注入，需条件 source + `import torch_npu; torch.npu.is_available()` 验证**，pitfalls #41）。
-- **torchaudio 探测**（多模态模型才需要）：若 `import transformers.models.<mm>_xxx`（多模态文本头类）报 torchaudio `.so` 符号错配，**先装匹配正式版**（如 torch 2.8→`pip install --user torchaudio==2.8.0`），import 即正常。仅当 ≥3 次安装仍失败才 `export STUB_MM_FALLBACK=1` 用桩兜底（文本/视觉 CPT 不需音频，pitfalls #39）。模板默认走正式版，桩由 `STUB_MM_FALLBACK` 门控。
-- 必设环境变量：`TORCH_DEVICE_BACKEND_AUTOLOAD=0`（规避 torch_npu autoload 崩，手动 import）、`TASK_QUEUE_ENABLE=1`（异步算子下发）、`PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`（减碎片，给融合优化器留空间；**FSDP2 除外**——它会破坏 all-gather buffer 跨层复用致假性 OOM，cpt_fsdp.py.tmpl 已内置守卫自动切换为 `max_split_size_mb:256`，见 pitfalls #77）。
-- torchair 依赖（仅在走图模式时需要，见 references/fusion-api.md）：protobuf/scipy/attrs/decorator/cloudpickle/ml_dtypes/tornado，`setuptools<82`（≥82 移除 pkg_resources 破坏 GE init）。
+### 阶段 1 · 环境/依赖勘察（写进 `env_probe.json`）
+- NPU：卡数、每卡显存（以实际分配测试为准，`mem_get_info` 的 free 可能为负 #29）、CANN 版本、`npu-smi`；**实测 `set_device`+一次 matmul**（+cpu build 不代表无 NPU #40；Ascend950 系列需新 torch_npu #42）。
+- **容器 CPU 内存限制强制查**（cgroup，别信 free——remap/load 三份叠加可撞 32GB 被 SIGKILL #44/#46）；限制 < 加载峰值 → remap 搬 NPU 做。
+- 卡间互联：`hccn_tool -i <id> -ip -g`（"no ip preset"=只能慢速 PCIe #23，影响并行选型）；真实核数用 `nproc --all`（#22）。
+- torch/torch_npu/transformers 版本与解释器路径；torchvision/torchaudio 须与 torch ABI 匹配（对应版本表 #39/#43）；CANN env 条件 source 后以 `torch.npu.is_available()` 验证（#41）。
+- 必设环境变量：`TORCH_DEVICE_BACKEND_AUTOLOAD=0`、`TASK_QUEUE_ENABLE=1`、`PYTORCH_NPU_ALLOC_CONF=expandable_segments:True`（FSDP2 例外，见 #77，模板已内置守卫）。torchair 依赖清单见 references/fusion-api.md。
+- 用 `scripts/run_env.sh.tmpl` 生成统一入口。
 
-用 `scripts/run_env.sh.tmpl` 生成统一入口（`WS_DIR` 已指向 `training-ws/<模型名>-cpt/` 并自动 `mkdir`）。
-
-> ⏱ **用时表初始化**：阶段 0–1 勘察完后，据模型参数量/可用卡数/目标步数/语料规模给出**全程总预估**（如 ~6 分钟或 ~2 小时），并填好 9 阶段各自的**预计用时**，写入 `outputs/timing.json` 后打印整张用时表。这是用户看到的第一个进度基准。
+> ⏱ **T1**：阶段 0–1 完成后给全程总预估 + 9 阶段 est，写入 `outputs/timing.json` 并打印第一张完整表。
 
 ### 阶段 2 · 模型与数据集获取
-- **第一步：网络源可达性矩阵探测（~30s，必做）**：`bash robust_download.sh probe`（从 `scripts/robust_download.sh.tmpl` 复制）探测**当日**可用性——hf-mirror.com / huggingface.co / modelscope.cn / github.com / raw.githubusercontent.com / codeload.github.com / zenodo.org——先建立"当日可用源清单"再定下载路线，**不要按历史经验盲试**（源可达性逐日漂移，hf-mirror 单节点宕机时连 /etc/hosts 固定 IP 都不通，pitfalls #89）。权重降级链：本地 → ModelScope → Zenodo（API 拿文件清单+md5）→ hf-mirror（禁 Xet）→ GitHub（三级降级+截断抢救，pitfalls #90）。
-- 模型：本地有就用本地；否则从 modelscope（国内优先，`modelscope` CLI 或 git clone）或 `hf-mirror.com`（`git clone` + `git-lfs`）下载。`huggingface.co` 国内通常不可达。**大权重文件优先 ModelScope 的 `resolve/master/<file>` 直链（`wget -c`）**：新版 `hf` CLI 从 hf-mirror 拉大文件默认走 Xet 后端会 `401 Unauthorized`（`cas-server.xethub.hf.co`），且美区 CDN 慢；必须用 hf-mirror 时设 `HF_HUB_DISABLE_XET=1` 回退普通 LFS（pitfalls #38）。下完比对 `model.safetensors.index.json` 元数据字节数校验。
-- 语料：同上。`/mnt/share/...` 等用户给的理想路径不存在时，搜本机或下载。**官方示例数据/权重可能只在某一平台的镜像目录里**（GitHub 仓库 ≠ ModelScope/HF 镜像发布物）——全网按名搜索失败 ≠ 不存在，先递归列出全平台镜像目录树、顺着官方 config 的相对路径引用找（pitfalls #94）。
-- **大文件下载与开发并行（省关键路径）**：大语料/权重下载挂后台后，立刻用**官方 sample/小子集**（或随机抽 N 条）先行推进阶段 3-6（数据管线、脚本、smoke、彩排），下载完成只做正式跑——不要干等下载。**大文件用 `robust_download.sh get <url> <out> <size> [md5] [ways] [chunk]`**（多路 Range + 分块断点续传 + size/md5 终检，Range 不支持自动回退单流续传，实测 191MB 慢源 20min 完成）；小文件用 `robust_download.sh fetch`（重试循环）。多个 GB 级 tarball 下载完必须做流级完整性校验（`gzip -t`/`tar -tzf`，分块下载器"每块尺寸对"≠内容对，见 pitfalls #68）再解压。**下载是长跑阶段**：按核心原则 9 的 T4 每 1–2min 把下载进度（已耗/百分比/速率/ETA）刷到对话，不许"挂后台就消失"（`get` 模式自带 60s 心跳行，回显即可）。
-- **非 PyTorch 原生权重（Keras/TF `.pkl`/`.h5`，如 ProteinBERT）**：pickle 若只含 numpy 元组可直接 `pickle.load` 解包（**无需安装 TF**）；按官方源码逐层复刻 PyTorch 架构（对齐 LN eps/激活变体/卷积 padding/kernel 排列），再做**变量序严格形状校验 + 同形权重交换消融 + 语义 sanity**（干净位置信度/掩码恢复率）三重验证后才能训练（完整方法见 pitfalls #84–#86）。
-- 数据集若只有 train 分割、用户要“验证集”：用 `seed` 重建训练划分取 held-out（见 references/eval-metrics.md）。
+- **第一步：源可达性矩阵探测（~30s，必做）**：`bash robust_download.sh probe`（从 `scripts/robust_download.sh.tmpl` 复制）探测**当日**可用性（hf-mirror/huggingface/modelscope/github/raw/codeload/zenodo），先建"当日可用源清单"再定路线，**不按历史经验盲试**（源逐日漂移 #89）。权重降级链：本地 → ModelScope → Zenodo（API 拿清单+md5）→ hf-mirror（禁 Xet #38）→ GitHub（三级降级+截断抢救 #90）。
+- 大权重文件优先 ModelScope `resolve/master/<file>` 直链；**官方示例数据/权重可能只在某一平台镜像目录**（GitHub ≠ ModelScope 镜像；全网按名搜索失败 ≠ 不存在，递归列全平台目录树+官方 config 相对路径线索，#94）。
+- **大文件下载与开发并行**：下载挂后台后立刻用小子集推进阶段 3-6，勿干等；大文件用 `robust_download.sh get`（多路 Range+分块断点续传+size/md5 终检，`sha256:` 前缀支持），小文件用 `fetch`；GB 级 tarball 下完必须流级校验（`gzip -t`，#68）。**下载是长跑阶段**：按 T4 每 1–2min 刷进度。
+- 非 PyTorch 原生权重（Keras `.pkl`/`.h5`）：pickle 纯 numpy 元组可直接解包（无需 TF），逐层复刻 PyTorch 架构后做**形状严格校验+同形交换消融+语义 sanity**三重验证（#84–#86）。
+- 数据集只有 train 分割时用 seed 重建 held-out（references/eval-metrics.md）。
 
-### 阶段 3 · 语料格式转换与打包
+### 阶段 3 · 语料格式转换与打包（按范式分支）
+- **A. 文本 LM**：读语料（jsonl/json/parquet/csv）→ 判定格式（chat `{"messages"}` 用 `apply_chat_template`；`{"text"}` 直接 tokenize；其它取可读字段）→ 打包 `seq_len` 定长块（不足步数则循环重采样，记录 epoch 数）→ `scripts/prepare_data.py.tmpl`，**务必打印**总样本/子集样本/总 token/块数/epoch 估计。数据边界（去重/分块/混合/packing vs padding）见 references/data-prep.md。**多卡必设 `WORLD_SIZE=N`**（否则 need 算少→内循环重复采样）。
+- **B. diffusers 生成式**：解码→resize 到原生分辨率→VAE 编码（输入 `[B,C,T,H,W]` #48，编码上 NPU 规避 cgroup OOM #44/#46）→ 缓存 latent+text_emb（预计算-后训练模式）；text_encoder 巨大时可缓存 embedding 或退零嵌入兜底（#49）。用 `prepare_generative_data.py.tmpl`，全流程见 references/generative-diffusion-cpt.md。
+- **C. 音频-LLM**：soundfile 读 16k → `AutoProcessor(text=, audio=)`（单数 kwarg #56）→ labels 掩 pad+prompt+audio 特殊 token（漏 mask 致 loss 虚高 ~8× #58）；forward 须传 input_features**和** feature_attention_mask（#57）；冻 audio_tower+projector 训 language_model。见 references/audio-llm-cpt.md + `cpt_audio_llm.py.tmpl`。
+- **D. MLIP 力场**：ase 读 EXTXYZ（能量+力标签）→ 官方 GraphConverter 构图（cutoff/threebody_cutoff）；能量基准差对齐见阶段 8-D。
 
-**先按范式分支（核心原则 10）：**
-
-**A. 文本 LM 范式** → tokenize 打包：
-- 读语料（jsonl/json/parquet/csv 均要支持）。
-- **格式判定**：
-  - 若是 `{"messages":[...]}` chat 格式 → `tokenizer.apply_chat_template` 转连续 token 流（CPT 用）。
-  - 若是 `{"text": "..."}` / 纯文本 → 直接 tokenize。
-  - 其它 → 取可读文本字段拼接。
-- 打包成 `seq_len` 的定长块（`input_ids.pt`，shape `[N, seq_len]`）。不足步数需求则循环重采样补齐（记录 epoch 数）。
-- 数据预处理边界（去重/长文档分块/多语料混合/packing vs padding/tokenizer）见 `references/data-prep.md`。
-- 用 `scripts/prepare_data.py.tmpl`。**务必打印**：总样本/子集样本/总 token/原始块数/训练块数/epoch 估计。
-- **多卡必设 `WORLD_SIZE=N`**：`need = NUM_STEPS × BATCH_SIZE × WORLD_SIZE`，`prepare_data` 据此生成块数。若多卡训练却留 `WORLD_SIZE=1`（默认），need 会算少 → 每卡仅 1/N 块 → 训练内循环重复采样（见 pitfalls）。单卡不用设。
-
-**B. diffusers 生成式范式（文生视频/文生图）** → 解码+VAE 编码+缓存 latent（**不在 CPU 堆，VAE 编码上 NPU 规避 cgroup OOM**，pitfalls #44/#46）：
-- 视频用 `decord` 解码（图片用 PIL），resize 到模型原生分辨率（如 Wan 832×480），取 N 帧（VAE 时间压缩因子 k：T 满足 `(T-1)%k==0`）。
-- VAE 编码输入 **`[B,C,T,H,W]`（视频）/ `[B,C,H,W]`（图片）**，不是 `[B,T,C,H,W]`（pitfalls #48）。
-- 文本编码：用 pipeline 的 text_encoder（UMT5/CLIP/T5）编码 caption → embedding；**若 text_encoder 巨大下载受阻，可预计算+缓存 embedding 后释放，或退零嵌入近似无条件**（pitfalls #49，references/generative-diffusion-cpt.md）。
-- **预计算-后训练模式**：把 latent + text_emb 缓存到 `video_latents.pt`，训练阶段只跑 DiT 前向反向（快、省显存、可不上 NPU 编解码器）。
-- 用 `scripts/prepare_generative_data.py.tmpl`。详见 `references/generative-diffusion-cpt.md`。
-
-**C. 音频-LLM 范式（audio-text-to-text）** → 音频读+processor mel+chat template（见 `references/audio-llm-cpt.md`，模板 `cpt_audio_llm.py.tmpl`）：
-- 音频 `soundfile.read(io.BytesIO(bytes))` → numpy float32 16k（flac 在 parquet `audio` 列 `bytes`；MLS/fleurs 16k 无需重采样，**跳 librosa 避 libgomp TLS 坑 #55**）。
-- `AutoProcessor`：`proc(text=[chat_full,...], audio=[arr,...], padding=True, return_tensors="pt", sampling_rate=16000)`——kwarg **`audio=`（单数，非 `audios=`，#56）**，返回 `input_features`(mel)+`feature_attention_mask`。
-- **labels（#58 必读）**：mask pad + prompt 段 + **audio 特殊 token**(`<|audio_bos|>/<|AUDIO|>/<|audio_eos|>`，漏 mask 致 loss 虚高 ~8×)；只对 assistant(transcript) 算 CE loss。
-- **forward（#57）**：`model(input_ids=, attention_mask=, input_features=, feature_attention_mask=, labels=)`（须传 input_features **和** feature_attention_mask）。
-- 冻结 `audio_tower`+`multi_modal_projector`（按子模块路径名，勿用类名"Audio"误冻顶层 #59），训 `language_model` 全量或 LoRA。
-
-### 阶段 4 · 训练方式自动选型
-按 `references/parallel-strategy.md` 的决策树，据**卡间互联速度**、**模型参数量**、**单卡显存**、**语料规模**、**用户要求**选。**先探测卡间互联**（`hccn_tool -i <devid> -ip -g` 是否配 RoCE IP）：
-
+### 阶段 4 · 训练方式自动选型（references/parallel-strategy.md）
 ```
 卡间互联慢（RoCE 未配 / PCIe ~GB/s）？
-├─ 是 → 大模型(单卡装不下) → 【模型并行 device_map="auto"】拆层到多卡，
-│       无 all-gather，优化器放 NPU（实测 8× 加速，见 parallel-strategy.md「模型并行」）
-└─ 否（互联正常）→ 常规决策树：
-    单卡能装下整套(权重+优化器状态+激活)？
-    ├─ 能 → 想多卡提速？
-    │      ├─ 是且步数够多(>~150) → DDP（每卡持完整参数/梯度/优化器，hccl 后端）
-    │      └─ 否/步数极少 → 单卡 Eager
-    └─ 不能 → FSDP2（fully_shard，参数/梯度/优化器分片）
+├─ 是 → 大模型 → 模型并行 device_map="auto"（无 all-gather，实测 8× 加速）
+└─ 否 → 单卡装得下(权重+优化器+激活)？
+        ├─ 能 → 想多卡提速且步数>~150 → DDP(hccl)；否则单卡 Eager
+        └─ 不能 → FSDP2（fully_shard）
 ```
+经验阈值：权重占单卡 ≤~40% → 单卡；0.5–3B 常单卡/DDP；≥30B → FSDP2/模型并行；步数 <~150 不上图模式（torchair 首图编译 ~15min 摊销不了）；互联慢时大模型勿用 FSDP2（通信-bound，实测 97% 时间在通信）。
 
-经验阈值（单张 ~65GB 卡，bf16 权重+fp32 AdamW 状态，近似）：
-- 权重占单卡 ≤ ~40% 显存 → 单卡；想提速走 DDP。
-- 0.5–3B 常单卡或 DDP；7–14B 单卡勉强→DDP 或 FSDP2/模型并行；≥30B → FSDP2 或模型并行。
-- **步数 < ~150 且用图模式不划算**（torchair 首图编译 ~15min 摊销不了）→ 走 Eager+融合优化器。
-- **卡间互联慢时大模型别用 FSDP2**：其 all-gather/reduce-scatter 会通信-bound（实测 97% 时间在通信），改模型并行。
-
-### 阶段 5 · 超参自动择优（`references/hyperparam-selection.md`）
-- **precision**：fp32 主权重 + bf16 autocast（NPU 原生 bf16，数值稳）。**不要**纯 bf16 前向（混合线性注意力模型会数值崩，见 pitfalls.md）。
-- **lr**：CPT 基线 1e-5；全局 batch 越大按 sqrt 缩放上调（DDP 8×→ 可 2e-5）。短训练(100步)用保守值避免发散。
-- **warmup**：~10% 步数；cosine 衰减到 0。
-- **optimizer**：`NpuFusedAdamW`（融合，替代 torch.optim.AdamW）；betas=(0.9,0.95)，wd=0.01，eps=1e-8，grad_clip=1.0。**例外**：分阶段训练会重建优化器（如 头部热身冻结→全层解冻，官方 finetune 两段式协议）时用 plain `torch.optim.AdamW`——`NpuFusedAdamW` 在跨阶段重建+freeze/unfreeze 切换后首个 backward 会崩 saved-tensor version 冲突（pitfalls #87）；且小模型（<100M，总训练分钟级）融合无收益。
-- **batch_size**：先按“激活显存预算”估上限，2 步 smoke 验不 OOM；OOM 则降 per-rank bs 或开梯度检查点。优先开**梯度检查点**而非降 bs（保有效 batch）。
-- **seq_len**：用户指定优先；否则据语料平均长度选 512/1024（长上下文模型可更大，但显存↑）。
-- **attention**：full_attention 层走 SDPA（→NPU fusion attention 自动路由）；不要轻易改 eager（会慢且图模式才需要）。
-- **梯度检查点**：线性注意力/hybrid 模型 fallback 激活显存大，默认开（`use_reentrant=False`）。
+### 阶段 5 · 超参自动择优（references/hyperparam-selection.md）
+- **precision**：fp32 主权重 + bf16 autocast（**不要**纯 bf16 前向 #4）；**lr**：CPT 基线 1e-5（全局 batch 大按 sqrt 上调；短训练保守值；照抄基座从零训练的调度会发散 #82）；**warmup** ~10% 步数 cosine 到 0；**optimizer**：`NpuFusedAdamW` + betas(0.9,0.95) wd=0.01 eps=1e-8 clip=1.0——**例外**：分阶段重建优化器（freeze/unfreeze 切换）用 plain AdamW（#87 跨阶段 saved-tensor 崩溃），小模型(<100M)融合无收益；**batch_size** 按"激活显存预算"估上限+2 步 smoke 验不 OOM（优先开梯度检查点而非降 bs，`use_reentrant=False`）；**attention**：full_attention 走 SDPA（→NPU fusion 自动路由）。
 
 ### 阶段 6 · 生成训练脚本并 smoke
-- **按范式选模板**：文本 LM → `scripts/cpt_train.py.tmpl`（**单卡 + DDP 自动检测**，由 RANK env 决定）/ `cpt_fsdp.py.tmpl`（FSDP2）；diffusers 生成式 → `scripts/cpt_diffusion.py.tmpl`（流匹配，读缓存的 latent+emb）。
-- 模板通用化：文本 `AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 references/multimodal-remap.md；扩散生成式按 component 分离加载（train backbone，freeze VAE/text_encoder），见 references/generative-diffusion-cpt.md。
-- 模板已支持断点续训（`RESUME=1` 开关，默认关闭）与梯度累积（`GRAD_ACCUM=N`），见 references/resume.md。
-- **smoke**：2 步、2 卡（DDP）或单卡，确认前向+反向+优化器 step 都通过、loss 合理（初始 ~模型典型值）再上正式。**扩散生成式：先对 backbone(DiT) 与 VAE 分别用 dummy 数据做单组件前向 smoke**（抓 NPU 算子如 3D conv/attention 支持问题，pitfalls #50），再合练。
-- **smoke 的 s/step 不可直接外推正式训练用时**：smoke 的 `s/step = 累计耗时/(step+1)` 把首次 import(~90s)+多卡加载模型+FSDP2/DDP 初始化全摊进前几步，前几步 s/step 虚高。预估正式训练取正式 run 稳态步的 s/step（累计平均越往后越准），或 `总耗时/NUM_STEPS`。
-- 踩坑先看 references/pitfalls.md（已在脚本模板里规避了多数）。
+- 按范式选模板：文本 `cpt_train.py.tmpl`（单卡+DDP 自动检测）/`cpt_fsdp.py.tmpl`/`cpt_mp.py.tmpl`；扩散 `cpt_diffusion.py.tmpl`；音频 `cpt_audio_llm.py.tmpl`。模板已支持断点续训（`RESUME=1` 默认关）与梯度累积（references/resume.md）。
+- 模板通用化：文本 `AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 remap；组件分离加载见各范式 reference。
+- **smoke**：2 步确认前向+反向+优化器 step 全通过、loss 合理再上正式；扩散先对 backbone 与 VAE 分别单组件前向 smoke（抓 NPU 算子问题 #50）。**smoke 的 s/step 不可外推正式用时**（首 import ~90s 摊进前几步虚高，取稳态步）。
+- 踩坑先 grep references/pitfalls.md（模板已规避多数）。
 
-> **范围声明**：本 skill 覆盖**单机多卡**（1–8 卡）。**多机（multi-node）** CPT 需 `torchrun --nnodes` + RDMA/网络配置（HCCL 跨机），属另一层复杂度，本 skill 不含；如需多机，在单机跑通后另加 `--nnodes`/`--rdzv` 与 HCCL 网络配置。
+> **范围声明**：本 skill 覆盖单机多卡（1–8 卡）；多机需 `torchrun --nnodes` + RDMA/HCCL 跨机配置，不在本 skill 范围。
 
 ### 阶段 7 · 正式训练 + loss 曲线 + 公网直链
-- 逐 step 记录 `step, loss, lr, elapsed, s/step, tok/s` 到 `logs/step_loss.jsonl` + stdout。
-- **心跳输出**：`print(..., flush=True)` 的间隔按**时间**折算（见核心原则 7），保证屏幕 ≤2–3 分钟必有输出（如 50s/step 时每 2–3 步打一次，而非固定每 5 步）。
-- **剩余用时外推**：训练期间每 ~30s 或每个心跳行，据已耗 step 数与 `s/step` 外推**剩余训练用时 ETA = (NUM_STEPS − step) × s_per_step**，连同当前 step/loss/已耗时长一并打印；并刷新用时表阶段 7 行为 `⏳doing`（如 `50/100步 ETA1.5min`）。可用 `timing_table.py --doing 7 "50/100步 ETA1.5min"`。
-- 训完出 `train_summary.json`。
-- **保存 CPT ckpt**（`cpt_model_state.pt`）供阶段 8 评估用（见核心原则 5；FSDP2 用 full_tensor 聚合）。
-- **保存 resume ckpt**（`ckpt_latest.pt`：模型+优化器+step）。断点续训开关 `RESUME=1` **默认关闭**；开启后按**时间基准**周期保存（间隔 `= max(15分钟, 预估总时长/5)`，训练期间 **≤5 次**、每次间隔 **≥15 分钟**），训练结束**总是**存一次最终 ckpt（见 `references/resume.md`）。
-- 画 loss 曲线 png（`scripts/plot_loss.py.tmpl`，matplotlib，EMA 平滑），**尝试上传公网直链**：catbox.moe → 0x0.st → uguu.se（按可达性依次试；catbox/0x0 常不可用，uguu.se 通常可用）。校验链接 HTTP 200 后告知用户。外网全不通则用表格展示 loss 收敛。
-- 所有产物存到 `<模型名>-cpt/` 子目录（见核心原则 8 与「产物目录约定」）。
+- 逐 step 记 `step, loss, lr, elapsed, s/step, tok/s` 到 `logs/step_loss.jsonl` + stdout（心跳按时间折算，屏幕 ≤2–3 分钟必有输出）；每 ~30s 外推剩余 ETA 并刷用时表（T4）。
+- 训完出 `train_summary.json`；保存 `cpt_model_state.pt`（评估用）+ `ckpt_latest.pt`（续训用，按时间基准周期保存 ≤5 次、间隔 ≥15min，训练结束总存一次，见 references/resume.md）。
+- 画 loss 曲线（`plot_loss.py.tmpl`，EMA 平滑）并尝试上传公网直链（catbox→0x0→uguu）；外网全不通降级表格展示。产物全部存 `<模型名>-cpt/`。
 
-### 阶段 8 · 训练前后域内评估
-**按范式分支（核心原则 10）：**
-
-**A. 文本 LM 范式** → 用 `scripts/eval_cpt.py.tmpl`：取 held-out 样本，对 **base** 与 **CPT** 两套算：
-  - PPL = exp(mean NLL)、mean NLL、next-token acc（全序列 token 级，从 logits argmax）。
-  - **chat 数据**：末轮 assistant 贪心生 128 token，token 级 Precision/Recall/F1/EM。
-  - **纯文本数据**（无 messages，如 base 模型喂网页/代码文本）：只算 PPL/NLL/next-token acc（无"末轮 assistant"可生成比对）。
-- 指标选择要"据训练数据与模型合理"：方言/领域语料用域内 PPL/acc/生成 F1；**不要**强行套英文 MMLU/HellaSwag（不对齐且需额外下载 lm-eval-harness）。若用户模型是**通用知识型**（非领域方言）且明确要英文基准，按 `references/eval-metrics.md` 的 MMLU how-to 跑小子集并说明局限。
-- **NLL 公式务必取负**：`nll = -log_probs.gather(...).mean()`（漏取负会得负值，见 pitfalls.md）。
-- **【所有范式通用】base vs CPT 对比三原则**（详见 references/eval-metrics.md「对比设计/结论判定」）：①**严格同条件**——两模型用相同种子驱动一切随机源（解码顺序/采样/数据顺序），对比前先做确定性自检（同权重同种子两轮应逐位一致）；②**协议锚定**——base 的关键指标与论文/官方数字交叉验证同量级，锚上了才证明评估协议没写错；③**持平可能是正确结论**——CPT 语料是基座原训练分布子集且基座已充分收敛时，短程 CPT 预期就是持平（±1%），如实报告为"符合预期"；train loss 上升则是 lr 发散（pitfalls #82），与"持平"分开报告。
-
-**B. diffusers 生成式范式** → 用 `scripts/eval_diffusion.py.tmpl`：
-  - **量化**：固定 σ（如 0.5）对 base vs CPT 算 **velocity MSE**（越低=速度预测越准；Δ<0 训练有效）。取 held-out latent。
-  - **定性**：CPT backbone 采样（noise→N 步 Euler 去噪→VAE 解码→存帧 gif/mp4）。生成质量随步数渐进提升，50 步演示看 loss/MSE 下降即可断"训练有效"。
-  - eval 指标与生成范式一一对应，**不要**给扩散模型套 PPL/next-token acc（无 token 序列概念）。
-
-**C. 音频-LLM 范式** → 用 `cpt_audio_llm.py.tmpl` 的 eval 模式（见 `references/audio-llm-cpt.md`）：
-  - **量化转写 CE loss**：held-out 音频+转写，base(全新/ad adapter off) vs CPT(加载 state_dict，`strict=False` 验 miss/unexp=0)，同 build_inputs(audio mask)，`delta<0` 训练有效。
-  - 定性（可选）：采样生成转写 → 算 WER（需 jiwer/edit-distance）。
-  - **不要**给音频-LLM 套纯文本 PPL/扩散 velocity MSE（语义不对：音频-LLM 的目标是条件转写 CE）。
-
-**D. MLIP 力场范式（能量+力回归，如 MatterSim/MACE/NequIP）** → 指标与口径（pitfalls #91–#93）：
-  - 能量 MAE（eV 与 meV/atom）+ 力 MAE/RMSE（eV/Å）+ 力方向余弦；**评估循环禁 @torch.no_grad()**——力 = -∂E/∂x 需要前向 autograd 图（#92）。
-  - base vs CPT 同条件：能量基准差（跨泛函/口径可达 ~150 eV/atom）用 **shift-only scaling** 对齐（shift 拟合自训练集、scale 保留原模型值），保证力基线不动、指标直接可比（#93）；力不受能量平移影响，是跨口径最可靠的对比指标。
-  - 性能用单结构"前向+力微分"延迟；train 回代 vs held-out 对比做过拟合检查。
-- 出 `eval_results.json` + 结论表，给"训练是否有效"结论（Δ 方向 + 是否过拟合）。
-- **【通用】过拟合检查（#61/#62，所有范式）**：①held-out **须用独立 test split**（非同源不同段——同源共享分布，评估失真）；②**训练 loss 趋近 0（<0.05）+ held-out 不改善 = 过拟合红旗**（小数据多 epoch 记忆样本）；③**数据量是泛化的关键杠杆（非步数）**：小数据多步→train_loss 虚低但泛化差；扩数据→train_loss 不到 0 但 held-out 大幅改善。MOSS 实证：8样本×25epoch train_loss 0.012 held-out -3%（过拟合）；50样本×6epoch train_loss 0.110 held-out -87%（泛化好）。优先扩数据再加步。
-- **FSDP2 大模型评估**：ckpt 是 `full_tensor()` 聚合的全量 state_dict，单卡直接 `load_state_dict` 即可（评估不需 FSDP2/DDP）。base 多模态走 remap。完整 9B FSDP2 实战案例（含结果表 + 与 0.8B 对比）见 `references/eval-metrics.md`。
-- **多卡训练后别立刻跑单卡评估**：8 卡 FSDP2/DDP 训练退出后 NPU driver **异步回收显存有延迟**（pitfalls #32），立刻 `model.to(npu)` 易 OOM（card 仅剩几百 MB free 但无残留进程）。训练退出后等几秒、`npu-smi` 确认卡空闲（或 `torch.empty(40GB)` 实测可分配）再跑评估；评估脚本载入前先 `torch.npu.empty_cache()`。
-- **ckpt 转 HF 可复用目录**（可选）：若用户想用 `from_pretrained` 直接加载 CPT 模型做推理/当新 base，把 `cpt_model_state.pt` 存成 HF 目录（拷 config.json+tokenizer 到 `outputs/cpt_hf_model/` + 存权重为 `model.safetensors`）。否则评估用 `load_state_dict` 即可。
+### 阶段 8 · 训练前后域内评估（按范式分支；对比三原则见 references/eval-metrics.md）
+**通用**：base vs CPT ①严格同条件（同种子一切随机源+确定性自检）②协议锚定（base 关键指标与论文/官方数字同量级才算协议对）③持平可能是正确结论（短程 CPT 域内收敛基座预期 ±1%）；**过拟合检查**：held-out 须独立 split；train loss 趋 0 + held-out 不改善=红旗；**数据量是泛化关键杠杆**（非步数）。多卡训练后别立刻单卡评估（显存异步回收 #32）；评估载入前 `torch.npu.empty_cache()`。
+- **A. 文本 LM**（`eval_cpt.py.tmpl`）：PPL/NLL（公式务必取负 #5）/next-token acc；chat 数据加末轮生成 F1；域内语料用域内指标，勿强行套 MMLU。
+- **B. diffusers**（`eval_diffusion.py.tmpl`）：固定 σ 算 velocity MSE（Δ<0 训练有效）+ 采样生成定性；勿套 PPL。
+- **C. 音频-LLM**：held-out 转写 CE loss（base 全新 vs CPT `strict=False`，Δ<0 有效）；勿套文本 PPL/velocity MSE。
+- **D. MLIP 力场**（#91–#93）：能量 MAE(eV 与 meV/atom)+力 MAE/RMSE(eV/Å)+力方向余弦；**评估循环禁 @torch.no_grad()**（力=-∂E/∂x 需 autograd 图 #92）；能量基准差用 **shift-only scaling** 对齐（shift 拟合自训练集、scale 保留原值保力基线 #93）；性能用单结构前向+力微分延迟。
+- 出 `eval_results.json` + 结论表。ckpt 转 HF 目录可选（`from_pretrained` 直接加载）。
 
 ### 阶段 9 · 概要总结报告
-输出（Markdown）含：任务/模型/语料、并行策略、融合 API、超参表、loss 收敛(first5→last5, min, delta)、**完整用时表(每阶段实际/预计 + 合计 + 预估偏差解释)**、公网直链、关键修正记录、复跑命令。全部归档到 `${WS_DIR}/`（即 `training-ws/<模型名>-cpt/`）。**最终答复（上屏）必须同样携带这张完整用时表**（核心原则 9 的 T6）——README 归档一份、对话收尾一份，缺一不可。
+输出（Markdown）含：任务/模型/语料、并行策略、融合 API、超参表、loss 收敛(first5→last5, min)、**完整用时表(预计/实际+合计+偏差解释)**、公网直链、关键修正记录、复跑命令。归档到 `${WS_DIR}/`。**最终答复必须同样携带完整用时表**（T6）。
 
-## 自动选型速查（写进脚本头注释）
+## 自动选型速查
 
-### 模型类型 → 训练范式（首选维度，核心原则 10）
+| 模型类型 | 范式/损失 | 脚本 | 评估 |
+|---|---|---|---|
+| 文本 LM / 多模态文本头 | next-token CE | `cpt_train.py.tmpl` | PPL/acc/F1 |
+| diffusers 生成式 | 流匹配 on VAE latent | `cpt_diffusion.py.tmpl` | velocity MSE+采样 |
+| 音频-LLM | 转写 CE（mask audio token） | `cpt_audio_llm.py.tmpl` | 转写 CE loss/WER |
+| MLIP 力场 | 能量(per-atom)+力（力=-∂E/∂x） | 按官方库复用+patch | E/F MAE（禁 no_grad） |
+| Keras/TF 权重 | 先复刻迁移（#84–86）再按原生范式 | 按范式 | 按范式 |
 
-| 模型类型 | 训练范式 | 损失 | 数据流水线 | 脚本 | 评估 |
-|---|---|---|---|---|---|
-| 文本 decoder-only LM / 多模态文本头 | next-token 自回归 | CE `model(input_ids,labels)` | tokenize→打包 seq_len 块 | `cpt_train.py.tmpl` | PPL/acc/F1 |
-| 文生视频/文生图 diffusers(DiT/U-Net) | 流匹配/DDPM | velocity/epsilon MSE on VAE latent | decode→VAE编码→缓存 latent+text emb | `cpt_diffusion.py.tmpl` | velocity MSE + 采样生成 |
-| MLX(Apple) 格式模型 | 同上但须先换 PyTorch 基座 | — | — | 见 pitfalls #47 | — |
-
-### 并行/规模选型（次选维度，适用于 backbone 训练）
-
-| 输入 | 选型 |
-|---|---|
-| 小模型(<3B) + 单卡装下 | 单卡 Eager + NpuFusedAdamW + SDPA |
-| 小/中模型 + 想提速 + 步数>150 | DDP(每卡完整参数) + NpuFusedAdamW + hccl |
-| 大模型(单卡装不下优化器状态) + 互联正常 | FSDP2(fully_shard) |
-| 大模型 + **卡间互联慢**(RoCE 未配/PCIe ~GB/s) | **模型并行 device_map="auto"**（fp32 权重，无 all-gather，8× 加速） |
-| 短训练(<150步) | 不要图模式，Eager+融合优化器 |
-| 长训练/推理 + 想极致融合 | torchair 图模式（见 references/fusion-api.md，含 converter 补全清单） |
+并行：小模型(<3B)单卡 Eager+NpuFusedAdamW；中模型+步数>150 → DDP；单卡装不下优化器 → FSDP2；互联慢+大模型 → 模型并行；短训练(<150步)勿图模式。
 
 ## 产物目录约定
 
-所有产物统一归档到 SLAI-AscendBridge2 仓库根目录下 **`training-ws/<模型名>-cpt/`** 子目录（如 `training-ws/gemma-4-12B-it-cpt/`），**不得**散落到仓库根目录或与仓库平行的位置。`training-ws/` 无则新建。
-
 ```
 <REPO_ROOT>/training-ws/<模型名>-cpt/
-├── run_env.sh              # NPU 环境入口 (WS_DIR 指向本目录)
-├── env_probe.json          # 软硬探测结果
-├── prepare_data.py         # 语料转换打包
-├── cpt_train.py            # 训练(单卡/DDP 按选型)
-├── cpt_mp.py               # 训练(模型并行 device_map，卡间互联慢时)
-├── cpt_fsdp.py             # 训练(FSDP2)
-├── launch_ddp.sh           # DDP 启动(torchrun)
-├── eval_cpt.py             # 前后评估
-├── plot_loss.py            # 曲线+上传
-├── timing_table.py         # 全程用时表渲染器
-├── README.md               # 总结报告
+├── run_env.sh / env_probe.json / timing_table.py / README.md
+├── prepare_data.py / cpt_train.py / eval_cpt.py / plot_loss.py
+├── robust_download.sh        # 源探测/可靠下载（probe/fetch/get）
 ├── logs/{step_loss.jsonl, *_stdout.log}
-└── outputs/{input_ids.pt, losses.json, train_summary.json,
-            timing.json, loss_curve.png, public_links.json,
-            cpt_*_state.pt, eval_results.json, val_samples.json}
+└── outputs/{timing.json, input_ids.pt, losses/step jsonl,
+            train_summary.json, loss_curve.png, public_links.json,
+            cpt_*_state.pt, eval_results.json}
 ```
 
-## 用时表（全程实时刷新，格式化输出）
+## 用时表（全程实时刷新）
 
-整个 CPT 过程**必须**在屏幕上维护一张实时用时表（核心原则 9 的 T1–T6 触发点），让用户随时知道：每阶段预计/实际用时、整体总预估、剩余预估。用 `scripts/timing_table.py.tmpl` 渲染（读 `outputs/timing.json`）。
-
-### 要求
-- **整体预估**：阶段 0–1 勘察完后，据模型规模/卡数/目标步数/语料量给出**全程总预估**，写入 `timing.json` 的 `overall_estimate_s`，并填好 9 阶段各自 `est_s`，打印第一张完整用时表（T1）。
-- **每阶段**：进入即 `--doing` 置 ⏳（T2）；完成时记录**实际用时**（`--set <id> actual <s>` 自动置 done）并重印（T3）。
-- **剩余预估**：长跑阶段（下载/训练/评估）期间，据当前速率外推**剩余用时 ETA**（训练用 `s/step × (NUM_STEPS − step)`；下载用已下载字节/速率），每 1–2min 刷新为 `⏳doing` 并带 ETA 说明（T4）。
-- **刷新时机**：每完成一阶段、训练每 N 步、评估每模型切换时，重新打印整张表（Markdown，`print(..., flush=True)`）（T3/T4/T5）。
-- **收尾汇总（T6，不可省）**：最终答复与 README 都必须包含完整用时表（阶段/预计/实际/说明 + 合计 + 预估偏差解释）。README 里的用时表是归档；**对话里的最终答复必须再带一份**——用户不看文件也应能拿到全程用时结论。
-
-### 表格格式（屏幕实时打印；列：阶段 / 预计 / 实际 / 状态 / 说明）
+工具 `scripts/timing_table.py.tmpl`（读 `outputs/timing.json`），触发点=核心原则 9 的 T1–T6。要求：整体预估（T1 后写入 `overall_estimate_s`）；进入即 `--doing`、完成即 `--set actual`；长跑阶段按速率外推 ETA 每 1–2min 刷新；**收尾汇总（T6）最终答复与 README 各带一份完整表**。格式（列：阶段/预计/实际/状态/说明）：
 
 ```
 | 阶段 | 预计 | 实际 | 状态 | 说明 |
 |---|---|---|---|---|
 | 0 意图确认与路径核对 | 1.0min | 0.5min | ✅done | 路径已核对 |
-| 1 环境/依赖勘察 | 3.0min | 3.2min | ✅done | 8卡 Ascend910 64GB |
-| 2 模型与数据集获取 | 1.0min | 0.3min | ✅done | 本地有 |
-| 3 语料格式转换与打包 | 1.0min | 0.8min | ✅done | 800块 |
-| 4 训练方式选型 | 1.0min | 0.2min | ✅done | 单卡Eager |
-| 5 超参自动择优 | 1.0min | 0.1min | ✅done | lr1e-5 |
-| 6 生成脚本并smoke | 3.0min | 2.5min | ✅done | 2步smoke通过 |
 | 7 正式训练+曲线 | 6.0min | 2.9min | ⏳doing | 50/100步 ETA1.5min |
-| 8 训练前后评估 | 4.0min | — | ⏳pending | base+cpt |
-| 9 概要总结报告 | 1.0min | — | ⏳pending | README |
 | **合计** | **~22min** | **10.5min** | **进行中** | 剩余 ~11min |
 ```
 
-长跑阶段（7）每次刷新可只追加一行 "当前 step / s·step / 剩余 ETA"；其余阶段完成后补 actual 列、状态置 ✅done。全程合计行始终显示"已实际 / 整体预估 / 剩余"。
+长跑期间可只追加 `⏳doing` 行（带已耗/百分比/ETA）；合计行始终显示"已实际/整体预估/剩余"。
 
 ## references（按需读）
-- `references/fusion-api.md` — torch_npu 融合 API 清单 + torchair 图模式 + 缺失 converter 补全（softplus/eye/softplus_backward 等）
-- `references/pitfalls.md` — 踩坑清单与解法（必读，避免重犯）
-- `references/parallel-strategy.md` — 单卡/DDP/FSDP2/**模型并行(device_map)** 选型与代码骨架 + 卡间互联探测
-- `references/hyperparam-selection.md` — 超参自动择优 + OOM 回退阶梯 + 梯度累积
-- `references/data-prep.md` — 数据预处理边界（去重/分块/混合/packing vs padding/tokenizer）
-- `references/resume.md` — 断点续训（存/载 optimizer+step+sampler）
-- `references/eval-metrics.md` — PPL/acc/F1/Recall/EM 定义 + held-out 重建 + FSDP2 实战案例 + MMLU how-to
-- `references/multimodal-remap.md` — 多模态 checkpoint → 文本头权重重映射
-- `references/generative-diffusion-cpt.md` — **文生视频/文生图 diffusers 扩散 DiT CPT 全流程**（MLX→PyTorch 基座、组件分离、VAE 编码上 NPU、流匹配 loss、预计算 latent、text_encoder 缓存/零嵌入兜底、采样评估、**可选 RL 后训练 GRPO + 奖励分类器 OOD 泛化 + KL 正则**）
-- `references/text-lm-rl.md` — **文本 LM / 音频 LLM RL 后训练（RLHF/GRPO，可选）**（token log-prob 策略梯度 + 偏好奖励模型/规则 + log-prob KL-to-ref + 与扩散 RL 对比不可混用 + 音频 LLM=文本 LM RL）
+- `references/pitfalls.md` — 踩坑清单（**按症状 grep 取相关条目，勿通读**）
+- `references/fusion-api.md` — torch_npu 融合 API + torchair 图模式
+- `references/parallel-strategy.md` — 单卡/DDP/FSDP2/模型并行选型与骨架 + 互联探测
+- `references/hyperparam-selection.md` — 超参择优 + OOM 回退阶梯 + 梯度累积
+- `references/data-prep.md` / `references/resume.md` / `references/eval-metrics.md` — 数据边界 / 断点续训 / 评估指标与对比三原则
+- `references/multimodal-remap.md` — 多模态 checkpoint 文本头重映射
+- `references/generative-diffusion-cpt.md` — 扩散 DiT CPT 全流程（+可选 RL 后训练）
+- `references/audio-llm-cpt.md` — 音频-LLM CPT
+- `references/text-lm-rl.md` — 文本 LM/音频 LLM RL 后训练（RLHF/GRPO，可选）
 
-## scripts（标准模板，新模型微调即用）
-见 `scripts/*.tmpl`。生成时复制到 `${WS_DIR}/`（即 `training-ws/<模型名>-cpt/`）并按当前模型/语料/选型替换占位。模板已规避多数踩坑（set_to_none=False、gradient_as_bucket_view=False、expandable_segments、autocast、grad-ckpt）。其中 `run_env.sh.tmpl` 的 `WS_DIR` 已自动指向 `training-ws/<模型名>-cpt/` 并 `mkdir -p`；`timing_table.py.tmpl` 用于全程实时用时表（见核心原则 9）；`robust_download.sh.tmpl` 用于阶段 2 源探测/慢源可靠下载（probe / fetch / get 三模式，见 pitfalls #88–#90）。
+## scripts（标准模板）
+见 `scripts/*.tmpl`，复制到 `${WS_DIR}/` 按当前模型/语料替换占位。模板已规避多数踩坑（set_to_none=False、gradient_as_bucket_view=False、expandable_segments、autocast、grad-ckpt）。`run_env.sh.tmpl` 的 `WS_DIR` 已自动指向 `training-ws/<模型名>-cpt/`；`timing_table.py.tmpl` 用于用时表（核心原则 9）；`robust_download.sh.tmpl` 用于阶段 2 源探测/可靠下载（#88–#90）。
 
-按范式选模板：文本 LM → `prepare_data.py.tmpl` + `cpt_train.py.tmpl`(+`cpt_fsdp.py.tmpl`/`cpt_mp.py.tmpl`) + `eval_cpt.py.tmpl`；扩散生成式 → `prepare_generative_data.py.tmpl` + `cpt_diffusion.py.tmpl` + `eval_diffusion.py.tmpl`。
+按范式选模板：文本 LM → `prepare_data.py.tmpl`+`cpt_train.py.tmpl`(+fsdp/mp)；扩散 → `prepare_generative_data.py.tmpl`+`cpt_diffusion.py.tmpl`；音频 → `cpt_audio_llm.py.tmpl`。
