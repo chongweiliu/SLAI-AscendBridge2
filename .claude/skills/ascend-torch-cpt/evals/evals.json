@@ -156,6 +156,36 @@
           "text": "评估输出包含能量 MAE(eV 与 meV/atom) 和力 MAE(eV/Å)，base 与 CPT 在相同 scaling 口径下对比"
         }
       ]
+    },
+    {
+      "id": 6,
+      "name": "research-pkg-cpt-deadlock-discipline",
+      "prompt": "在昇腾 NPU 上对科研包模型（如 fairchem/EquiformerV2、mattersim 等学术界包，pip 依赖 pin 旧版 torch）做继续预训练：安装会因 torch 版本 pin 冲突失败，官方训练栈在 NPU 上可能出现死锁或 OOM，数据集为自创格式且能量可能存在口径问题。",
+      "expected_output": "no-deps 安装+按 import 链补依赖+精确注册绕开 C++ 扩展；训练栈死锁时先做单批 MINREPRO 定位（模型直训显存 vs 栈开销）再决定自管循环，而非盲调 batch/换卡；中期评估成本预计算且占比 <20%；产出 best(非EMA)/final(EMA)/latest(续训) 三份语义清晰 ckpt 且评估用 best；能量误差若 ∝ 原子数则用最小二乘反解 per-element 参考能表统一口径；长实验带硬超时与进展输出",
+      "files": [],
+      "assertions": [
+        {
+          "text": "科研包以 --no-deps 或源码方式安装，torch/torch_npu 版本未被升级破坏"
+        },
+        {
+          "text": "依赖缺失时按 import 链精确补齐；C++ 扩展缺失用最小 shim 或精确注册绕开（而非编译失败后卡住）"
+        },
+        {
+          "text": "官方训练栈死锁/OOM 时，先以单批最小复现（模型+collator+一个 batch 前向反向+显存打印）区分模型需求与栈开销，再决定是否自管轻量循环；未出现连续 3 次以上盲调 batch/换卡试错"
+        },
+        {
+          "text": "训练中评估的频率与评估集大小经过成本预计算，评估总开销 < 训练总时长 20%；base 基线评估有落盘缓存可复用"
+        },
+        {
+          "text": "产出 ckpt 语义清晰：best(非 EMA)/final(EMA)/latest(含优化器续训) 分文件保存，评估默认加载 best 并注明 step；短程训练(<3×EMA半衰期)未盲目使用 EMA 权重评估"
+        },
+        {
+          "text": "能量误差与原子数呈单调相关时，识别为 per-element 参考口径问题并用最小二乘反解参考能表（或官方 fit 工具）统一 raw 口径，而非直接判定模型不可用"
+        },
+        {
+          "text": "预期 >5min 的评估/实验脚本带 timeout 硬超时且输出进度心跳；无进展 2× 预期时长后被终止换方案"
+        }
+      ]
     }
   ]
 }

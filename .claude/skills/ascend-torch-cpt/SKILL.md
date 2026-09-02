@@ -52,7 +52,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
     - `Qwen2Audio*`/audio-text-to-text → **音频-LLM**（转写 CE，references/audio-llm-cpt.md）。
     - MLX 格式 → 须换同源 PyTorch 基座（#47）。
     - Keras/TF `.pkl`/`.h5` → **PyTorch 复刻+权重迁移**（#84–#86）。
-    - **MLIP 力场（能量+力输出，如 MatterSim/MACE）** → **能量+力联合回归**（力=-∂E/∂x autograd；评估禁 no_grad #92、shift-only scaling #93、后端静默降级 patch #91）。
+    - **MLIP 力场（能量+力输出，如 MatterSim/EquiformerV2/MACE）** → **能量+力联合回归**（力=-∂E/∂x autograd 或 direct force head；评估禁 no_grad #92、shift-only scaling #93、后端静默降级 patch #91、科研包兼容链 #99、能量 per-element 参考口径 #100）。
 11. **确定性 NPU 崩溃用"插桩→单批复现→二分"定位，变长 batch 必开 expandable_segments**（EE9999/507035 无 Python 堆栈；完整四步法 #79，多区域 checkpoint 反传 bug #78；s/step 渐进劣化特征 #80）。
 
 ## 工作流（9 阶段，每阶段都要在屏幕实时更新用时表）
@@ -103,11 +103,13 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - 模板通用化：文本 `AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 remap；组件分离加载见各范式 reference。
 - **smoke**：2 步确认前向+反向+优化器 step 全通过、loss 合理再上正式；扩散先对 backbone 与 VAE 分别单组件前向 smoke（抓 NPU 算子问题 #50）。**smoke 的 s/step 不可外推正式用时**（首 import ~90s 摊进前几步虚高，取稳态步）。
 - 踩坑先 grep references/pitfalls.md（模板已规避多数）。
+- **官方训练栈首次死锁/OOM → 立即 MINREPRO**（模型+collater+单批显存复现，~20 行）定位是模型需求还是栈问题，**禁止盲调 batch/换卡试错**（#95）；栈级不可用则拆组件自管轻量循环。
 
 > **范围声明**：本 skill 覆盖单机多卡（1–8 卡）；多机需 `torchrun --nnodes` + RDMA/HCCL 跨机配置，不在本 skill 范围。
 
 ### 阶段 7 · 正式训练 + loss 曲线 + 公网直链
 - 逐 step 记 `step, loss, lr, elapsed, s/step, tok/s` 到 `logs/step_loss.jsonl` + stdout（心跳按时间折算，屏幕 ≤2–3 分钟必有输出）；每 ~30s 外推剩余 ETA 并刷用时表（T4）。
+- **中期评估成本预计算**（10 帧计时×次数，>总时长 20% 先调间隔/帧数；base 评估缓存复用 #96）；**三份 ckpt 语义**（best 非 EMA 评估默认 / final EMA / latest 续训；短程训练慎用 EMA #97）；长实验 `timeout 2×预估` 且监控方 2× 预期无输出即杀（#98）。
 - 训完出 `train_summary.json`；保存 `cpt_model_state.pt`（评估用）+ `ckpt_latest.pt`（续训用，按时间基准周期保存 ≤5 次、间隔 ≥15min，训练结束总存一次，见 references/resume.md）。
 - 画 loss 曲线（`plot_loss.py.tmpl`，EMA 平滑）并尝试上传公网直链（catbox→0x0→uguu）；外网全不通降级表格展示。产物全部存 `<模型名>-cpt/`。
 

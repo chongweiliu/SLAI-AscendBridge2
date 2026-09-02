@@ -620,3 +620,36 @@ sys.meta_path.insert(0, _StubFinder())
 - **根因**：同一项目在不同托管平台的发布物**不同步**——ModelScope 官方镜像 `OneScience/Mattersim` 的 `data/` 目录独有该文件（还有 finetune.py/finetune_config.yaml），GitHub `microsoft/mattersim` 仓库反而只有 `data/benchmarks/*`。
 - **解法**：①找官方示例数据/权重，**递归列出全平台镜像目录树**再下结论（ModelScope：`/api/v1/models/<ns>/<name>/repo/files?Revision=master&Root=<dir>` 逐目录）；②**官方 config/脚本的相对路径引用（`train_data_path: ../data/xxx`）是资产位置的最强线索**——顺着它查镜像目录；③注意 ModelScope API 给 **sha256** 不是 md5（校验工具要匹配，纯 md5 校验器传 sha256 会误报失败）。
 - **判定要点**：全网按名搜索失败 ≠ 资产不存在——换平台、换目录、顺着官方示例配置找；空 `__init__.py`（0 字节）会被 `[ -s ]` 判空误报"缺失"，文件"存在"≠"非空"。
+
+## 95. 官方训练栈在 NPU 上死锁/OOM：MINREPRO 前置，禁止盲调参试错（EquiformerV2 CPT 实证，执行方法论）
+- **症状**：官方 trainer 栈（如 fairchem OCPTrainer）启动后 HBM 涨满、AICore 归零、进程静默挂死（无 traceback 无 plog）；或换 batch/换卡后同症状复发。
+- **反模式（实测浪费 25min）**：batch 16 OOM → batch 8 → 换卡 → batch 4 → pin_memory patch → 再死——5 轮盲试；#79 的"插桩→单批复现"方法论存在但**执行顺序错了**。
+- **解法**：官方训练栈**首次**异常死锁/OOM → 立即写 20 行 MINREPRO：模型+官方 collater+单 batch 前向反向+显存打印（EquiformerV2 实测 10 分钟定位"模型直训仅 0.5GB@batch4，64GB 全是 trainer 栈吃的"）→ 直接转**自管轻量循环**（复用官方模型/collater/loss 语义，~30 行）。官方栈在非官方硬件上整体不可用时，拆组件自管往往最快。
+- **判定要点**：`npu-smi` HBM 满 + AICore 0 + 无 plog 错误 = 栈级死锁（不是模型显存需求）；此时任何 batch 调参都是盲试。
+
+## 96. 训练中评估成本预计算 + base 评估缓存（EquiformerV2 CPT 实证）
+- **症状**：正式训练 60min 里评估吃掉 30min——EVAL_EVERY=250 步 × 每次 1000 帧评估 ≈ 8min，评估成本≈训练成本；跑了一个 epoch 才发现，杀掉重启损失已训进度。
+- **解法**：①训练脚本启动前先跑 10 帧评估计时，`评估单次成本 × (总步数/间隔)` 算出评估开销占比，**>20% 先调大间隔/调小评估帧数再开跑**（经验值：中期评估 ≤ 总时长 15%，如每 1000 步评 200-500 帧）；②base 基线评估结果落盘缓存（`base_eval.json`），进程重启/评估脚本重跑时直接复用不重算。
+- **判定要点**：写训练脚本时把"评估"当成与训练同权重的成本项预计算，而不是跑起来再说。
+
+## 97. CPT 产出三份 ckpt 语义固化 + EMA 窗口污染（EquiformerV2 CPT 实证）
+- **症状**：训练结束用 `cpt_model.pt` 评估，力指标比训练中同权重评估差 5×（0.0215→0.107）——final 保存时 `with ema.average_parameters()` 用 EMA 权重覆盖，而 decay 0.999 × 2000 步的 EMA 平均窗口**含 ~25% 早期未收敛权重**；评估又默认拿了被污染的文件。
+- **解法**：①三份 ckpt 命名与语义写死：`cpt_best_model.pt`（**非 EMA**，held 指标最优步，评估默认用它）/ `cpt_final_model.pt`（EMA 终态，注明 decay 与步数）/ `ckpt_latest.pt`（含优化器，续训用）；②**短程训练（<5×半衰期步数）慎用 EMA**——平均窗口内早期权重大比例污染，EMA 反而劣于当前权重；③评估脚本默认加载 best 并打印其 step 与是否 EMA。
+- **判定要点**：EMA 半衰期 = 1/(1-decay) 步（0.999→~700 步）；总训练步数 < 3×半衰期时 EMA 不可信。
+
+## 98. 长任务硬超时 + 进展心跳：2× 预期时长无输出即杀（EquiformerV2 CPT 实证）
+- **症状**：500 帧口径对比实验预期 8min，实际挂死——挂着轮询等了 8 轮（~25min）才被外层 timeout 杀死，单点最大浪费；期间无 stdout 进展。
+- **解法**：①任何预期 >5min 的实验/脚本，启动时显式 `timeout <2×预估>`；②脚本内按已处理样本数打进度（每 20-50 帧一行）；③**监控方纪律**：等待循环 2× 预期时长无新输出 → 杀掉换方案，不无限等；④大计算量 NPU 任务先跑 20 帧测实际单帧耗时再外推总时长，预期与实测差 3×+ 立即怀疑挂死（变长 batch + empty_cache 可使实际远慢于外推）。
+- **判定要点**：进程 CPU% 高≠在推进（可能是 O(n²) 退化）；必须有"已处理数/总数"类输出才算活着。
+
+## 99. 科研包（fairchem 等）生态断代兼容链：no-deps + 精确注册 + 数据链替换（EquiformerV2 CPT 实证）
+- **症状**：`pip install fairchem-core` ResolutionImpossible（pin `torch~=2.4.0` 与 torch 2.10 冲突）；旧 ckpt 的 trainer 名在注册表不存在；`setup_imports` 连锁要求 torch_sparse/torch_scatter C++ 扩展；`ase_read_multi` 数据集 16k 帧必死。
+- **根因**：科研包（vs HF 生态）特性——依赖 pin 死、版本断代快（v1/v2 模型不兼容）、代码/模型/数据三分离、数据格式自创且带 bug。
+- **解法（全链实测）**：①`pip install --no-deps` + 按 import 链手动补依赖（wandb/tensorboard/submitit/lmdb...），双 pin 防 torch 升级；②**精确注册**（只 import 需要的 trainer/dataset/model 模块）替代 setup_imports，C++ 扩展用最小 shim；③断代名强制映射（`equiformerv2_forces`→`'ocp'`）；④数据链：**ase 读 xz 多帧是 O(n²)**（xz 不可 seek 逐帧反复解压，先 `xz -dc` 解压再读，100×加速）；ase_read_multi 双 bug（get_atoms 每次访问 read 整个文件 + index_file 模式 ids 覆盖）→ 注册**内存数据集**（继承官方 Dataset 基类，一次读入直接索引，~10 行）；⑤裸 python float 标签在 NPU 崩（aclnn 不支持 float64）→ patch `torch.tensor(x, dtype=torch.float32)`。
+- **判定要点**：ResolutionImpossible 提及版本 pin → no-deps 是标准解；注册表 KeyError → 找新名或强制统一名；数据集越跑越慢/CPU 99% 无输出 → 检查是否每样本重复读全文件。
+
+## 100. MLIP 能量 per-element 参考口径：误差 ∝ 原子数是指纹，最小二乘反解参考能表（EquiformerV2 CPT 实证）
+- **症状**：base 模型能量误差 168~540 eV 且**随原子数单调增长**（err/natoms 随元素组成波动 2.9-6.3）；官方 calculator 同样错（排除自身代码）；CPU=NPU 数值一致（排除硬件）；力不受影响。
+- **根因**：checkpoint 的能量输出是"去 per-element 参考"口径（OC20 All+MD 训练数据语义），extxyz 标签是 raw DFT 总能量，差 Σ N_el×ref_el（数百 eV 量级）。
+- **解法（定位三步）**：①逐帧打印 pred/true，发现 err∝natoms 且 err/natoms 随元素波动 → per-element 偏移指纹；②**最小二乘反解**：`E_raw − E_pred = A·ref`（A=每帧元素计数矩阵，≥元素数个帧）——残差骤降（368→2 eV）即证实；③训练 target 减 Σref、评估预测加回，统一 raw 口径。更精 ref 表（≥500 帧或官方 fit_references 脚本）可把残差压到 0.2 eV 级。
+- **通用**：跨口径（去参考 vs raw）能量差可达数百 eV，先查口径再谈模型精度；**力不受能量平移影响，是跨口径唯一可靠的先验对比指标**（MatterSim #93 同结论）；MLIP 力指标聚合口径必须写明（原子加权 vs 帧级可差 5×，EquiformerV2 实测 CPT 后两口径方向相反）。
