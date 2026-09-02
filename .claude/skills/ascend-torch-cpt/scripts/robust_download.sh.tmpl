@@ -98,10 +98,10 @@ do_get() {
   else
     local n=$(( (total + chunk - 1) / chunk ))
     [ "$n" -lt "$ways" ] && ways="$n"
-    echo "[get] Range OK → ${ways} 路 × ${chunk}B 分块并行, 分块内断点续传追加"
+    echo "[get] Range OK → ${ways} 路 × ${chunk}B 分块并行(共 ${n} 块, worker 循环认领), 分块内断点续传追加"
     local pids="" i
     for i in $(seq 0 $((ways - 1))); do
-      _dl_chunk "$i" &
+      _dl_worker "$i" &
       pids="$pids $!"
     done
     # 心跳监控: 等待期间每 60s 打一次进度 (按已收字节, 核心原则 7/T4)
@@ -132,6 +132,14 @@ do_get() {
   echo "[get] ✅ $out 校验通过 (size=$actual_size${md5:+, hash=$md5})"
   rm -rf "$dir"
   return 0
+}
+
+# worker: 循环认领分块 i, i+ways, i+2*ways... (覆盖 n > ways 的场景)
+_dl_worker() {
+  local w="$1" i
+  for (( i = w; i < n; i += ways )); do
+    _dl_chunk "$i" || return 1
+  done
 }
 
 # 单个分块: 记已收字节, 重试时只补尾部 (curl -r start+have-end >> chunk)
