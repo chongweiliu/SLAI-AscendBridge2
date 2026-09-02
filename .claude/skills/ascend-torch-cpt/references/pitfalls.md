@@ -596,3 +596,27 @@ sys.meta_path.insert(0, _StubFinder())
 - **解法（三级降级）**：① `git clone --depth 1`（当日链路正常时首选）；② 慢则改 `https://codeload.github.com/<org>/<repo>/tar.gz/refs/heads/<branch>`——**允许超时截断后整档重试**（脚本循环 `curl -o … && gzip -t … && break`，完整校验通过才算数）；截断的 tar.gz **不要直接扔**：`tar xzf` 在截断流上仍能解出**截断点之前的全部文件**（本次靠它先拿到 benchmark CSV 清单与部分数据，确认"数据集直接提交在代码仓库里"这一关键事实，为下载策略决策赢得时间）；③ 单个小文件（源码/CSV）用 raw.githubusercontent.com 逐文件 + 外层重试循环（每文件 3–5 次 × 45–60s 超时），文件多时挂后台 while 循环拉清单。`api.github.com` 匿名限流（60 req/h/IP），仓库元数据查询不要建立在它上。
 - **判定要点**：`gzip -t` 通过=完整可用；unexpected end of file=截断（可部分解压抢救，但抢救产物不可当完整档用）；clone/codeload 挂死 ≠ GitHub 全挂（raw 往往仍通）。**数据集先探明所在**（可能在代码仓库 tarball 里、可能在独立数据仓库、可能是 LFS media）再定整仓/逐文件策略。
 - **配套模板**：`scripts/robust_download.sh.tmpl` 的 `fetch` 模式即 raw 逐文件重试循环（可后台 while 批量拉清单）。
+
+## 91. 官方模型库后端枚举静默降级：cuda/cpu/mps 之外全被改写成 cpu（MatterSim CPT 实证，NPU 迁移第一坑）
+- **症状**：模型已 `.to('npu')`、参数确认在 NPU，前向却报 `F.linear ... Expected all tensors to be on the same device ... tensors on cpu`（数据全在 CPU）；或更隐蔽——不报错、直接在 CPU 上慢慢跑。
+- **根因**：官方代码用 `torch.cuda.is_available()` 判断设备且只枚举 cuda/cpu/mps 三后端，典型模式 `if not torch.cuda.is_available() and device != "cpu": if not mps: device = "cpu"`——NPU 机器上 cuda 不可用 → device="npu" 被**静默改写**为 "cpu"（MatterSim `potential.py batch_to_dict` 实例）。与 #40（+cpu build 判 NPU）同族的行为变体。
+- **解法**：patch 设备探测分支补 `import torch_npu; torch.npu.is_available()`（NPU 探测成功则不改写）。**静默降级比报错更危险**——不崩、慢、或下游 device mismatch 才暴露。排查手法：怀疑时 dump 输入 dict 逐 key 的 `tensor.device`（官方模型的输入转换函数 `batch_to_dict`/`prepare_inputs` 类是高发区）。
+- **判定要点**：device mismatch 报错 + 模型参数确在 NPU → grep 官方源码里的 `cuda.is_available`/`mps` 分支；逐个补丁而非等崩。
+
+## 92. 输出为导数的模型（MLIP 力场等）评估禁用 @torch.no_grad()（MatterSim CPT 实证）
+- **症状**：给评估/推理函数加 `@torch.no_grad()` 后，模型内部 `torch.autograd.grad` 报 `element 0 of tensors does not require grad and does not have a grad_fn`。
+- **根因**：力 = -∂E/∂x 由 forward 内部对坐标求导得出（MLIP 标准范式，训练时 `create_graph=model.training` 保二阶图）；no_grad 上下文不构建前向图 → autograd.grad 无图可用。通用 ML 的"eval 必 no_grad"直觉对**输出是导数**的模型不成立。
+- **解法**：评估循环不包 no_grad（官方 `predict_properties` 本就不用）；eval 模式下 `create_graph=False` 无图泄漏、无内存累积，安全。适用范围：所有 MLIP（MatterSim/MACE/NequIP/DeepMD）、扩散 ODE 求解、敏感度分析等任何"内部调 autograd.grad"的模型。
+- **判定要点**：报 "does not have a grad_fn" + 模型前向里有 `autograd.grad`/`requires_grad_` → 先摘掉自己的 no_grad 包装再查别的。
+
+## 93. 能量基准差与 scaling 动静设计：回归迁移只重拟合 shift、保留 scale（MatterSim CPT 实证，MLIP 微调关键）
+- **症状**：跨口径/跨泛函数据微调，re_normalize 全量重拟合（`scale_key='per_species_forces_rms'`）后 base 力 MAE 0.448→1.515 eV/Å **劣化 3×**；能量差 ~151.6 eV/atom（全电子 vs PAW-PBE）又必须对齐否则能量 loss 无意义。
+- **根因**：`E = scale·raw + shift` → `F = -scale·∂raw/∂x`——**重设 scale 会整体改变力的比例**（原模型 raw 输出是对着原 scale 训练的）；而 shift 是常数，∂shift/∂x=0，**对力零影响**。
+- **解法**：分布偏移对齐用 **shift-only**：`shift_key='per_species_energy_mean_linear_reg'`（训练集线性回归拟合每元素偏移，吸收口径差）+ `scale_key=None` + `init_scale=原模型 normalizer.scale`——能量口径对齐、力基线不动、base/CPT 指标直接可比。配套：先查 per-atom 能量量级判断口径（全电子 vs PAW-PBE 差 ~150 eV/atom 是物理事实不是模型 bug）；**力不受能量平移影响，是跨口径唯一可靠的对比指标**。
+- **判定要点**：换 scaling 后力指标整体偏移一个比例因子 → scale 被动了；凡回归类迁移先问"哪些归一化参数必须动、哪些必须冻结"。
+
+## 94. 官方示例数据/资产跨平台不同步：GitHub 仓库 ≠ ModelScope/HF 镜像（MatterSim CPT 实证）
+- **症状**：用户指定的官方示例数据（如 `high_level_water.xyz`）全网按名搜索 404（本地全盘 + Web + grep.app + Zenodo + HF + GitHub 仓库都没有），几近判定"不存在"。
+- **根因**：同一项目在不同托管平台的发布物**不同步**——ModelScope 官方镜像 `OneScience/Mattersim` 的 `data/` 目录独有该文件（还有 finetune.py/finetune_config.yaml），GitHub `microsoft/mattersim` 仓库反而只有 `data/benchmarks/*`。
+- **解法**：①找官方示例数据/权重，**递归列出全平台镜像目录树**再下结论（ModelScope：`/api/v1/models/<ns>/<name>/repo/files?Revision=master&Root=<dir>` 逐目录）；②**官方 config/脚本的相对路径引用（`train_data_path: ../data/xxx`）是资产位置的最强线索**——顺着它查镜像目录；③注意 ModelScope API 给 **sha256** 不是 md5（校验工具要匹配，纯 md5 校验器传 sha256 会误报失败）。
+- **判定要点**：全网按名搜索失败 ≠ 资产不存在——换平台、换目录、顺着官方示例配置找；空 `__init__.py`（0 字节）会被 `[ -s ]` 判空误报"缺失"，文件"存在"≠"非空"。

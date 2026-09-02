@@ -129,6 +129,33 @@
           "text": "若目标服务器不支持 Range，自动回退单流断点续传（curl -C -）而非直接失败"
         }
       ]
+    },
+    {
+      "id": 5,
+      "name": "mlip-forcefield-cpt-mattersim",
+      "prompt": "在昇腾 NPU 上对机器学习原子间势模型（如 MatterSim-v1.0.0）用带能量+力标签的结构数据集（EXTXYZ，如官方 high_level_water.xyz）做继续预训练：官方库为 cuda 设备设计，需适配 NPU；完成后在未参与训练的数据上评估 base vs CPT 的能量与力精度。",
+      "expected_output": "判定为 MLIP 范式（能量+力联合回归，非文本 CE）；训练 loss 含能量(per-atom)+力项，力由 autograd(-dE/dx) 求得；patch 官方库的后端静默降级（cuda/cpu/mps 枚举把 npu 改写成 cpu）；评估循环不包 @torch.no_grad()；能量基准差用 shift-only scaling 对齐（scale 保留原模型值）；输出能量 MAE(meV/atom) 与力 MAE(eV/Å) 的 base vs CPT 对比",
+      "files": [],
+      "assertions": [
+        {
+          "text": "范式判定为 MLIP 能量+力回归（非文本 CE/扩散 velocity），写入 env_probe 或脚本头注释"
+        },
+        {
+          "text": "训练 loss = 能量(per-atom) + 力 的联合损失，力由 forward 内部 autograd(-dE/dx) 求得且训练时 create_graph 保二阶图"
+        },
+        {
+          "text": "官方库的设备探测分支（torch.cuda.is_available() 只枚举 cuda/cpu/mps）被 patch 支持 npu，未出现数据留在 cpu 的 device mismatch"
+        },
+        {
+          "text": "评估/推理循环未使用 @torch.no_grad() 包裹（力计算需要前向 autograd 图）"
+        },
+        {
+          "text": "能量基准差（跨泛函/口径）用 shift-only scaling 对齐：shift 拟合自训练集、scale 保留原模型值，力基线未被 scale 重拟合破坏"
+        },
+        {
+          "text": "评估输出包含能量 MAE(eV 与 meV/atom) 和力 MAE(eV/Å)，base 与 CPT 在相同 scaling 口径下对比"
+        }
+      ]
     }
   ]
 }
