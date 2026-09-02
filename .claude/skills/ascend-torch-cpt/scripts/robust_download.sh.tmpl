@@ -1,0 +1,164 @@
+#!/bin/bash
+# robust_download.sh.tmpl — 慢源/不稳源大文件可靠下载 + 源可达性探测（公共模板）
+# 沉淀自 ProteinBERT CPT 实战（pitfalls #88/#89/#90），替代"盲试单流 curl"。
+# 复制到工作区后按需替换/调用；下载期间按核心原则 7/9(T4) 周期性打印心跳进度。
+#
+# 用法:
+#   bash robust_download.sh probe
+#       探测常用源当日可达性矩阵（HTTP code + 耗时）→ 先看清单再定下载路线（#89）
+#       000=连接失败(换源) ≠ 404=源可达路径不存在(换路径/仓库名)
+#
+#   bash robust_download.sh fetch <url> <out> [max_tries] [timeout_s]
+#       小文件可靠拉取：整文件重试循环（raw.githubusercontent 抖动场景，#90③）
+#
+#   bash robust_download.sh get <url> <out> <size_bytes> [md5] [ways] [chunk_bytes]
+#       大文件多路 Range 并行 + 分块断点续传追加 + size/md5 终检（#88）
+#       - 服务器不支持 Range 时自动回退"单流断点续传"(curl -C -)
+#       - size/md5 从源站元数据拿（如 Zenodo: https://zenodo.org/api/records/<id> 的
+#         files[].size 与 files[].checksum="md5:xxx"），无 md5 传 "-" 跳过校验
+#       - 分块参数经验值: ways=64, chunk=3000000(3MB) —— 大分块(12MB+)超时即整块
+#         作废重来, 数小时下不完（#88 实证）
+#
+# 实测示例（ProteinBERT 权重 191.8MB, Zenodo, hf-mirror 宕机当日）:
+#   bash robust_download.sh probe
+#   bash robust_download.sh get \
+#     "https://zenodo.org/api/records/10371965/files/full_go_epoch_92400_sample_23500000.pkl/content" \
+#     full_go_epoch_92400_sample_23500000.pkl 191800918 1f3c245ada256ef65300b771a96edc18 64 3000000
+
+set -u
+
+# ---------------- probe: 源可达性矩阵（#89） ----------------
+PROBE_URLS=(
+  "https://hf-mirror.com"
+  "https://huggingface.co"
+  "https://www.modelscope.cn"
+  "https://github.com"
+  "https://raw.githubusercontent.com"
+  "https://codeload.github.com"
+  "https://api.github.com"
+  "https://zenodo.org"
+)
+do_probe() {
+  echo "| 源 | HTTP code | 耗时 | 判定 |"
+  echo "|---|---|---|---|"
+  for u in "${PROBE_URLS[@]}"; do
+    r=$(curl -s -o /dev/null -w "%{http_code} %{time_total}" --max-time 10 -L "$u" 2>/dev/null || echo "000 timeout")
+    code=$(echo "$r" | awk '{print $1}'); t=$(echo "$r" | awk '{print $2}')
+    [ -z "$t" ] && t="10+"
+    case "$code" in
+      2*|3*) judge="✅ 可用" ;;
+      000)   judge="❌ 连接失败→换源" ;;
+      404)   judge="⚠️ 源可达,检查路径/仓库名" ;;
+      429)   judge="⚠️ 限流(api.github.com 匿名60/h)" ;;
+      *)     judge="⚠️ code=$code" ;;
+    esac
+    echo "| $u | $code | ${t}s | $judge |"
+  done
+}
+
+# ---------------- fetch: 小文件重试循环（#90③） ----------------
+do_fetch() {
+  local url="$1" out="$2" tries="${3:-5}" tmo="${4:-60}"
+  mkdir -p "$(dirname "$out")"
+  for i in $(seq 1 "$tries"); do
+    if timeout "$tmo" curl -fsSL --max-time "$tmo" "$url" -o "$out.tmp" 2>/dev/null && [ -s "$out.tmp" ]; then
+      mv "$out.tmp" "$out"
+      echo "[fetch] OK $out ($(stat -c%s "$out") bytes, 第 $i 次尝试)"
+      return 0
+    fi
+    echo "[fetch] try $i/$tries failed: $url"
+    sleep 2
+  done
+  echo "[fetch] FAILED after $tries tries: $url" >&2
+  rm -f "$out.tmp"
+  return 1
+}
+
+# ---------------- get: 多路 Range + 分块断点续传 + 终检（#88） ----------------
+do_get() {
+  local url="$1" out="$2" total="$3" md5="${4:--}" ways="${5:-64}" chunk="${6:-3000000}"
+  if [ "$total" -le 0 ] 2>/dev/null; then echo "[get] 非法 size: $total" >&2; return 1; fi
+  mkdir -p "$(dirname "$out")"
+  local dir="${out}.chunks"; mkdir -p "$dir"
+
+  # Range 支持探测: 206=支持分块; 其他(如200)=回退单流断点续传
+  local rc
+  rc=$(curl -s -o /dev/null -w "%{http_code}" --max-time 20 -L -r 0-0 "$url" 2>/dev/null || echo 000)
+  if [ "$rc" != "206" ]; then
+    echo "[get] 服务器不支持 Range (code=$rc) → 回退单流断点续传 curl -C -"
+    for i in $(seq 1 60); do
+      curl -sfL -C - --connect-timeout 30 --max-time 900 "$url" -o "$out"
+      local sz=$(stat -c%s "$out" 2>/dev/null || echo 0)
+      [ "$sz" = "$total" ] && break
+      echo "[get] 单流重试 $i/60 (已有 $sz / $total bytes)"
+      sleep 3
+    done
+  else
+    local n=$(( (total + chunk - 1) / chunk ))
+    [ "$n" -lt "$ways" ] && ways="$n"
+    echo "[get] Range OK → ${ways} 路 × ${chunk}B 分块并行, 分块内断点续传追加"
+    local pids="" i
+    for i in $(seq 0 $((ways - 1))); do
+      _dl_chunk "$i" &
+      pids="$pids $!"
+    done
+    # 心跳监控: 等待期间每 60s 打一次进度 (按已收字节, 核心原则 7/T4)
+    ( while :; do sleep 60; got=$(du -sb "$dir" 2>/dev/null | awk '{print $1}'); echo "[get] ⏳ 已收 ${got:-0} / $total bytes ($(( ${got:-0} * 100 / total ))%)"; done ) &
+    local mon=$!
+    local fail=0
+    for p in $pids; do wait "$p" || fail=1; done
+    kill "$mon" 2>/dev/null
+    if [ "$fail" -eq 1 ]; then echo "[get] ❌ 部分分块失败, 产物不完整: $out (重跑本命令可断点续传)" >&2; return 1; fi
+    cat $(for i in $(seq 0 $((n - 1))); do printf '%s/chunk_%s ' "$dir" "$(printf '%04d' "$i")"; done) > "$out"
+  fi
+
+  # 终检: size 必查, md5 可选
+  local actual_size actual_md5
+  actual_size=$(stat -c%s "$out" 2>/dev/null || echo 0)
+  if [ "$actual_size" != "$total" ]; then
+    echo "[get] ❌ size 不符: $actual_size / $total" >&2; return 1
+  fi
+  if [ "$md5" != "-" ] && [ -n "$md5" ]; then
+    actual_md5=$(md5sum "$out" | awk '{print $1}')
+    if [ "$actual_md5" != "$md5" ]; then
+      echo "[get] ❌ md5 不符: $actual_md5 != $md5" >&2; return 1
+    fi
+  fi
+  echo "[get] ✅ $out 校验通过 (size=$actual_size${md5:+, md5=$md5})"
+  rm -rf "$dir"
+  return 0
+}
+
+# 单个分块: 记已收字节, 重试时只补尾部 (curl -r start+have-end >> chunk)
+_dl_chunk() {
+  local i="$1"
+  local start=$(( i * chunk )) end=$(( (i + 1) * chunk - 1 ))
+  [ "$end" -ge "$total" ] && end=$(( total - 1 ))
+  local want=$(( end - start + 1 ))
+  local f="$dir/chunk_$(printf '%04d' "$i")"
+  local try
+  for try in $(seq 1 60); do
+    local have=0
+    [ -f "$f" ] && have=$(stat -c%s "$f")
+    [ "$have" -eq "$want" ] && return 0
+    [ "$have" -gt "$want" ] && { truncate -s "$want" "$f"; return 0; }
+    # -f: HTTP>=400 时不写响应体(防错误页污染分块); 追加模式只补尾部
+    # max-time 随分块大小自适应: 小分块快速失败重试, 大分块给足慢链路时间 (chunk/10000+60s)
+    local mt=$(( chunk / 10000 + 60 ))
+    curl -sfL --connect-timeout 30 --max-time "$mt" -r "$(( start + have ))-$end" "$url" >> "$f" 2>/dev/null
+  done
+  echo "[get] chunk $i FAILED after 60 tries" >&2
+  return 1
+}
+
+# ---------------- 入口 ----------------
+case "${1:-}" in
+  probe) do_probe ;;
+  fetch) shift; do_fetch "$@" ;;
+  get)   shift; do_get "$@" ;;
+  *)
+    grep -E "^# 用法|^#   bash" "$0" | sed 's/^# \?//'
+    echo "参数: probe | fetch <url> <out> [tries] [timeout] | get <url> <out> <size> [md5] [ways] [chunk_bytes]"
+    exit 1
+    ;;
+esac

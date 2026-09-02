@@ -45,16 +45,20 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 7. **后台长跑要有心跳输出。** 后台运行的脚本（训练/评估/下载）最长 **2–3 分钟**必须向 stdout 打印一次进度信息（step/loss/用时或"仍在运行"心跳），`print(..., flush=True)`，让人感知任务还在跑。不要在步数很少时才打印——打印间隔要按**时间**折算（如 50s/step 时每 2–3 步打一次），保证屏幕 ≤2–3 分钟必有输出。
 8. **所有产物统一归档到 `training-ws/<模型名>-cpt/` 子目录。** 训练/评估全过程的脚本、代码、README、ckpt 权重、loss 曲线、日志、summary 等全部放进 SLAI-AscendBridge2 仓库根目录下 `training-ws/` 内以"模型名-cpt"命名的子目录（见「产物目录约定」），**不得**散落到仓库根目录、与仓库平行的目录、或其他位置。
 
-9. **全程实时用时表（执行红线，不可省）**。整个 CPT 过程**必须**在屏幕上维护一张格式化用时表（见「用时表」节），让用户随时知道：每阶段预计/实际用时、整体总预估、以及剩余预估。**长跑阶段（7）必须周期性刷新，不能只在阶段边界打一次就不管**：
-   - **训练脚本自动刷新**：`cpt_train.py`/`cpt_fsdp.py` 每 ~30s 自动调 `timing_table.py --doing 7 <已耗时> "X/N步 ETA Y loss Z"`，重印整张表到训练日志（不依赖 agent 记得轮询）。
-   - **agent 主动轮询**：训练后台跑期间，agent 每 1–2min `tail` 训练日志并把最新用时表/心跳行回显到对话——**不得"启动后台就长 sleep 只查一次"**。
-   - 每完成一阶段、评估每模型切换时也重印整张表（Markdown，`print(..., flush=True)`）。阶段 0–1 勘察完即给全程总预估；阶段 7 据已耗 step×s/step 外推剩余并周期刷新。
+9. **全程实时用时表（执行红线，不可省）**。整个 CPT 过程**必须**在屏幕上维护一张格式化用时表（见「用时表」节），让用户随时知道：每阶段预计/实际用时、整体总预估、以及剩余预估。工具是 `scripts/timing_table.py.tmpl`（读写 `outputs/timing.json`）；纪律是下面 **T1–T6 六个硬性刷新触发点**——每个触发点都要把**整张表**（或长跑期间的 `⏳doing` 行+ETA）重印到对话，用户全程任何时刻看屏幕都能知道"现在做到哪、还要多久"：
+   - **T1 开工基线**：阶段 0–1 勘察完，给出**全程总预估** + 9 阶段各自 est，打印第一张完整表。这是用户看到的第一个进度基准。
+   - **T2 进入即标**：每**进入**一个阶段（含其中的长跑子任务：下载、权重迁移/格式转换、脚本开发、smoke）**立即** `--doing <id> "说明"` 置 ⏳ 并重印——**严禁**实际在做事而表上还挂着 pending（状态滞后 = 汇报失真，ProteinBERT 实证教训）。
+   - **T3 完成即结**：每完成一个阶段**立即** `--set <id> actual <s>` 置 ✅ 并重印，不等"下个自然停顿点"。
+   - **T4 长跑心跳**：**任何**预计 >3min 的阶段（**下载/权重迁移/训练/评估**，不只是阶段 7 训练！）期间，agent 每 1–2min 轮询一次进度并把最新表/`⏳doing` 行（带已耗、百分比或 ETA）重印到对话。**"启动后台就埋头干活、阶段结束才想起表"是明确违规**。训练脚本自身另每 ~30s 调 `timing_table.py --doing 7 <已耗时> "X/N步 ETA Y loss Z"` 刷进训练日志（不依赖 agent 记得轮询）。
+   - **T5 评估切换**：阶段 8 每切换一个模型（base→CPT）重印整表。
+   - **T6 收尾汇总（不可省）**：**最终给用户的答复**与 README **都必须**包含**完整用时表**（9 阶段 预计/实际/说明 + 合计行 + 总预估 vs 总实际偏差的一句话解释）。只写进 README 不上屏、或只在中间打过表而收尾不带，都算未完成本项纪律。
 
 10. **按模型类型选训练范式（通用 CPT 的第一步，不可跳过）**。本技能不止做文本 LM。阶段 0 必须先**判定模型类型与格式**，再决定训练范式、数据流水线、评估指标（见「模型类型→训练范式」表）。判定方法：读 `config.json`/`model_index.json`/文件名——
     - `architectures` 含 `ForCausalLM`/有 `config.json` + safetensors 标准权重 → **文本 LM 范式**（CE loss）。
     - 有 `model_index.json` + `transformer/`(或 `unet/`) + `vae/` + `text_encoder/` + `scheduler/` → **diffusers 生成式范式**（流匹配/DDPM loss on VAE latents）。
     - `architectures` 含 `Qwen2Audio*`/`*AudioForConditionalGeneration`/`pipeline_tag=audio-text-to-text` + audio_tower + language_model → **音频-LLM 范式**（转写 CE，见 references/audio-llm-cpt.md）。
     - 出现 `mlx_*.json`/`mlx_*.safetensors`、或 README/library_name 标 `mlx` → **MLX(Apple) 格式**，NPU 无法直接加载，须找同源 PyTorch 基座（见 pitfalls #47，references/generative-diffusion-cpt.md）。
+    - 权重是 **Keras/TF 产物**（`.pkl`/`.h5`，无 `config.json`/safetensors，如 ProteinBERT）→ **PyTorch 复刻+权重迁移范式**：按官方源码逐层翻译架构、pickle 解包权重、严格形状校验+消融验证（pitfalls #84–#86），数据流水线与评估指标随原生范式走。
     - 多模态 `ForConditionalGeneration` 但目标是文本 → 走文本头 remap（references/multimodal-remap.md）。
     范式决定后续阶段 3(数据)/6(脚本)/8(评估) 全部分支，判定错则全盘错。把判定结果写进 `env_probe.json` 的 `model_type`/`train_paradigm`。
 
@@ -85,9 +89,11 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 > ⏱ **用时表初始化**：阶段 0–1 勘察完后，据模型参数量/可用卡数/目标步数/语料规模给出**全程总预估**（如 ~6 分钟或 ~2 小时），并填好 9 阶段各自的**预计用时**，写入 `outputs/timing.json` 后打印整张用时表。这是用户看到的第一个进度基准。
 
 ### 阶段 2 · 模型与数据集获取
+- **第一步：网络源可达性矩阵探测（~30s，必做）**：`bash robust_download.sh probe`（从 `scripts/robust_download.sh.tmpl` 复制）探测**当日**可用性——hf-mirror.com / huggingface.co / modelscope.cn / github.com / raw.githubusercontent.com / codeload.github.com / zenodo.org——先建立"当日可用源清单"再定下载路线，**不要按历史经验盲试**（源可达性逐日漂移，hf-mirror 单节点宕机时连 /etc/hosts 固定 IP 都不通，pitfalls #89）。权重降级链：本地 → ModelScope → Zenodo（API 拿文件清单+md5）→ hf-mirror（禁 Xet）→ GitHub（三级降级+截断抢救，pitfalls #90）。
 - 模型：本地有就用本地；否则从 modelscope（国内优先，`modelscope` CLI 或 git clone）或 `hf-mirror.com`（`git clone` + `git-lfs`）下载。`huggingface.co` 国内通常不可达。**大权重文件优先 ModelScope 的 `resolve/master/<file>` 直链（`wget -c`）**：新版 `hf` CLI 从 hf-mirror 拉大文件默认走 Xet 后端会 `401 Unauthorized`（`cas-server.xethub.hf.co`），且美区 CDN 慢；必须用 hf-mirror 时设 `HF_HUB_DISABLE_XET=1` 回退普通 LFS（pitfalls #38）。下完比对 `model.safetensors.index.json` 元数据字节数校验。
 - 语料：同上。`/mnt/share/...` 等用户给的理想路径不存在时，搜本机或下载。
-- **大文件下载与开发并行（省关键路径）**：大语料/权重下载挂后台后，立刻用**官方 sample/小子集**（或随机抽 N 条）先行推进阶段 3-6（数据管线、脚本、smoke、彩排），下载完成只做正式跑——不要干等下载。多个 GB 级 tarball 下载完必须做流级完整性校验（`gzip -t`/`tar -tzf`，分块下载器"每块尺寸对"≠内容对，见 pitfalls #68）再解压。
+- **大文件下载与开发并行（省关键路径）**：大语料/权重下载挂后台后，立刻用**官方 sample/小子集**（或随机抽 N 条）先行推进阶段 3-6（数据管线、脚本、smoke、彩排），下载完成只做正式跑——不要干等下载。**大文件用 `robust_download.sh get <url> <out> <size> [md5] [ways] [chunk]`**（多路 Range + 分块断点续传 + size/md5 终检，Range 不支持自动回退单流续传，实测 191MB 慢源 20min 完成）；小文件用 `robust_download.sh fetch`（重试循环）。多个 GB 级 tarball 下载完必须做流级完整性校验（`gzip -t`/`tar -tzf`，分块下载器"每块尺寸对"≠内容对，见 pitfalls #68）再解压。**下载是长跑阶段**：按核心原则 9 的 T4 每 1–2min 把下载进度（已耗/百分比/速率/ETA）刷到对话，不许"挂后台就消失"（`get` 模式自带 60s 心跳行，回显即可）。
+- **非 PyTorch 原生权重（Keras/TF `.pkl`/`.h5`，如 ProteinBERT）**：pickle 若只含 numpy 元组可直接 `pickle.load` 解包（**无需安装 TF**）；按官方源码逐层复刻 PyTorch 架构（对齐 LN eps/激活变体/卷积 padding/kernel 排列），再做**变量序严格形状校验 + 同形权重交换消融 + 语义 sanity**（干净位置信度/掩码恢复率）三重验证后才能训练（完整方法见 pitfalls #84–#86）。
 - 数据集若只有 train 分割、用户要“验证集”：用 `seed` 重建训练划分取 held-out（见 references/eval-metrics.md）。
 
 ### 阶段 3 · 语料格式转换与打包
@@ -144,7 +150,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - **precision**：fp32 主权重 + bf16 autocast（NPU 原生 bf16，数值稳）。**不要**纯 bf16 前向（混合线性注意力模型会数值崩，见 pitfalls.md）。
 - **lr**：CPT 基线 1e-5；全局 batch 越大按 sqrt 缩放上调（DDP 8×→ 可 2e-5）。短训练(100步)用保守值避免发散。
 - **warmup**：~10% 步数；cosine 衰减到 0。
-- **optimizer**：`NpuFusedAdamW`（融合，替代 torch.optim.AdamW）；betas=(0.9,0.95)，wd=0.01，eps=1e-8，grad_clip=1.0。
+- **optimizer**：`NpuFusedAdamW`（融合，替代 torch.optim.AdamW）；betas=(0.9,0.95)，wd=0.01，eps=1e-8，grad_clip=1.0。**例外**：分阶段训练会重建优化器（如 头部热身冻结→全层解冻，官方 finetune 两段式协议）时用 plain `torch.optim.AdamW`——`NpuFusedAdamW` 在跨阶段重建+freeze/unfreeze 切换后首个 backward 会崩 saved-tensor version 冲突（pitfalls #87）；且小模型（<100M，总训练分钟级）融合无收益。
 - **batch_size**：先按“激活显存预算”估上限，2 步 smoke 验不 OOM；OOM 则降 per-rank bs 或开梯度检查点。优先开**梯度检查点**而非降 bs（保有效 batch）。
 - **seq_len**：用户指定优先；否则据语料平均长度选 512/1024（长上下文模型可更大，但显存↑）。
 - **attention**：full_attention 层走 SDPA（→NPU fusion attention 自动路由）；不要轻易改 eager（会慢且图模式才需要）。
@@ -197,7 +203,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - **ckpt 转 HF 可复用目录**（可选）：若用户想用 `from_pretrained` 直接加载 CPT 模型做推理/当新 base，把 `cpt_model_state.pt` 存成 HF 目录（拷 config.json+tokenizer 到 `outputs/cpt_hf_model/` + 存权重为 `model.safetensors`）。否则评估用 `load_state_dict` 即可。
 
 ### 阶段 9 · 概要总结报告
-输出（Markdown）含：任务/模型/语料、并行策略、融合 API、超参表、loss 收敛(first5→last5, min, delta)、用时表(每阶段实际/预计)、公网直链、关键修正记录、复跑命令。全部归档到 `${WS_DIR}/`（即 `training-ws/<模型名>-cpt/`）。
+输出（Markdown）含：任务/模型/语料、并行策略、融合 API、超参表、loss 收敛(first5→last5, min, delta)、**完整用时表(每阶段实际/预计 + 合计 + 预估偏差解释)**、公网直链、关键修正记录、复跑命令。全部归档到 `${WS_DIR}/`（即 `training-ws/<模型名>-cpt/`）。**最终答复（上屏）必须同样携带这张完整用时表**（核心原则 9 的 T6）——README 归档一份、对话收尾一份，缺一不可。
 
 ## 自动选型速查（写进脚本头注释）
 
@@ -245,13 +251,14 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 
 ## 用时表（全程实时刷新，格式化输出）
 
-整个 CPT 过程**必须**在屏幕上维护一张实时用时表（核心原则 9），让用户随时知道：每阶段预计/实际用时、整体总预估、剩余预估。用 `scripts/timing_table.py.tmpl` 渲染（读 `outputs/timing.json`）。
+整个 CPT 过程**必须**在屏幕上维护一张实时用时表（核心原则 9 的 T1–T6 触发点），让用户随时知道：每阶段预计/实际用时、整体总预估、剩余预估。用 `scripts/timing_table.py.tmpl` 渲染（读 `outputs/timing.json`）。
 
 ### 要求
-- **整体预估**：阶段 0–1 勘察完后，据模型规模/卡数/目标步数/语料量给出**全程总预估**，写入 `timing.json` 的 `overall_estimate_s`，并填好 9 阶段各自 `est_s`，打印第一张完整用时表。
-- **每阶段**：进入阶段前确认预计用时；完成时记录**实际用时**（`--set <id> actual <s>` 自动置 done）。
-- **剩余预估**：阶段 7 长跑期间，据 `s/step × (NUM_STEPS − step)` 外推**剩余训练用时**，每 ~30s 或每个心跳行刷新阶段 7 为 `⏳doing` 并带 ETA 说明。
-- **刷新时机**：每完成一阶段、训练每 N 步、评估每模型切换时，重新打印整张表（Markdown，`print(..., flush=True)`）。
+- **整体预估**：阶段 0–1 勘察完后，据模型规模/卡数/目标步数/语料量给出**全程总预估**，写入 `timing.json` 的 `overall_estimate_s`，并填好 9 阶段各自 `est_s`，打印第一张完整用时表（T1）。
+- **每阶段**：进入即 `--doing` 置 ⏳（T2）；完成时记录**实际用时**（`--set <id> actual <s>` 自动置 done）并重印（T3）。
+- **剩余预估**：长跑阶段（下载/训练/评估）期间，据当前速率外推**剩余用时 ETA**（训练用 `s/step × (NUM_STEPS − step)`；下载用已下载字节/速率），每 1–2min 刷新为 `⏳doing` 并带 ETA 说明（T4）。
+- **刷新时机**：每完成一阶段、训练每 N 步、评估每模型切换时，重新打印整张表（Markdown，`print(..., flush=True)`）（T3/T4/T5）。
+- **收尾汇总（T6，不可省）**：最终答复与 README 都必须包含完整用时表（阶段/预计/实际/说明 + 合计 + 预估偏差解释）。README 里的用时表是归档；**对话里的最终答复必须再带一份**——用户不看文件也应能拿到全程用时结论。
 
 ### 表格格式（屏幕实时打印；列：阶段 / 预计 / 实际 / 状态 / 说明）
 
@@ -286,6 +293,6 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - `references/text-lm-rl.md` — **文本 LM / 音频 LLM RL 后训练（RLHF/GRPO，可选）**（token log-prob 策略梯度 + 偏好奖励模型/规则 + log-prob KL-to-ref + 与扩散 RL 对比不可混用 + 音频 LLM=文本 LM RL）
 
 ## scripts（标准模板，新模型微调即用）
-见 `scripts/*.tmpl`。生成时复制到 `${WS_DIR}/`（即 `training-ws/<模型名>-cpt/`）并按当前模型/语料/选型替换占位。模板已规避多数踩坑（set_to_none=False、gradient_as_bucket_view=False、expandable_segments、autocast、grad-ckpt）。其中 `run_env.sh.tmpl` 的 `WS_DIR` 已自动指向 `training-ws/<模型名>-cpt/` 并 `mkdir -p`；`timing_table.py.tmpl` 用于全程实时用时表（见核心原则 9）。
+见 `scripts/*.tmpl`。生成时复制到 `${WS_DIR}/`（即 `training-ws/<模型名>-cpt/`）并按当前模型/语料/选型替换占位。模板已规避多数踩坑（set_to_none=False、gradient_as_bucket_view=False、expandable_segments、autocast、grad-ckpt）。其中 `run_env.sh.tmpl` 的 `WS_DIR` 已自动指向 `training-ws/<模型名>-cpt/` 并 `mkdir -p`；`timing_table.py.tmpl` 用于全程实时用时表（见核心原则 9）；`robust_download.sh.tmpl` 用于阶段 2 源探测/慢源可靠下载（probe / fetch / get 三模式，见 pitfalls #88–#90）。
 
 按范式选模板：文本 LM → `prepare_data.py.tmpl` + `cpt_train.py.tmpl`(+`cpt_fsdp.py.tmpl`/`cpt_mp.py.tmpl`) + `eval_cpt.py.tmpl`；扩散生成式 → `prepare_generative_data.py.tmpl` + `cpt_diffusion.py.tmpl` + `eval_diffusion.py.tmpl`。
