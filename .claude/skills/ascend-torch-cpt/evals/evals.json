@@ -72,6 +72,63 @@
           "text": "plot_loss.py 含公网上传"
         }
       ]
+    },
+    {
+      "id": 3,
+      "name": "timing-table-discipline-full-run",
+      "prompt": "在昇腾 NPU 上对小模型做一次继续预训练（模型与语料路径任意指定一个真实小任务，如 ProteinBERT+signalP_binary 或其它 <100M 模型），完整走完 9 阶段。全程要求维护实时用时表：整体总预估、每阶段预计/实际、长跑阶段每 1-2min 刷新进度与 ETA，最终答复和 README 都要汇总完整用时表。",
+      "expected_output": "工作区含 timing_table.py 与 outputs/timing.json（9 阶段 est_s + overall_estimate_s，完成后含各阶段 actual_s）；长跑阶段（下载/训练）期间对话中周期性出现用时表或 doing 行（带 ETA/已耗）；README.md 含完整用时表（阶段/预计/实际/说明+合计+预估偏差解释）；最终对话答复同样携带完整用时表，不只写在 README 里",
+      "files": [],
+      "assertions": [
+        {
+          "text": "timing_table.py 复制到工作区且语法合法(ast.parse)"
+        },
+        {
+          "text": "outputs/timing.json 存在，含 overall_estimate_s 且 phases 数量=9、各 phase 有 est_s"
+        },
+        {
+          "text": "完成后 timing.json 的每个 phase 都有 actual_s（无长期 pending/doing 残留状态）"
+        },
+        {
+          "text": "长跑阶段（下载/训练>3min）期间对话中每 1-2min 出现用时表或 ⏳doing 进度行（带已耗/百分比/ETA），而非只在阶段边界出现一次"
+        },
+        {
+          "text": "进入新阶段时状态及时置为 doing（无实际在做事但表格显示 pending 的状态滞后）"
+        },
+        {
+          "text": "README.md 含完整用时表：阶段/预计/实际/说明列 + 合计行 + 预估偏差解释"
+        },
+        {
+          "text": "最终对话答复中包含完整用时表（T6 收尾汇总），与 README 一致"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "name": "robust-download-slow-source",
+      "prompt": "在一台国内网络环境（hf-mirror 与 huggingface.co 可能不可达）的机器上，从慢速源（如 Zenodo record 或 GitHub raw）下载一个数十 MB 以上的模型权重文件，要求可靠完成并校验完整性。",
+      "expected_output": "复制 skill 的 scripts/robust_download.sh.tmpl 到工作区并使用：先 probe 探测当日可用源矩阵，再用 get 模式多路 Range 分块下载（小分块+断点续传追加+size/md5 终检），下载期间有周期性心跳进度输出，最终文件通过 size 与 md5 双重校验",
+      "files": [],
+      "assertions": [
+        {
+          "text": "使用前先跑 probe 模式探测源可达性矩阵（输出含 hf-mirror/huggingface/modelscope/github/zenodo 等 ≥5 个源的 HTTP code 判定）"
+        },
+        {
+          "text": "大文件走 get 模式多路 Range 分块下载，分块粒度 ≤4MB 且路数 ≥8（而非单流或大分块整块重试）"
+        },
+        {
+          "text": "分块支持断点续传追加（重跑复用已收字节，curl -r start+have-end >> chunk 形式）"
+        },
+        {
+          "text": "下载完成后做 size 与 md5 双重终检（md5 与源站元数据比对），校验失败则非零退出"
+        },
+        {
+          "text": "下载期间每 ≤2min 有心跳进度输出（已收字节/百分比），而非静默挂后台"
+        },
+        {
+          "text": "若目标服务器不支持 Range，自动回退单流断点续传（curl -C -）而非直接失败"
+        }
+      ]
     }
   ]
 }

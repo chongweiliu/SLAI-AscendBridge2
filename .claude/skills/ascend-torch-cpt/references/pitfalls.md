@@ -547,3 +547,52 @@ sys.meta_path.insert(0, _StubFinder())
 - **解法**：**fork `multiprocessing.Pool(N)` 一次性预处理**——worker 内完成"原始数据→模型输入 tensor"全链路转换，返回 numpy 数组（IPC 友好，勿返回 Python list 嵌套大对象），主进程落盘 `.pt` 缓存；训练每 epoch 只做分组/洗牌（秒级加载）。实测 21088 组装体 20s 建完缓存（1300+/s），后续 epoch 零构建成本。两个细节：大 dict 用 **fork 继承全局变量**传 worker（勿 pickle 进 initargs，64 worker×15MB 白传）；加载缓存要 `weights_only=False`（#81）。
 - **代价与边界**：缓存固定了每 epoch 的采样（失去官方 per-epoch 重采样多样性）——短程 CPT（≤10 epoch）可接受，**必须在 README/notes 声明**；长训练或依赖重采样的任务不适用。
 - **判定要点**：数据构建时间 > 单 epoch 训练时间 → 立即转一次性缓存模式。
+
+## 84. Keras/TF checkpoint → PyTorch 迁移：pickle 变量序 ≠ 层构建序（ProteinBERT CPT 实证）
+- **症状**：官方 Keras/TF 模型的 `.pkl` 权重 dump（如 ProteinBERT `full_go_epoch_*.pkl` = `(n_annotations, model_weights:list[np.ndarray], optimizer_weights)`）按源码层构建序映射进 PyTorch 后，模型"半工作"：干净位输出正常但整体质量下降，或首层形状直接对不上（首权重是 `dense-global-input (8943,512)` 而非 embedding `(26,128)`）。
+- **根因**：TF2 functional model 的变量跟踪顺序由 checkpoint tracking 机制决定，**不保证代码构建序**——实测 ProteinBERT 序为 `[dense-global-input(k,b), embedding, 6×block(代码序), output-seq(k,b), output-annotations(k,b)]`（输入侧 Dense 反常排在 Embedding 前，输出侧仍代码序）。`get_weights()`（图序）与 `model.variables`（tracking 序）也可能不同。
+- **解法**：①先 `pickle.load` dump 全部权重形状（纯 numpy 元组**无需安装 TF**）；②按假设布局做**逐个严格形状序列匹配**（数量+形状全对才继续，任何不匹配立即报错拒绝加载）；③布局对不上时按"反常识排序"假设重排再验。三步后在 NPU 上跑语义 sanity（见 #85/#86）确认。
+- **判定要点**：首层形状即对不上 = 变量序假设错了，dump 全序列找规律，不要硬猜。
+
+## 85. 同形权重映射歧义：形状校验有盲区，必须交换消融（ProteinBERT CPT 实证，方法论）
+- **症状**：形状序列 145/145 全匹配，但加载后模型质量可疑（如污染位恢复率远低于预期）——narrow/wide conv（同 `(9,128,128)+(128,)`）、global-dense1/dense2（同 `(512,512)+(512,)`）、LayerNorm gamma/beta（同 `(N,)`）**无法靠形状区分**。
+- **根因**：形状校验只能排除"错形"，排除不了"同形错位"。
+- **解法**（组合拳，缺一不可）：
+  1. **数值判定 gamma/beta**：训练好的 LN gamma 均值 ~0.1–1.3 且基本全正、beta 均值 ~0——但**手动按布局核对**，勿用"相邻同形向量自动配对"统计（会把上一层的 bias 与下一层 gamma 误配对，ProteinBERT 实测 24 对里误配出 7:17 的假结论）。
+  2. **交换消融**：把可疑同形对交换加载后跑同一语义测试——错误映射会**全面崩溃**（conv 交换：干净位置信 0.968→0.915、恢复率 12.9%→8.0%；dense1/dense2 交换：位置预测准确 100%→0%），正确映射在所有指标上显著胜出。
+  3. **干净位置信度**是最佳健康指标：正确加载的预训练 LM 对未污染位置真 token 的平均概率 ~0.97；<0.9 即映射或数值有错。
+- **判定要点**：同形层存在的迁移，形状全对≠映射对；一轮交换消融（每个组合一次前向，分钟级）即可铁证。
+
+## 86. 替换噪声（非掩码）MLM 的恢复率天花板 ~11%——勿按掩码 MLM 预期误判（ProteinBERT CPT 实证）
+- **症状**：权重映射验证时，被噪声污染位置的恢复率仅 ~11%，远低于 BERT 掩码 MLM 常见的 50%+，疑似权重加载失败。
+- **根因**：ProteinBERT 原生 MLM 是 **5% 均匀替换噪声 + 全位置 CE（非 PAD 加权）**，不是掩码——模型不知道哪些位被污染，且 95% 位是干净的，**贝叶斯最优去噪器以"照抄"为主**，只修复上下文明显不合理的污染。替换噪声恢复率天花板天然低，与掩码 MLM 不可比。
+- **解法**：映射健康判定标准用三条件：①污染位恢复率 > 2× 随机基线（1/vocab，如 26 词表 ~3.8%）；②干净位保持 ≥99%；③干净位真 token 置信度 >0.9。三者全满足即 PASS，勿把 11% 当失败。
+- **判定要点**：训练前 sanity 与训练后评估都要**先弄清基座的噪声协议**（掩码 vs 替换 vs span），恢复率预期差一个数量级；PPL/NLL 才是跨协议可比的域内适应指标（ProteinBERT 域内 ~0.26 nats/token）。
+
+## 87. NpuFusedAdamW 跨阶段重建优化器 → 首个 backward 必崩 saved-tensor version 冲突（ProteinBERT CPT 实证）
+- **症状**：分阶段训练（Phase A 冻结 backbone+优化器1 → Phase B 解冻+**新建**优化器2）后，Phase B **首个 backward** 报 `RuntimeError: one of the variables needed for gradient computation has been modified by an inplace operation ... AsStridedBackward0, at version 3; expected version 2`（ERR99999）。单优化器全程不复现。
+- **根因**：NpuFusedAdamW 惰性初始化 state 与参数的 in-place 交互，在"参数已被前一个融合优化器更新过 + requires_grad 冻结/解冻切换"后，与 autograd 保存的张量版本计数冲突（torch_npu 2.10 + CANN 8.3RC1 实测）。
+- **解法**：分阶段（freeze/unfreeze 切换、重建优化器）训练脚本直接用 plain `torch.optim.AdamW`；小模型（<100M、总训练分钟级）融合优化器本就无收益。零梯度仍按 #6 用 `set_to_none=False`。
+- **判定要点**：报错出现在"第二个优化器的第一次 backward"且张量是前阶段已训练过的参数 → 换 plain AdamW 即愈，不要去改模型结构。
+
+## 88. 慢源大文件下载：小分块+断点续传追加 ≫ 大分块整块重试（ProteinBERT CPT 实证）
+- **症状**：Zenodo/慢速源 191MB 权重，16 路 × 12MB 分块并行下载，单流 ~6KB/s–100KB/s 且连接常超时——分块**超时即整块作废重来**，数小时下不完；hf-mirror 同日宕机（连 /etc/hosts 固定 IP 都不通）。
+- **根因**：大分块策略下，一次连接中断就丢掉该分块全部已传字节；慢源上长连接存活时间 << 分块传输时间。
+- **解法**：**64 路 × ~3MB 小分块 + 分块内断点续传追加**：每分块记已收字节数 `have`，重试时 `curl -r $((start+have))-$end >> chunk` 只补尾部；全部分块完成后拼接 + **md5 对比源站元数据**（Zenodo API 的 `files[].checksum`）终检。实测把"数小时"压到 ~20min。配套：GitHub 代码用 `raw.githubusercontent.com` 逐文件+重试循环（git clone/codeload 当日极慢不可用）；`api.github.com` 匿名限流时别依赖。
+- **运维脚枪**：清理下载进程时 `pkill -f "xxx"` 会匹配**执行命令自己命令行里的匹配串**而自杀（连犯两次）——先 `ps aux | grep` 查 PID 再按数字 kill；写下载脚本时把 PID 落盘。
+- **判定要点**：分块下载进度条反复归零（chunk try 次数增加但 have 不涨）= 在整块重试，改小分块+续传追加。
+- **配套模板**：`scripts/robust_download.sh.tmpl` 的 `get` 模式已内置全部要点（64 路×3MB、分块续传追加、size/md5 终检、Range 不支持自动回退单流、60s 心跳行），实测通过（断点续传+字节级一致）。
+
+## 89. 网络源当日可用性漂移：开工先做"源探测矩阵"，多源降级链取权重/数据（ProteinBERT CPT 实证）
+- **症状**：按历史经验直接用 hf-mirror（甚至 /etc/hosts 已固定其 IP）却连接失败 000 超时；huggingface.co 直连 000；`api.github.com` 报 "API rate limit exceeded for <IP>"。不同源当日可用性差异巨大（本次实测：modelscope / github.com / zenodo / raw.githubusercontent 可达，hf-mirror 与 huggingface.co 全挂，git clone / codeload 极慢 ~30KB/s）。
+- **根因**：国内出口对这些源的可达性**逐日漂移**（hf-mirror 单节点宕机、网络波动、CDN 分流），历史经验只证明"曾经可用"，不证明"今天可用"。
+- **解法**：阶段 2 **第一步**先并行探测全部候选源（每个 `curl -s -o /dev/null -w "%{http_code}" --max-time 10 <url>`，30s 出结果），建立**当日可用源清单**后再定下载路线，不要按默认顺序盲试。权重多源降级链：**本地 → ModelScope（`resolve/master/<file>` 直链）→ Zenodo（论文/工具作者常把权重归档于此；`https://zenodo.org/api/records/<id>` 返回 files[].size+checksum，先拿清单规划分块再下载+md5 终检）→ hf-mirror（`HF_HUB_DISABLE_XET=1`，#38）→ GitHub release/media（三级降级见 #90）**。大文件分块参数见 #88（小分块+断点续传追加）。
+- **判定要点**：curl 000（连接失败）≠ 404（源可达但路径不存在）——前者换源，后者换路径/**仓库名**（仓库名猜错要多候选探测，如 `proteinbert` 实为 `protein_bert`，github.com 404 但换名即 200）。
+- **配套模板**：`scripts/robust_download.sh.tmpl` 的 `probe` 模式一键输出 8 个常用源的当日可达性矩阵表（code+耗时+换源/换名判定）。
+
+## 90. GitHub 代码/数据获取三级降级 + 截断 tarball 部分解压抢救（ProteinBERT CPT 实证）
+- **症状**：`git clone` GitHub 仓库 2min 超时挂死；codeload tarball 下到 ~3MB 超时截断（`gzip -t` 报 unexpected end of file）；raw.githubusercontent.com 单文件时成时败（同一分钟内 2/3 请求 40s 超时）。
+- **根因**：git 协议与 codeload 链路当日极慢且不可断点续传（tarball 是服务端生成的流）；raw 可达但抖动大；长连接存活时间远小于大文件传输时间。
+- **解法（三级降级）**：① `git clone --depth 1`（当日链路正常时首选）；② 慢则改 `https://codeload.github.com/<org>/<repo>/tar.gz/refs/heads/<branch>`——**允许超时截断后整档重试**（脚本循环 `curl -o … && gzip -t … && break`，完整校验通过才算数）；截断的 tar.gz **不要直接扔**：`tar xzf` 在截断流上仍能解出**截断点之前的全部文件**（本次靠它先拿到 benchmark CSV 清单与部分数据，确认"数据集直接提交在代码仓库里"这一关键事实，为下载策略决策赢得时间）；③ 单个小文件（源码/CSV）用 raw.githubusercontent.com 逐文件 + 外层重试循环（每文件 3–5 次 × 45–60s 超时），文件多时挂后台 while 循环拉清单。`api.github.com` 匿名限流（60 req/h/IP），仓库元数据查询不要建立在它上。
+- **判定要点**：`gzip -t` 通过=完整可用；unexpected end of file=截断（可部分解压抢救，但抢救产物不可当完整档用）；clone/codeload 挂死 ≠ GitHub 全挂（raw 往往仍通）。**数据集先探明所在**（可能在代码仓库 tarball 里、可能在独立数据仓库、可能是 LFS media）再定整仓/逐文件策略。
+- **配套模板**：`scripts/robust_download.sh.tmpl` 的 `fetch` 模式即 raw 逐文件重试循环（可后台 while 批量拉清单）。

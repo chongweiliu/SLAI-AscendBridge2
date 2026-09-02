@@ -2,6 +2,17 @@
 # -*- coding: utf-8 -*-
 # timing_table.py.tmpl — 全程用时表渲染器（读 outputs/timing.json，打印 Markdown 表）
 # 由 agent 在每阶段完成 / 训练心跳 / 评估切换时调用，在屏幕实时刷新用时进度。
+#
+# ===== 硬性刷新触发点（SKILL.md 核心原则 9 的 T1–T6，缺一即违规）=====
+#  T1 开工基线   : 阶段 0–1 勘察完 -> --overall 总预估 + 逐阶段 --set est + 打印首张完整表
+#  T2 进入即标   : 每进入一个阶段/长跑子任务(下载/权重迁移/脚本开发/smoke) -> --doing <id> "说明" 重印
+#                  （严禁实际在做而表上挂 pending）
+#  T3 完成即结   : 每完成一个阶段 -> --set <id> actual <s> 重印（不等下个自然停顿点）
+#  T4 长跑心跳   : 任何预计>3min 阶段(下载/训练/评估)每 1–2min 轮询并重印表或 doing 行(带 ETA/已耗/百分比)
+#                  （"挂后台就消失"是明确违规；训练脚本自身另每~30s刷训练日志）
+#  T5 评估切换   : 阶段 8 每切换一个模型 -> 重印整表
+#  T6 收尾汇总   : 最终答复(上屏)与 README 都必须带完整用时表(阶段/预计/实际/说明+合计+预估偏差解释)
+#
 # 用法: $PYTHON timing_table.py            # 读 timing.json 打印表
 #       $PYTHON timing_table.py --set 7 actual 175 "100步完成"      # 记实际用时+置done+说明
 #       $PYTHON timing_table.py --set 7 est 360 ""                  # 设该阶段预计用时
