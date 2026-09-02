@@ -59,6 +59,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
     - `architectures` 含 `Qwen2Audio*`/`*AudioForConditionalGeneration`/`pipeline_tag=audio-text-to-text` + audio_tower + language_model → **音频-LLM 范式**（转写 CE，见 references/audio-llm-cpt.md）。
     - 出现 `mlx_*.json`/`mlx_*.safetensors`、或 README/library_name 标 `mlx` → **MLX(Apple) 格式**，NPU 无法直接加载，须找同源 PyTorch 基座（见 pitfalls #47，references/generative-diffusion-cpt.md）。
     - 权重是 **Keras/TF 产物**（`.pkl`/`.h5`，无 `config.json`/safetensors，如 ProteinBERT）→ **PyTorch 复刻+权重迁移范式**：按官方源码逐层翻译架构、pickle 解包权重、严格形状校验+消融验证（pitfalls #84–#86），数据流水线与评估指标随原生范式走。
+    - **机器学习原子间势/力场（MLIP：输入=结构图(原子序数/坐标/晶胞)，输出=能量+力，如 MatterSim/MACE/NequIP）** → **能量+力联合回归范式**：loss = Huber/CE(能量 per-atom + 力×ratio)，力 = -∂E/∂x 由 forward 内部 autograd 求得（训练时 create_graph 保二阶图）；评估 = 能量 MAE(meV/atom) + 力 MAE(eV/Å)，**评估循环禁 @torch.no_grad()**（#92）；跨泛函/口径能量基准差用 **shift-only scaling** 对齐（#93）；官方库后端枚举只认 cuda/cpu/mps 需 patch（#91）。
     - 多模态 `ForConditionalGeneration` 但目标是文本 → 走文本头 remap（references/multimodal-remap.md）。
     范式决定后续阶段 3(数据)/6(脚本)/8(评估) 全部分支，判定错则全盘错。把判定结果写进 `env_probe.json` 的 `model_type`/`train_paradigm`。
 
@@ -91,7 +92,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 ### 阶段 2 · 模型与数据集获取
 - **第一步：网络源可达性矩阵探测（~30s，必做）**：`bash robust_download.sh probe`（从 `scripts/robust_download.sh.tmpl` 复制）探测**当日**可用性——hf-mirror.com / huggingface.co / modelscope.cn / github.com / raw.githubusercontent.com / codeload.github.com / zenodo.org——先建立"当日可用源清单"再定下载路线，**不要按历史经验盲试**（源可达性逐日漂移，hf-mirror 单节点宕机时连 /etc/hosts 固定 IP 都不通，pitfalls #89）。权重降级链：本地 → ModelScope → Zenodo（API 拿文件清单+md5）→ hf-mirror（禁 Xet）→ GitHub（三级降级+截断抢救，pitfalls #90）。
 - 模型：本地有就用本地；否则从 modelscope（国内优先，`modelscope` CLI 或 git clone）或 `hf-mirror.com`（`git clone` + `git-lfs`）下载。`huggingface.co` 国内通常不可达。**大权重文件优先 ModelScope 的 `resolve/master/<file>` 直链（`wget -c`）**：新版 `hf` CLI 从 hf-mirror 拉大文件默认走 Xet 后端会 `401 Unauthorized`（`cas-server.xethub.hf.co`），且美区 CDN 慢；必须用 hf-mirror 时设 `HF_HUB_DISABLE_XET=1` 回退普通 LFS（pitfalls #38）。下完比对 `model.safetensors.index.json` 元数据字节数校验。
-- 语料：同上。`/mnt/share/...` 等用户给的理想路径不存在时，搜本机或下载。
+- 语料：同上。`/mnt/share/...` 等用户给的理想路径不存在时，搜本机或下载。**官方示例数据/权重可能只在某一平台的镜像目录里**（GitHub 仓库 ≠ ModelScope/HF 镜像发布物）——全网按名搜索失败 ≠ 不存在，先递归列出全平台镜像目录树、顺着官方 config 的相对路径引用找（pitfalls #94）。
 - **大文件下载与开发并行（省关键路径）**：大语料/权重下载挂后台后，立刻用**官方 sample/小子集**（或随机抽 N 条）先行推进阶段 3-6（数据管线、脚本、smoke、彩排），下载完成只做正式跑——不要干等下载。**大文件用 `robust_download.sh get <url> <out> <size> [md5] [ways] [chunk]`**（多路 Range + 分块断点续传 + size/md5 终检，Range 不支持自动回退单流续传，实测 191MB 慢源 20min 完成）；小文件用 `robust_download.sh fetch`（重试循环）。多个 GB 级 tarball 下载完必须做流级完整性校验（`gzip -t`/`tar -tzf`，分块下载器"每块尺寸对"≠内容对，见 pitfalls #68）再解压。**下载是长跑阶段**：按核心原则 9 的 T4 每 1–2min 把下载进度（已耗/百分比/速率/ETA）刷到对话，不许"挂后台就消失"（`get` 模式自带 60s 心跳行，回显即可）。
 - **非 PyTorch 原生权重（Keras/TF `.pkl`/`.h5`，如 ProteinBERT）**：pickle 若只含 numpy 元组可直接 `pickle.load` 解包（**无需安装 TF**）；按官方源码逐层复刻 PyTorch 架构（对齐 LN eps/激活变体/卷积 padding/kernel 排列），再做**变量序严格形状校验 + 同形权重交换消融 + 语义 sanity**（干净位置信度/掩码恢复率）三重验证后才能训练（完整方法见 pitfalls #84–#86）。
 - 数据集若只有 train 分割、用户要“验证集”：用 `seed` 重建训练划分取 held-out（见 references/eval-metrics.md）。
@@ -196,6 +197,11 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
   - **量化转写 CE loss**：held-out 音频+转写，base(全新/ad adapter off) vs CPT(加载 state_dict，`strict=False` 验 miss/unexp=0)，同 build_inputs(audio mask)，`delta<0` 训练有效。
   - 定性（可选）：采样生成转写 → 算 WER（需 jiwer/edit-distance）。
   - **不要**给音频-LLM 套纯文本 PPL/扩散 velocity MSE（语义不对：音频-LLM 的目标是条件转写 CE）。
+
+**D. MLIP 力场范式（能量+力回归，如 MatterSim/MACE/NequIP）** → 指标与口径（pitfalls #91–#93）：
+  - 能量 MAE（eV 与 meV/atom）+ 力 MAE/RMSE（eV/Å）+ 力方向余弦；**评估循环禁 @torch.no_grad()**——力 = -∂E/∂x 需要前向 autograd 图（#92）。
+  - base vs CPT 同条件：能量基准差（跨泛函/口径可达 ~150 eV/atom）用 **shift-only scaling** 对齐（shift 拟合自训练集、scale 保留原模型值），保证力基线不动、指标直接可比（#93）；力不受能量平移影响，是跨口径最可靠的对比指标。
+  - 性能用单结构"前向+力微分"延迟；train 回代 vs held-out 对比做过拟合检查。
 - 出 `eval_results.json` + 结论表，给"训练是否有效"结论（Δ 方向 + 是否过拟合）。
 - **【通用】过拟合检查（#61/#62，所有范式）**：①held-out **须用独立 test split**（非同源不同段——同源共享分布，评估失真）；②**训练 loss 趋近 0（<0.05）+ held-out 不改善 = 过拟合红旗**（小数据多 epoch 记忆样本）；③**数据量是泛化的关键杠杆（非步数）**：小数据多步→train_loss 虚低但泛化差；扩数据→train_loss 不到 0 但 held-out 大幅改善。MOSS 实证：8样本×25epoch train_loss 0.012 held-out -3%（过拟合）；50样本×6epoch train_loss 0.110 held-out -87%（泛化好）。优先扩数据再加步。
 - **FSDP2 大模型评估**：ckpt 是 `full_tensor()` 聚合的全量 state_dict，单卡直接 `load_state_dict` 即可（评估不需 FSDP2/DDP）。base 多模态走 remap。完整 9B FSDP2 实战案例（含结果表 + 与 0.8B 对比）见 `references/eval-metrics.md`。

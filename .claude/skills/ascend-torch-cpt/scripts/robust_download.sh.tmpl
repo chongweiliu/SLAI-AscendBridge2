@@ -13,9 +13,11 @@
 #
 #   bash robust_download.sh get <url> <out> <size_bytes> [md5] [ways] [chunk_bytes]
 #       大文件多路 Range 并行 + 分块断点续传追加 + size/md5 终检（#88）
+#       - 校验和参数兼容两种哈希: 纯 hex = md5; "sha256:<hex>" 前缀 = sha256
+#         (ModelScope API 提供 sha256, Zenodo 提供 md5 —— 按源站元数据选, #94)
 #       - 服务器不支持 Range 时自动回退"单流断点续传"(curl -C -)
-#       - size/md5 从源站元数据拿（如 Zenodo: https://zenodo.org/api/records/<id> 的
-#         files[].size 与 files[].checksum="md5:xxx"），无 md5 传 "-" 跳过校验
+#       - size/哈希从源站元数据拿（如 Zenodo: /api/records/<id> 的 files[].size/checksum；
+#         ModelScope: /api/v1/models/<ns>/<name>/repo/files 的 Size/Sha256），无哈希传 "-" 跳过
 #       - 分块参数经验值: ways=64, chunk=3000000(3MB) —— 大分块(12MB+)超时即整块
 #         作废重来, 数小时下不完（#88 实证）
 #
@@ -112,19 +114,22 @@ do_get() {
     cat $(for i in $(seq 0 $((n - 1))); do printf '%s/chunk_%s ' "$dir" "$(printf '%04d' "$i")"; done) > "$out"
   fi
 
-  # 终检: size 必查, md5 可选
-  local actual_size actual_md5
+  # 终检: size 必查, 哈希可选 (纯 hex=md5; "sha256:<hex>" 前缀=sha256, #94)
+  local actual_size actual_hash
   actual_size=$(stat -c%s "$out" 2>/dev/null || echo 0)
   if [ "$actual_size" != "$total" ]; then
     echo "[get] ❌ size 不符: $actual_size / $total" >&2; return 1
   fi
   if [ "$md5" != "-" ] && [ -n "$md5" ]; then
-    actual_md5=$(md5sum "$out" | awk '{print $1}')
-    if [ "$actual_md5" != "$md5" ]; then
-      echo "[get] ❌ md5 不符: $actual_md5 != $md5" >&2; return 1
+    case "$md5" in
+      sha256:*) actual_hash=$(sha256sum "$out" | awk '{print $1}') ;;
+      *)        actual_hash=$(md5sum "$out" | awk '{print $1}') ;;
+    esac
+    if [ "$actual_hash" != "${md5#sha256:}" ]; then
+      echo "[get] ❌ 哈希不符: $actual_hash != $md5" >&2; return 1
     fi
   fi
-  echo "[get] ✅ $out 校验通过 (size=$actual_size${md5:+, md5=$md5})"
+  echo "[get] ✅ $out 校验通过 (size=$actual_size${md5:+, hash=$md5})"
   rm -rf "$dir"
   return 0
 }
