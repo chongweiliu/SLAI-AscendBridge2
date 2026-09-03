@@ -22,7 +22,7 @@
 
 1. **benchmark-runner** 对需评测的模型在 `adaptations/{safe_name}/` 下生成并运行 `accuracy_run.py`，产出 `outputs_*.pt`、`benchmark_metrics_*.json`、`trace_*.json`；如开启 `torch_npu.profiler`，也可额外保留 raw profiling 目录。
 2. 使用 `uv run python benchmark/scripts/benchmark_tool.py compare ...` 对比 CUDA/NPU 两份 `.pt`。
-3. 使用 `uv run python benchmark/scripts/benchmark_tool.py trace ...` 解析 `trace_*.json`，得到 fallback 和 CPU/NPU 算子统计。
+3. 使用 `uv run python benchmark/scripts/benchmark_tool.py trace ...` 解析 `trace_*.json`，基于 correlation id、显式 fallback 标记和 D2H 证据区分已确认/疑似 fallback，并得到 CPU/NPU 算子统计。单独出现的 `aten::` CPU frontend 事件不会被直接判为 fallback。
 4. 使用 `uv run python benchmark/scripts/benchmark_tool.py profiling ...` 直接解析 raw profiling 目录，输出 `api_statistic.csv` / `step_trace_time.csv` 等的文本或 JSON 摘要。
 5. 使用 `uv run python benchmark/scripts/benchmark_tool.py aggregate ...` 汇总 benchmark 指标，生成报告与图表。
 

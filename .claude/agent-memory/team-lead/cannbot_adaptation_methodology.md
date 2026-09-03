@@ -14,8 +14,8 @@ metadata:
 1. **先获取源码，严格按源码流程推理**：不臆造 pipeline，克隆官方 GitHub 源码，按其 README/demo 跑通 CPU/CUDA 基线后再迁 NPU。
 2. **完整获取权重**：从 HuggingFace 拉全量 checkpoint，不偷懒只取部分。
 3. **算子替换优先级（三段式）**：
-   - 优先用 torch_npu 原生算子
-   - 缺失算子先到 **GitCode CANN 社区** 和 **Ascend 社区**找替代算子
+   - 优先用标准 PyTorch 原生 NPU dispatch，再找 torch_npu 单一、公开、语义等价的原生接口；没有单一接口就判定没有，禁止组合多个 torch_npu 接口冒充原生算子
+   - 缺失算子通过 `scripts/search_operator_communities.py` 用服务端 API 全量枚举 [CANN](https://gitcode.com/cann) 和 [Ascend](https://gitcode.com/Ascend) 的全部公开仓库，并完整分页执行 namespace 代码搜索；禁止下载仓库，报告不完整时不得判定“没有”
    - 都没有，再描述清楚功能与需求，用 **cannbot 生成 Ascend C 算子**
 4. **结果对齐**：最终 NPU 推理输出必须与 GitHub 项目页展示的效果对比一致（质量/形状/纹理不漂移）。
 
@@ -27,7 +27,7 @@ cannbot 协同适配的资产要拆两层看，**不可整体照搬**。
 
 ### ✅ 通用层（任何算子缺口型模型都有效）
 
-1. **三段式算子优先级**本身（torch_npu 原生 > GitCode CANN 社区/Ascend 社区 > cannbot 新建）。
+1. **三段式算子优先级**本身（标准 PyTorch 原生 NPU > torch_npu 单一原生接口 > [CANN](https://gitcode.com/cann) / [Ascend](https://gitcode.com/Ascend) 全仓搜索 > cannbot 新建）。
 2. **cannbot 工具链流程**：env-check → Architect(DESIGN+PLAN) → Design Reviewer(WALKTHROUGH) → Developer(代码+编译) → Reviewer(100 分制) → 修复循环。
 3. **cannbot 工具链的坑**（跨模型复用，已用血泪换）：
    - 编译必须用 adaptation `.venv` 的 python，否则 dlopen 崩 `std::length_error: vector::reserve`

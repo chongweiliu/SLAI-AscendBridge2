@@ -83,7 +83,7 @@ uv run python benchmark/scripts/benchmark_tool.py compare --all --output compare
 
 ### trace - 分析 Trace（含 NPU Fallback）
 
-分析 trace 文件：统计 NPU/CPU ops、fallback 比例，并做完整 Fallback 分析（D2H/H2D 数据搬运、关键算子分类、优化建议）。
+分析 trace 文件：统计 NPU/CPU ops，并基于 correlation id、显式 fallback 标记和关联的数据搬运区分“已确认 fallback”与“疑似 fallback”。单独出现的 `aten::` CPU frontend 事件不是 fallback 证据。
 
 ```bash
 # 分析单个 trace 文件
@@ -119,12 +119,15 @@ uv run python benchmark/scripts/benchmark_tool.py trace --all --output trace_rep
 
 - `npu_ops`: NPU 算子总次数
 - `cpu_ops`: CPU 算子总次数
-- `fallback_ratio`: fallback 比例
+- `fallback_ratio`: 已确认 fallback 调用占可分类计算调用的比例
 - `top_cpu_ops`: 最多使用的 CPU 算子
 - `total_events`: 总事件数
 - `d2h_count`: D2H 数据搬运次数
 - `h2d_count`: H2D 数据搬运次数
-- `fallback_ops`: 关键算子在 CPU 上执行（需关注）
+- `fallback_ops`: 有显式标记或关联数据搬运证据的 fallback
+- `suspected_fallback_ops`: 未关联到 NPU activity、但证据不足以确认的计算算子
+- `fallback_evidence`: 每个已确认算子的证据类型
+- `fallback_confidence`: `confirmed` / `suspected` / `none`
 - `compute_on_npu`: 在 NPU 上执行的计算算子
 - `dispatch_on_cpu`: 调度入口算子（CPU 调度、NPU 计算）
 - `has_fallback`: 是否存在关键算子 fallback
@@ -286,6 +289,6 @@ uv run python benchmark/scripts/benchmark_tool.py trace --all --output benchmark
 
 ### trace 分析
 
-- `fallback_ratio` < 10%：优秀
-- `fallback_ratio` 10-30%：可接受
-- `fallback_ratio` > 30%：需优化
+- `fallback_confidence=confirmed`：可以进入算子替代方案调查，但仍需结合耗时确认它是端到端瓶颈
+- `fallback_confidence=suspected`：必须重新采集带 correlation id 的 L1 trace 或结合 runtime fallback 日志，不能直接触发自定义算子开发
+- `fallback_confidence=none`：仅表示当前 trace 没有可确认的 fallback 证据，不代表所有 shape/dtype 路径均受支持

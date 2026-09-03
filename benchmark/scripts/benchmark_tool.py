@@ -1882,47 +1882,7 @@ def cmd_profiling(args):
 # Trace 功能（含 NPU Fallback 分析：D2H/H2D、算子分类）
 # =============================================================================
 
-# 关键计算算子、调度入口、轻量级操作（用于 fallback 分类）
-_COMPUTE_OPS = {
-    "matmul",
-    "addmm",
-    "bmm",
-    "mm",
-    "baddbmm",
-    "mul",
-    "add",
-    "sub",
-    "div",
-    "neg",
-    "pow",
-    "embedding",
-    "gather",
-    "scatter",
-    "index_select",
-    "silu",
-    "gelu",
-    "relu",
-    "tanh",
-    "sigmoid",
-    "softmax",
-    "layernorm",
-    "rmsnorm",
-    "groupnorm",
-    "batchnorm",
-    "rsqrt",
-    "sqrt",
-    "sin",
-    "cos",
-    "exp",
-    "log",
-    "mean",
-    "sum",
-    "max",
-    "min",
-    "cat",
-    "flashattention",
-    "scaled_dot_product_attention",
-}
+# 调度入口和轻量级操作用于排除正常 CPU frontend 事件；其余 aten 算子依证据分类。
 _DISPATCH_OPS = {
     "linear",
     "conv2d",
@@ -1938,12 +1898,6 @@ _ATEN_OP_ALIASES = {
     "batch_norm": "batchnorm",
     "layer_norm": "layernorm",
 }
-# NPU 算子命名可能与 aten 不同，用于 has_npu_impl 判断（子串匹配的备选）
-_NPU_OP_ALTERNATES = {
-    "bmm": ["bmm", "batch_matmul", "batchmatmul"],
-    "addmm": ["addmm", "add_matmul"],
-}
-
 _LIGHTWEIGHT_OPS = {
     "view",
     "reshape",
@@ -1973,8 +1927,63 @@ _LIGHTWEIGHT_OPS = {
 }
 
 
+def _normalize_aten_op(name: str) -> str:
+    raw = name.removeprefix("aten::").lstrip("_").split(".", 1)[0].lower()
+    raw = raw.removesuffix("_")
+    return _ATEN_OP_ALIASES.get(raw, raw)
+
+
+def _event_correlation_ids(event: dict) -> set[str]:
+    """Extract profiler correlation identifiers without relying on one CANN version."""
+    identifiers: set[str] = set()
+    containers = [event]
+    args = event.get("args")
+    if isinstance(args, dict):
+        containers.append(args)
+    for container in containers:
+        for key, value in container.items():
+            normalized_key = str(key).lower().replace("_", " ").replace("-", " ")
+            if ("correlation" in normalized_key or normalized_key in {"external id", "sequence number"}) and value is not None and str(value).strip():
+                identifiers.add(str(value).strip())
+    return identifiers
+
+
+def _event_text(event: dict) -> str:
+    args = event.get("args")
+    args_text = json.dumps(args, ensure_ascii=False).lower() if isinstance(args, dict) else ""
+    return f"{event.get('name', '')} {event.get('cat', '')} {args_text}".lower()
+
+
+def _is_npu_activity(event: dict) -> bool:
+    name = str(event.get("name", "")).lower()
+    category = str(event.get("cat", "")).lower()
+    text = _event_text(event)
+    return (
+        name.startswith(("aclnn", "npu::"))
+        or "npu_kernel" in category
+        or "ascend hardware" in category
+        or ("kernel" in category and any(marker in text for marker in ("npu", "ascend", "aicore", "aivector")))
+    )
+
+
+def _transfer_direction(event: dict) -> str | None:
+    text = _event_text(event).replace(" ", "_")
+    if any(marker in text for marker in ("npu_to_cpu", "device_to_host", "d2h", "tocpu")):
+        return "d2h"
+    if any(marker in text for marker in ("cpu_to_npu", "host_to_device", "h2d", "tonpu")):
+        return "h2d"
+    return None
+
+
 def analyze_trace_for_fallback(trace_path: Path, verbose: bool = False, quiet: bool = False) -> dict:
-    """分析 trace_*.json 检测 NPU fallback 到 CPU 的情况（D2H/H2D、算子分类）。"""
+    """Conservatively identify confirmed and suspected NPU-to-CPU fallbacks.
+
+    An ``aten::`` CPU event is normally the PyTorch dispatch entry and is not by
+    itself evidence of CPU execution. A fallback is confirmed only by an
+    explicit fallback marker or a correlated host/device transfer without
+    correlated NPU activity. Unresolved compute events are reported separately
+    as suspected fallbacks and must be confirmed with profiler/runtime logs.
+    """
     if not quiet:
         print(f"[analyze] 加载 Trace 文件: {trace_path}")
     data = json.loads(trace_path.read_text(encoding="utf-8"))
@@ -1992,10 +2001,13 @@ def analyze_trace_for_fallback(trace_path: Path, verbose: bool = False, quiet: b
             "d2h_count": 0,
             "h2d_count": 0,
             "fallback_ops": [],
+            "suspected_fallback_ops": [],
+            "fallback_evidence": {},
             "compute_on_npu": [],
             "dispatch_on_cpu": [],
             "lightweight_on_cpu": [],
             "has_fallback": False,
+            "fallback_confidence": "none",
             "fallback_applicable": False,
             "has_data_transfer": False,
             "note": "trace format not recognized",
@@ -2005,44 +2017,65 @@ def analyze_trace_for_fallback(trace_path: Path, verbose: bool = False, quiet: b
 
     copy_events = {"d2h": [], "h2d": []}
     for event in events:
-        name = event.get("name", "").lower()
-        if any(kw in name for kw in ["npu_to_cpu", "d2h", "tocpu", "to.device"]) and "cpu" in name:
-            copy_events["d2h"].append(event)
-        if any(kw in name for kw in ["cpu_to_npu", "h2d", "tonpu", "to.device"]) and "npu" in name:
-            copy_events["h2d"].append(event)
+        if not isinstance(event, dict):
+            continue
+        direction = _transfer_direction(event)
+        if direction:
+            copy_events[direction].append(event)
 
     cpu_ops_counter: Counter = Counter()
     npu_ops_counter: Counter = Counter()
+    cpu_events: list[tuple[str, dict]] = []
+    npu_correlation_ids: set[str] = set()
     for event in events:
-        name = event.get("name", "")
-        cat = event.get("cat", "")
-        if cat == "cpu_op":
-            if name.startswith("aten::"):
-                raw = name.replace("aten::", "").lstrip("_")
-                if raw:
-                    op_name = _ATEN_OP_ALIASES.get(raw, raw)
-                    cpu_ops_counter[op_name] += 1
-            elif name.startswith("aclnn") or name.startswith("npu::"):
-                npu_ops_counter[name] += 1
-        elif name.startswith("aclnn") or name.startswith("npu::"):
+        if not isinstance(event, dict):
+            continue
+        name = str(event.get("name", ""))
+        cat = str(event.get("cat", "")).lower()
+        if cat == "cpu_op" and name.startswith("aten::"):
+            op_name = _normalize_aten_op(name)
+            if op_name:
+                cpu_ops_counter[op_name] += 1
+                cpu_events.append((op_name, event))
+        if _is_npu_activity(event):
             npu_ops_counter[name] += 1
+            npu_correlation_ids.update(_event_correlation_ids(event))
 
-    fallback_ops = []
-    compute_on_npu = []
-    dispatch_on_cpu = []
-    lightweight_on_cpu = []
-    for op, count in cpu_ops_counter.items():
-        op_lower = op.lower()
-        alternates = _NPU_OP_ALTERNATES.get(op_lower, [op_lower])
-        has_npu_impl = any(any(alt in npu_op.lower() for alt in alternates) for npu_op in npu_ops_counter)
-        if op_lower in _DISPATCH_OPS:
-            dispatch_on_cpu.append(op)
-        elif op_lower in _COMPUTE_OPS and not has_npu_impl:
-            fallback_ops.append(op)
-        elif op_lower in _COMPUTE_OPS:
-            compute_on_npu.append(op)
-        elif op_lower in _LIGHTWEIGHT_OPS:
-            lightweight_on_cpu.append(op)
+    d2h_correlation_ids = {
+        identifier for event in copy_events["d2h"] for identifier in _event_correlation_ids(event)
+    }
+
+    fallback_counts: Counter = Counter()
+    suspected_counts: Counter = Counter()
+    npu_backed_counts: Counter = Counter()
+    dispatch_on_cpu: set[str] = set()
+    lightweight_on_cpu: set[str] = set()
+    fallback_evidence: dict[str, set[str]] = {}
+    compute_invocations = 0
+    for op, event in cpu_events:
+        if op in _DISPATCH_OPS:
+            dispatch_on_cpu.add(op)
+            continue
+        if op in _LIGHTWEIGHT_OPS:
+            lightweight_on_cpu.add(op)
+            continue
+        compute_invocations += 1
+        correlations = _event_correlation_ids(event)
+        text = _event_text(event)
+        if "fallback" in text or "unsupported on npu" in text or "not supported on npu" in text:
+            fallback_counts[op] += 1
+            fallback_evidence.setdefault(op, set()).add("explicit_fallback_marker")
+        elif correlations & npu_correlation_ids:
+            npu_backed_counts[op] += 1
+        elif correlations & d2h_correlation_ids:
+            fallback_counts[op] += 1
+            fallback_evidence.setdefault(op, set()).add("correlated_host_device_transfer")
+        else:
+            suspected_counts[op] += 1
+
+    fallback_ops = sorted(fallback_counts)
+    suspected_fallback_ops = sorted(suspected_counts)
+    compute_on_npu = sorted(npu_backed_counts)
 
     if verbose and not quiet and copy_events["d2h"]:
         print(f"\n[analyze] 发现 {len(copy_events['d2h'])} 个 D2H 事件 (可能指示 Fallback)")
@@ -2052,12 +2085,14 @@ def analyze_trace_for_fallback(trace_path: Path, verbose: bool = False, quiet: b
     is_npu_trace = parsed is not None and str(parsed.device).startswith("npu")
     if not is_npu_trace:
         fallback_ops = []
+        suspected_fallback_ops = []
+        fallback_counts.clear()
+        suspected_counts.clear()
     has_fallback = len(fallback_ops) > 0
     cpu_ops_total = sum(cpu_ops_counter.values())
     npu_ops_total = sum(npu_ops_counter.values())
-    fallback_invocations = sum(cpu_ops_counter.get(op, 0) for op in fallback_ops) if is_npu_trace else 0
-    compute_total = (fallback_invocations + npu_ops_total) if is_npu_trace else 0
-    fallback_ratio = (fallback_invocations / compute_total) if compute_total else 0.0
+    fallback_invocations = sum(fallback_counts.values()) if is_npu_trace else 0
+    fallback_ratio = (fallback_invocations / compute_invocations) if is_npu_trace and compute_invocations else 0.0
     top_cpu_ops = sorted(cpu_ops_counter.items(), key=lambda x: -x[1])[:10]
 
     return {
@@ -2067,10 +2102,13 @@ def analyze_trace_for_fallback(trace_path: Path, verbose: bool = False, quiet: b
         "d2h_count": len(copy_events["d2h"]),
         "h2d_count": len(copy_events["h2d"]),
         "fallback_ops": sorted(fallback_ops),
-        "compute_on_npu": sorted(compute_on_npu),
+        "suspected_fallback_ops": suspected_fallback_ops,
+        "fallback_evidence": {op: sorted(evidence) for op, evidence in fallback_evidence.items() if op in fallback_ops},
+        "compute_on_npu": compute_on_npu,
         "dispatch_on_cpu": sorted(dispatch_on_cpu),
         "lightweight_on_cpu": sorted(lightweight_on_cpu),
         "has_fallback": has_fallback,
+        "fallback_confidence": "confirmed" if has_fallback else ("suspected" if suspected_fallback_ops else "none"),
         "fallback_applicable": is_npu_trace,
         "has_data_transfer": len(copy_events["d2h"]) > 0 or len(copy_events["h2d"]) > 0,
         "npu_ops": npu_ops_total,
@@ -2086,18 +2124,24 @@ def print_fallback_report(result: dict, verbose: bool = False) -> None:
     print("\n" + "=" * 60)
     print("📊 NPU Fallback 分析报告")
     print("=" * 60)
-    print(f"\n📈 总体统计:")
+    print("\n📈 总体统计:")
     print(f"  - 总事件数: {result.get('total_events', 0)}")
     print(f"  - CPU 算子类型: {result.get('cpu_op_types', 0)}")
     print(f"  - NPU 算子类型: {result.get('npu_op_types', 0)}")
     print(f"  - D2H 数据搬运: {result.get('d2h_count', 0)} 次")
     print(f"  - H2D 数据搬运: {result.get('h2d_count', 0)} 次")
     if result.get("has_fallback"):
-        print(f"\n⚠️  检测到 Fallback (关键算子在 CPU 上执行):")
+        print("\n⚠️  检测到有证据的 Fallback (显式标记或关联的数据搬运):")
         for op in result.get("fallback_ops", []):
+            evidence = ", ".join(result.get("fallback_evidence", {}).get(op, []))
+            print(f"  - {op}" + (f" ({evidence})" if evidence else ""))
+    elif result.get("suspected_fallback_ops"):
+        print("\n⚠️  存在未关联到 NPU activity 的计算算子，仅列为疑似 fallback:")
+        for op in result.get("suspected_fallback_ops", []):
             print(f"  - {op}")
+        print("  需结合 runtime fallback 日志或带 correlation id 的 profiler 数据确认，不能据此直接开发自定义算子。")
     else:
-        print(f"\n✅ 未检测到关键算子 Fallback")
+        print("\n✅ 未检测到有证据的关键算子 Fallback")
     if result.get("compute_on_npu"):
         print(f"\n🚀 在 NPU 上执行的计算算子 ({len(result.get('compute_on_npu', []))} 个):")
         for op in result.get("compute_on_npu", []):
@@ -2116,9 +2160,11 @@ def print_fallback_report(result: dict, verbose: bool = False) -> None:
     print("\n" + "=" * 60)
     if result.get("has_fallback"):
         print("💡 建议:")
-        print("  1. 检查 fallback 算子是否有 NPU 替代实现")
-        print("  2. 考虑使用 torch_npu.extend_custom_op 注册自定义算子")
-        print("  3. 使用 ASCEND_GLOBAL_LOG_LEVEL=1 查看详细 fallback 日志")
+        print("  1. 先确认标准 PyTorch 是否可在 NPU 原生执行")
+        print("  2. 检查是否存在单一 torch_npu 原生接口")
+        print("  3. 完整搜索 CANN 与 Ascend 社区，再考虑自定义算子")
+    elif result.get("suspected_fallback_ops"):
+        print("💡 建议: 重新采集带 correlation id 的 L1 trace，并结合 ASCEND_GLOBAL_LOG_LEVEL=1 确认疑似项")
     elif result.get("d2h_count", 0) > 0:
         print("💡 提示:")
         print("  - 检测到数据搬运，但关键计算在 NPU 上")
@@ -2206,10 +2252,15 @@ def cmd_trace(args):
                 _app = result.get("fallback_applicable", True)
                 _fb = result.get("has_fallback", False)
                 _ops = result.get("fallback_ops", [])
+                _suspected = result.get("suspected_fallback_ops", [])
                 if not _app:
                     print(f"{GREEN}✓{NC} {tf.name}: fallback=N/A（仅 NPU trace 可判断）")
+                elif _fb:
+                    print(f"{YELLOW}⚠{NC} {tf.name}: fallback=已确认 ({', '.join(_ops)})")
+                elif _suspected:
+                    print(f"{YELLOW}⚠{NC} {tf.name}: fallback=疑似待确认 ({', '.join(_suspected)})")
                 else:
-                    print(f"{GREEN}✓{NC} {tf.name}: fallback={'有' if _fb else '无'}" + (f" ({', '.join(_ops)})" if _ops else ""))
+                    print(f"{GREEN}✓{NC} {tf.name}: fallback=无证据")
                 if args.verbose:
                     print_fallback_report(result, verbose=True)
             except Exception as e:
@@ -2230,10 +2281,15 @@ def cmd_trace(args):
                     _app = result.get("fallback_applicable", True)
                     _fb = result.get("has_fallback", False)
                     _ops = result.get("fallback_ops", [])
+                    _suspected = result.get("suspected_fallback_ops", [])
                     if not _app:
                         print(f"{GREEN}✓{NC} {adir.name}/{tf.name}: fallback=N/A（仅 NPU trace 可判断）")
+                    elif _fb:
+                        print(f"{YELLOW}⚠{NC} {adir.name}/{tf.name}: fallback=已确认 ({', '.join(_ops)})")
+                    elif _suspected:
+                        print(f"{YELLOW}⚠{NC} {adir.name}/{tf.name}: fallback=疑似待确认 ({', '.join(_suspected)})")
                     else:
-                        print(f"{GREEN}✓{NC} {adir.name}/{tf.name}: fallback={'有' if _fb else '无'}" + (f" ({', '.join(_ops)})" if _ops else ""))
+                        print(f"{GREEN}✓{NC} {adir.name}/{tf.name}: fallback=无证据")
                     if args.verbose:
                         print_fallback_report(result, verbose=True)
                 except Exception as e:

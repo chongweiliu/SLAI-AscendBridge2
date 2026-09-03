@@ -61,7 +61,7 @@ model-crawler 注册模型 → team-lead 分配 adaptation 给 adapter
 adapter 适配遇算子缺口 → 报 blocked_by_operator_gap
   ↓ （或 optimization 阶段 npu-optimizer 报 perf 缺口）
 team-lead 派 cannbot-adapter：
-  1. 三段式判定（torch_npu 原生 → GitCode CANN 社区/Ascend 社区 → cannbot，实测留证到 TRIAGE.md）
+  1. 三段式判定（标准 PyTorch 原生 NPU / torch_npu 单一原生接口 → [CANN](https://gitcode.com/cann) / [Ascend](https://gitcode.com/Ascend) 全仓搜索 → cannbot，实测留证到 TRIAGE.md）
   2. 获取参考源码（CUDA kernel + 纯 torch golden + 模型调用点契约）
   3. cannbot 4 角色：Architect → DesignReviewer → Developer → Reviewer
      （产出 .so + DESIGN/PLAN/WALKTHROUGH/REVIEW.md）
@@ -75,14 +75,15 @@ adapter 继续 / npu-optimizer 集成测速 → benchmark → optimization → b
 
 ## 四、关键规则（必读，血泪换的）
 
-1. **三段式优先级**：torch_npu 原生 > GitCode CANN 社区/Ascend 社区 > cannbot 新建。cannbot 是最后手段，不重复造 NPU 已有算子的轮子（如 matmul 用原生 bmm）。
-2. **先获取参考源码**：Architect 前必做。CUDA kernel（设计蓝本）+ 纯 torch golden（精度对照）+ 模型调用点（形状/dtype/是否非连续）。
-3. **cannbot 算子集成必须 `.contiguous()`**：算子按裸指针读不遵守 torch strides，来自 torch.split/transpose/view 的非连续张量必须 `.contiguous()`（实测根因，曾 3 次误诊为 bf16 精度悬崖/stream 取错流）。
-4. **Reviewer 必须含真实权重 fuzz**：synthetic test_torch.py 测不到边界（曾因此返工/被证伪）。加载 pretrained 跑 50+ 样本 op vs golden，覆盖实际模型配置。
-5. **stream 一致性**：`at::full(-1)` 等用 torch_npu 默认流，与算子 aclStream 不同步致非确定性。用 aclStream 上的 memsetAsync + synchronize。
-6. **MIX 模式陷阱**：`__mix__(1,2)` 融合 Cube+Vector kernel 与自定义 program 调度冲突，AIC 不被驱动。优先非融合双 kernel（纯 AIC `__aicore__` + 纯 AIV `__vector__`）。
-7. **编译用 adaptation .venv python**：`cmake -DPython3_EXECUTABLE=<adaptation>/.venv/bin/python`，否则 dlopen 崩 `std::length_error`。
-8. **FP32 归约精度**：树形归约 vs aten 顺序累加有结合律差异，MERE<1.22e-4 / MARE<1.22e-3，不强求 atol<1e-5。
+1. **三段式优先级**：标准 PyTorch 原生 NPU > torch_npu 单一原生接口 > [CANN](https://gitcode.com/cann) / [Ascend](https://gitcode.com/Ascend) 现成实现 > cannbot 新建。若 torch_npu 没有单一、公开、语义等价的接口，就判定为没有；禁止组合多个 torch_npu 接口冒充一个原生接口。
+2. **社区搜索必须完整且禁止下载仓库**：使用 `scripts/search_operator_communities.py` 全量分页枚举两个组织的公开仓库，并对每个 namespace/关键词完整分页调用 GitCode 服务端代码搜索。只有报告 `complete=true`、`downloaded_repositories=false`、服务端未截断且覆盖数等于枚举数时才能下“未找到”结论；分页或接口失败必须导致 `search_incomplete`。
+3. **先获取参考源码**：Architect 前必做。CUDA kernel（设计蓝本）+ 纯 torch golden（精度对照）+ 模型调用点（形状/dtype/是否非连续）。
+4. **cannbot 算子集成必须 `.contiguous()`**：算子按裸指针读不遵守 torch strides，来自 torch.split/transpose/view 的非连续张量必须 `.contiguous()`。
+5. **Reviewer 必须含真实权重 fuzz**：加载 pretrained 跑 50+ 样本 op vs golden，覆盖实际模型配置，并把样本数、dtype/shape、误差指标、非连续输入、stream 和连续调用结果写入 `acceptance.json`。
+6. **stream 一致性**：`at::full(-1)` 等用 torch_npu 默认流，与算子 aclStream 不同步致非确定性。用 aclStream 上的 memsetAsync + synchronize。
+7. **MIX 模式陷阱**：`__mix__(1,2)` 融合 Cube+Vector kernel 与自定义 program 调度冲突，AIC 不被驱动。优先非融合双 kernel（纯 AIC `__aicore__` + 纯 AIV `__vector__`）。
+8. **编译用 adaptation .venv python**：`cmake -DPython3_EXECUTABLE=<adaptation>/.venv/bin/python`，否则 dlopen 崩 `std::length_error`。
+9. **FP32 归约精度**：树形归约 vs aten 顺序累加有结合律差异，MERE<1.22e-4 / MARE<1.22e-3，不强求 atol<1e-5。
 
 ---
 
@@ -93,6 +94,7 @@ adapter 继续 / npu-optimizer 集成测速 → benchmark → optimization → b
 - **Reviewer 嵌套 spawn 在 GLM-5.2 下可能卡**：前 3 角色可靠出 .so，Reviewer 可能卡。建议 team-lead 顶层 spawn Reviewer（不嵌套）。
 - **speedup_ratio ≥3x 需独立 baseline 工件** + comparison_method=independent_baseline_artifact + 非 self_baseline + steady_state latencies 正数。
 - **board_ops 写库 + 回读 DB 核验**。
+- **结构化验收**：每个自定义算子必须生成并通过 [`operator-acceptance-contract.md`](operator-acceptance-contract.md) 定义的 `acceptance.json` 门禁。
 
 ---
 

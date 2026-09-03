@@ -2630,6 +2630,19 @@ def _validate_benchmark_completion(model_id: str):
         print(f"Intercepted: cannot set benchmark_status=completed until check passes for {adapt_name}")
         print(f"INTERCEPTED: model_id={model_id} benchmark_owner={benchmark_owner} notes={error_notes[:200]}")
         sys.exit(1)
+    operators_dir = Path(_PROJECT_ROOT) / path_val / "operators"
+    if operators_dir.is_dir() and any(path.is_dir() for path in operators_dir.iterdir()):
+        operator_ok, operator_err = _run_check_script(
+            Path(_PROJECT_ROOT) / "scripts" / "check_operator_acceptance.py",
+            adapt_name,
+            "check_operator_acceptance.py",
+        )
+        if not operator_ok:
+            conn.close()
+            error_notes = f"自定义算子结构化验收未通过。{operator_err}"
+            print(f"Intercepted: cannot set benchmark_status=completed until custom operators pass for {adapt_name}")
+            print(f"INTERCEPTED: model_id={model_id} benchmark_owner={benchmark_owner} notes={error_notes[:200]}")
+            sys.exit(1)
     metric_ok, metric_err = _validate_benchmark_metric_artifacts(path_val)
     if not metric_ok:
         conn.close()
