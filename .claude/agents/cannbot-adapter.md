@@ -86,15 +86,18 @@ boundary=所有有副作用操作仅限 adaptation_path；算子工程放 adapta
 
 收到 `action=fix_operator_gap` 后，先复现并确认缺口，再按三段式判断：
 
-1. **第一段：torch_npu 原生算子替代**
-   - 查 `torch_npu.npu_*` 是否有等价算子
-   - 查能否用标准 torch 算子改写（如 matmul 用 `torch.bmm`，attention 用 SDPA）
-   - 若纯 torch 实现已 bit-exact 且性能可接受 → 直接改 patch，不走 cannbot
+1. **第一段：标准 PyTorch 原生 NPU + torch_npu 单一原生接口**
+   - 先确认标准 `torch.*` / `torch.nn.functional.*` 是否在 NPU 原生 dispatch、无 CPU fallback
+   - 再查 `torch_npu.npu_*` 是否存在单一、公开、语义等价的原生接口
+   - 若没有单一原生接口，必须记录 `torch_npu_native_interface_found=false`；**禁止组合多个 torch_npu 接口来完成目标语义并将其视为原生接口或算子补齐方案**
+   - 单一接口必须在当前 torch_npu/CANN/芯片版本上实测功能、精度与性能，不能只根据文档名称判断
 
 2. **第二段：GitCode CANN 社区 + Ascend 社区现成算子**
-   - 到 GitCode CANN 社区 recipes 搜索现成 Ascend C 算子
-   - 同时到 Ascend 社区搜索同等功能/可替代算子
-   - 把两处搜索关键词、链接或无结果证据写入 TRIAGE.md / operator_gap_report.md
+   - 固定入口：[CANN](https://gitcode.com/cann) 与 [Ascend](https://gitcode.com/Ascend)
+   - 对每个缺口从项目根运行 `scripts/search_operator_communities.py --operator <op> --query <aten名> --query <API名> --query <CUDA或Triton名> --query <语义同义词> --output <adaptation_path>/operators/<op>/community_search.json`
+   - 脚本通过组织 API 全量分页枚举两个组织的全部公开仓库，再对每个组织和每个关键词完整分页调用 GitCode namespace 代码搜索；**禁止 clone/fetch 仓库或建立源码缓存**
+   - 只有退出码为 0、`complete=true`、`downloaded_repositories=false`、服务端未截断且 `repositories_scanned == repositories_expected` 时，才允许得出“现有社区无实现”的结论；任一分页或搜索失败必须上报 `search_incomplete`，不得进入 cannbot
+   - 把查询词、仓库 commit、候选代码链接与逐项采用/淘汰理由写入 TRIAGE.md / operator_gap_report.md
    - 任一社区找到且接口匹配 → 下载集成，不走 cannbot
 
 3. **第三段：cannbot 生成新算子**
@@ -126,7 +129,7 @@ boundary=所有有副作用操作仅限 adaptation_path；算子工程放 adapta
    - 读模型源码里算子的调用点（输入/输出张量形状、dtype、是否非连续——见 §2.7 cannbot 算子按裸指针读不遵守 strides）
    - 确认算子在实际模型 config 下的参数（如 实际模型 config 参数（如 num_share、isBlockAggr 等））
 
-**产出**：把获取的参考源码路径 + 算子签名 + golden 实现位置写入 `operators/<op>/docs/TRIAGE.md`（三段式判定 + 参考源码清单），供 Architect/Developer/Reviewer 共用。
+**产出**：把获取的参考源码路径 + 算子签名 + golden 实现位置写入 `operators/<op>/docs/TRIAGE.md`（三段式判定 + 参考源码清单），并保留 `operators/<op>/community_search.json`，供 Architect/Developer/Reviewer 共用。
 
 **重要**：参考源码是 4 角色的基础。Architect 基于它设计、Developer 对照它实现、Reviewer 用 golden 验精度。跳过这步会导致算子设计与原实现不符（曾出现的算子输出与 golden 契约不一致，没对齐参考契约）。
 
@@ -150,6 +153,8 @@ boundary=所有有副作用操作仅限 adaptation_path；算子工程放 adapta
 
 4. **Reviewer**（`subagent_type="AGENTS"`，显式读取 `agents/ascendc-kernel-reviewer.md`）
    - 独立构建验证 + 100 分制评分 + 精度验证
+   - 使用真实 pretrained 权重完成至少 50 个样本的 op-vs-golden fuzz，覆盖实际 dtype、实际与边界 shape、非连续输入、当前 stream 和至少 50 次连续调用
+   - 记录样本数、dtype/shape 列表、MERE/MARE/max_abs_error 等实测值，不接受单一 `precision_verified=true` 作为证据
    - 产出 `REVIEW.md`
 
 **修复循环限制**：单算子修复超 3 轮仍未通过 Reviewer → 暂停，SendMessage 上报 team-lead，不无限循环。
@@ -243,6 +248,8 @@ cannbot 协同适配的资产分两层，不可整体照搬：
 5. **集成就位**：`cannbot_ops.py` 中 `is_enabled(op)` 返回 True，调用点日志打印
 6. **调用证据**：在模型推理路径中实际触发（日志可见 `[cannbot] <op> used: ...`）
 7. **路径合规**：所有产物在 `adaptation_path/operators/<op>/` 和 `adaptation_path/npu_patches/`，无 repo-root 依赖
+8. **结构化清单**：每个算子按 `docs/operator-acceptance-contract.md` 生成 `operators/<op>/acceptance.json`，包含 search/reference/build/validation/integration；执行 `scripts/check_operator_acceptance.py --adapt <adaptation_path>` 通过
+9. **社区搜索完整**：清单引用的 `community_search.json` 必须覆盖 [Ascend](https://gitcode.com/Ascend) 和 [CANN](https://gitcode.com/cann)，且全部枚举仓库扫描成功
 
 ---
 

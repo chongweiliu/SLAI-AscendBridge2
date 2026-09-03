@@ -70,16 +70,17 @@ const CODEX_PATTERNS = [
   '- num_samples > 50（check MIN_BUSINESS_SAMPLE_LOWER_BOUND=50，<=50 报错，用 52）。',
   '',
   '■ 算子缺口方法论（优先级，写进 operator_gap_report.md 每个缺口）：',
-  '- 每缺口列 (a) GitCode CANN recipe (b) Ascend 社区替代算子 (c) cannbot Ascend C 新算子 (d) 采用方案 + 理由。',
-  '- 优先级：纯 torch bit-exact（如 conv_none、attention_torch_sdpa）> GitCode CANN 社区/Ascend 社区现成算子（如 Hunyuan3D render_npu、gaussian_splatting meta_gauss_render）> C++ CppExtension 降级（排除 .cu，aarch64 可编译）> cannbot 新算子。',
-  '- cannbot 新算子只在前三者都不适用时才开发。先用 ascendc-env-check skill 核 NPU arch 在 cannbot 支持矩阵内（如 dav-2201/arch22）。',
+  '- 每缺口列 (a)标准 PyTorch 原生 NPU (b)单一 torch_npu 原生接口 (c)CANN/Ascend 社区实现 (d)cannbot 新算子 (e)采用方案 + 理由。禁止组合多个 torch_npu 接口冒充原生算子。',
+  '- 社区固定入口：https://gitcode.com/Ascend 与 https://gitcode.com/cann。用 scripts/search_operator_communities.py 全量枚举两个组织的所有公开仓库，并完整分页调用 GitCode namespace 代码搜索；禁止 clone/fetch 仓库。任一分页失败或服务端结果截断均不得下“无实现”结论。',
+  '- 优先级：标准 PyTorch 原生 NPU > 单一 torch_npu 原生接口 > CANN 官方/Ascend 社区现成算子 > C++ CppExtension 降级 > cannbot 新算子。',
+  '- cannbot 新算子只在前述方案都不适用且社区搜索报告 complete=true 时开发。先用 ascendc-env-check skill 核 NPU arch 在 cannbot 支持矩阵内（如 dav-2201/arch22）。',
   '- 关键 NPU 小算子坑：scatter_reduce(module)→Tensor.scatter_reduce_(fp32)；coords.max/bincount int32→long（aclnnMaxDim rejects int32）；torchvision Normalize in-place→manual out-of-place（aclnnInplaceCopy fails）。',
   '',
   '■ cannbot 集成模式（npu_patches/cannbot_ops.py）：',
   '- 总开关 CANNBOT_OPS（默认1）+ 逐算子 CANNBOT_{NAME}（默认继承 _DEFAULT_ENABLED）。torch.ops.load_library(so) + hasattr(torch.ops.npu, op) 验证注册。',
   '- idempotent + sticky：_LOADED[name]=True 标记尝试不重试；_AVAILABLE[name] 仅 loaded AND registered 时 True。失败只禁该算子，不影响其他。',
   '- load_all() 在 apply_lazy_patches() 末尾预加载，把 ~5s/so 冷加载移出推理关键路径。',
-  '- 算子 .so 位置：多 adaptation 共享放仓库根 operators/{op}/build/*.so；仅本模型放 adaptation 内 operators/。',
+  '- 算子源码、搜索报告、验收清单和 .so 均放 adaptation_path/operators/{op}/，不得依赖仓库根 operators/。',
   '- 已知 pitfall：vector-core exception 507035 → 禁标量 GetValue/SetValue relay，改批量 ReduceSum Pattern::Reduce::AR；UB 192KB 限制下大 Co 走 gather-scatter fallback。kernel 实测慢于 torch fallback 则默认关（如 SPCONV_SKIP_CANNBOT=1）但保留 kernel+设计文档。',
   '',
   '■ CUDA 扩展降级 CppExtension（aarch64 无 nvcc）：',
@@ -162,9 +163,22 @@ const GAP_SCHEMA = {
           rationale: { type: 'string' },
           ub_limit: { type: 'string' },
           precision_req: { type: 'string' },
-          location: { type: 'string', enum: ['repo_root', 'adaptation_local'] },
+          location: { type: 'string', enum: ['adaptation_local'] },
+          torch_npu_native_interface_found: { type: 'boolean' },
+          torch_npu_native_evidence: { type: 'string' },
+          torch_npu_composed_implementation_used: { type: 'boolean' },
+          community_search_report: { type: 'string' },
+          community_search_complete: { type: 'boolean' },
+          existing_community_implementation_found: { type: 'boolean' },
+          community_candidates_reviewed: { type: 'boolean' },
         },
-        required: ['op_name', 'math', 'gap_type', 'decision', 'rationale'],
+        required: [
+          'op_name', 'math', 'gap_type', 'decision', 'rationale',
+          'torch_npu_native_interface_found', 'torch_npu_native_evidence',
+          'torch_npu_composed_implementation_used', 'community_search_report',
+          'community_search_complete', 'existing_community_implementation_found',
+          'community_candidates_reviewed',
+        ],
         additionalProperties: false,
       },
     },
@@ -221,10 +235,23 @@ const CANNBOT_REVIEW_SCHEMA = {
     review_path: { type: 'string' },
     score: { type: 'integer' },
     precision_verified: { type: 'boolean' },
+    pretrained_verified: { type: 'boolean' },
+    sample_count: { type: 'integer' },
+    golden_verified: { type: 'boolean' },
+    dtype_cases: { type: 'array', items: { type: 'string' } },
+    shape_cases: { type: 'array', items: { type: 'string' } },
+    non_contiguous_verified: { type: 'boolean' },
+    stream_consistency_verified: { type: 'boolean' },
+    repeat_calls: { type: 'integer' },
+    metrics: { type: 'object' },
     success: { type: 'boolean' },
     notes: { type: 'string' },
   },
-  required: ['op_name', 'score', 'precision_verified', 'success'],
+  required: [
+    'op_name', 'score', 'precision_verified', 'pretrained_verified', 'sample_count',
+    'golden_verified', 'dtype_cases', 'shape_cases', 'non_contiguous_verified',
+    'stream_consistency_verified', 'repeat_calls', 'metrics', 'success',
+  ],
   additionalProperties: false,
 }
 
@@ -235,10 +262,18 @@ const INTEGRATION_SCHEMA = {
     loader_path: { type: 'string', description: 'npu_patches/cannbot_ops.py' },
     e2e_stable: { type: 'boolean' },
     e2e_calls: { type: 'integer' },
+    libraries_loaded: { type: 'boolean' },
+    registrations_verified: { type: 'boolean' },
+    fallback_used: { type: 'boolean' },
+    acceptance_manifests: { type: 'array', items: { type: 'string' } },
     success: { type: 'boolean' },
     notes: { type: 'string' },
   },
-  required: ['ops_integrated', 'loader_path', 'e2e_stable', 'success'],
+  required: [
+    'ops_integrated', 'loader_path', 'e2e_stable', 'e2e_calls',
+    'libraries_loaded', 'registrations_verified', 'fallback_used',
+    'acceptance_manifests', 'success',
+  ],
   additionalProperties: false,
 }
 
@@ -435,15 +470,16 @@ const gapPrompt = [
     ? [
         '【REPLAY】不重跑 profile。只读现有工件重建候选清单：',
         '1. 读 ' + ctx.adaptation_path + '/operator_gap_report.md（若存在）。',
-        '2. 读 ' + ctx.adaptation_path + '/npu_patches/cannbot_ops.py 与仓库根 operators/ 下已被集成的算子目录，反推 decision=ascend_c 的算子清单（按模型实际缺口，如 hashmap_3d / submanifold_conv3d / qef_solve_3x3 / uv_rasterize_interp / sparse_grid_sample_3d / SSM 算子 / 稀疏注意力算子 等）。',
+        '2. 读 ' + ctx.adaptation_path + '/npu_patches/cannbot_ops.py 与 ' + ctx.adaptation_path + '/operators/ 下已被集成的算子目录，反推 decision=ascend_c 的算子清单（按模型实际缺口，如 hashmap_3d / submanifold_conv3d / qef_solve_3x3 / uv_rasterize_interp / sparse_grid_sample_3d / SSM 算子 / 稀疏注意力算子 等）。',
         '3. 不修改任何文件。',
       ].join('\n')
     : [
         '1. 跑 trace / demo 或 accuracy_run 带 --profile-level L1，定位 CPU fallback 算子与性能热点。',
-        '2. 产 ' + ctx.adaptation_path + '/operator_gap_report.md：每个缺口写明 功能、输入/输出/语义、缺口类型（precision/performance/missing）、四条方案 (a)GitCode CANN recipe (b)Ascend 社区替代算子 (c)cannbot Ascend C 新算子 (d)采用方案 + 理由、UB/精度约束。',
-        '3. 【优先级，严格按序】纯 torch bit-exact（conv_none/attention_torch_sdpa）> GitCode CANN 社区/Ascend 社区现成算子（Hunyuan3D render_npu / gaussian_splatting meta_gauss_render）> C++ CppExtension 降级（排除 .cu）> cannbot 新算子。cannbot 只在前三者都不适用时才 decision=ascend_c。先用 ascendc-env-check skill 核 NPU arch 在 cannbot 支持矩阵内。',
-        '4. 仅列真正值得 cannbot 补齐的算子（精度关键如 sparse conv fp32 累加；性能关键如 hashmap 邻居查找、QEF、UV rasterize、sparse grid_sample）。python shim 可接受则 decision=shim；无价值则 skip。',
-        '5. 对 decision=ascend_c 的算子给出 location：多 adaptation 共享 → repo_root（仓库根 operators/）；仅本模型 → adaptation_local。',
+        '2. 先查标准 PyTorch 原生 NPU dispatch，再查 torch_npu 是否存在单一、公开、语义等价的原生接口。若没有这种接口，结论必须是 torch_npu_native_interface_found=false；禁止把多个 torch_npu 接口拼装后声称原生接口存在，也禁止采用这种拼装作为本阶段的算子补齐方案。',
+        '3. 对每个缺口运行 scripts/search_operator_communities.py：通过 API 枚举 https://gitcode.com/Ascend 和 https://gitcode.com/cann 的全部公开仓库，并对两个 namespace 的每个关键词完整翻页搜索。禁止 clone/fetch 仓库。查询词覆盖 aten 名、Python API、CUDA/Triton 名、模型函数名和语义同义词。报告写到 operators/<op>/community_search.json。脚本非零退出、服务端截断或 report.complete!=true 时只能返回 search_incomplete，不得判定社区无实现。',
+        '4. 产 ' + ctx.adaptation_path + '/operator_gap_report.md：逐项引用 community_search.json 中的仓库、commit 和命中链接；写明功能、输入/输出/语义、缺口类型、候选可用性、采用方案、UB 与精度约束。',
+        '5. 【优先级，严格按序】标准 PyTorch 原生 NPU > 单一 torch_npu 原生接口 > CANN 官方/Ascend 社区现成算子 > C++ CppExtension 降级 > cannbot 新算子。cannbot 只在前述方案均不适用且社区全量搜索完成时才 decision=ascend_c。',
+        '6. 仅列真正值得 cannbot 补齐的算子。python shim 可接受则 decision=shim；无价值则 skip。decision=ascend_c 时 location 必须为 adaptation_local。',
       ].join('\n'),
   '返回 schema：has_gap / report_path / candidates[]。',
 ].join('\n')
@@ -457,6 +493,18 @@ const gap = await agent(gapPrompt, {
 log('OperatorGap: has_gap=' + gap.has_gap + ' candidates=' + gap.candidates.length)
 
 const ascendOps = gap.candidates.filter(function (c) { return c.decision === 'ascend_c' })
+const invalidSearchOps = ascendOps.filter(function (op) {
+  return op.torch_npu_native_interface_found ||
+    op.torch_npu_composed_implementation_used ||
+    !op.community_search_complete ||
+    op.existing_community_implementation_found ||
+    !op.community_candidates_reviewed ||
+    !op.community_search_report
+})
+if (invalidSearchOps.length > 0) {
+  log('OperatorGap 搜索门禁失败：' + invalidSearchOps.map(function (op) { return op.op_name }).join(', '))
+  return { model_id: modelId, stage: 'OperatorGap', status: 'search_incomplete_or_existing_solution', gap }
+}
 
 // ───────────────────────────── Stage 3: CannbotDev ─────────────────────────────
 
@@ -470,10 +518,10 @@ if (gap.has_gap && ascendOps.length > 0) {
       '',
       '你是 adapter。任务【REPLAY 验证】：确认 codex 已开发的 cannbot 算子与集成 loader 仍可用。',
       '1. 只读检查 ' + ctx.adaptation_path + '/npu_patches/cannbot_ops.py 存在且能 import（不修改）。',
-      '2. 只读检查仓库根 operators/ 下各算子 .so 存在：' + ascendOps.map(function (o) { return o.op_name }).join(' / '),
+      '2. 只读检查 adaptation_path/operators/ 下各算子 .so、community_search.json 和 acceptance.json 存在：' + ascendOps.map(function (o) { return o.op_name }).join(' / '),
       '3. 不重新开发、不重新编译、不修改文件。',
-      '4. 若都存在且 loader 可加载：success=true，ops_integrated=算子清单，e2e_stable=true（沿用历史验证）。',
-      '返回 schema：ops_integrated / loader_path / e2e_stable / e2e_calls / success / notes。',
+      '4. 运行 scripts/check_operator_acceptance.py --adapt ' + ctx.adaptation_path + '。只有清单通过且 loader 实际加载/注册成功时 success=true；不得仅沿用历史结论。',
+      '返回 schema：ops_integrated / loader_path / e2e_stable / e2e_calls / libraries_loaded / registrations_verified / fallback_used / acceptance_manifests / success / notes。',
     ].join('\n')
     integration = await agent(integPrompt, {
       agentType: 'adapter',
@@ -482,13 +530,16 @@ if (gap.has_gap && ascendOps.length > 0) {
       label: 'integrate-verify',
     })
     log('CannbotDev [REPLAY] 验证：success=' + integration.success + ' ops=' + integration.ops_integrated.length)
+    if (!integration.success || !integration.e2e_stable || integration.e2e_calls < 50 ||
+        !integration.libraries_loaded || !integration.registrations_verified || integration.fallback_used ||
+        integration.ops_integrated.length !== ascendOps.length || integration.acceptance_manifests.length !== ascendOps.length) {
+      return { model_id: modelId, stage: 'CannbotDev', status: 'operator_integration_failed', integration }
+    }
   } else {
     log('CannbotDev: 对 ' + ascendOps.length + ' 个算子跑 cannbot 4 步子流程（pipeline 无 barrier）')
 
   function operatorsDirFor(op) {
-    return op.location === 'adaptation_local'
-      ? ctx.adaptation_path + '/operators/' + op.op_name
-      : '$PROJECT_ROOT/operators/' + op.op_name
+    return ctx.adaptation_path + '/operators/' + op.op_name
   }
 
   function archPrompt(op) {
@@ -501,6 +552,7 @@ if (gap.has_gap && ascendOps.length > 0) {
       '算子数学定义：' + op.math,
       '缺口类型：' + op.gap_type + '；精度要求：' + (op.precision_req || '对齐 torch 参考实现') + '；UB 限制：' + (op.ub_limit || '默认 192KB') + '。',
       '背景：该算子是模型 ' + modelId + ' 在 Ascend NPU 上的 CPU fallback / 性能瓶颈，需要补齐为 Ascend C 直调算子，注册为 torch.ops.npu.' + op.op_name + '。',
+      '设计前必须读取 ' + op.community_search_report + '，并先获取上游 CUDA/Triton 原始实现、纯 Torch golden 和模型真实调用契约；路径写入 operators/' + op.op_name + '/docs/TRIAGE.md。缺少任一项时 success=false。',
       '产出：DESIGN.md + PLAN.md（写入工作目录）。遵循 CANNBot 工作流规范。',
       '返回 schema：op_name / design_path / plan_path / success / notes。',
     ].join('\n')
@@ -540,7 +592,8 @@ if (gap.has_gap && ascendOps.length > 0) {
       '你是 ascendc-kernel-reviewer。任务：独立审查 ' + op.op_name + ' 的代码与精度。',
       '工作目录：' + operatorsDirFor(op) + '。读取已实现代码与测试。',
       '独立构建验证、100 分制代码质量评估、精度验证，产出 REVIEW.md。',
-      '返回 schema：op_name / review_path / score / precision_verified / success / notes。',
+      '必须使用真实 pretrained 权重完成至少 50 个样本的 op-vs-golden fuzz；覆盖实际 dtype、实际与边界 shape、非连续输入、当前 stream，以及不少于 50 次连续调用。记录实际误差指标，不能只返回 PASS。',
+      '返回 schema：op_name / review_path / score / precision_verified / pretrained_verified / sample_count / golden_verified / dtype_cases / shape_cases / non_contiguous_verified / stream_consistency_verified / repeat_calls / metrics / success / notes。',
     ].join('\n')
   }
 
@@ -560,8 +613,16 @@ if (gap.has_gap && ascendOps.length > 0) {
     }
   )
 
-  const okOps = cannbotResults.filter(Boolean).filter(function (r) { return r.success && r.precision_verified })
+  const okOps = cannbotResults.filter(Boolean).filter(function (r) {
+    return r.success && r.precision_verified && r.pretrained_verified && r.sample_count >= 50 &&
+      r.golden_verified && r.dtype_cases.length > 0 && r.shape_cases.length > 0 &&
+      r.non_contiguous_verified && r.stream_consistency_verified && r.repeat_calls >= 50 &&
+      Object.keys(r.metrics || {}).length > 0
+  })
   log('CannbotDev: ' + okOps.length + '/' + ascendOps.length + ' 算子通过设计与精度审查')
+  if (okOps.length !== ascendOps.length) {
+    return { model_id: modelId, stage: 'CannbotDev', status: 'operator_validation_failed', passed: okOps.length, expected: ascendOps.length }
+  }
 
   // 集成阶段
   const integPrompt = [
@@ -571,9 +632,10 @@ if (gap.has_gap && ascendOps.length > 0) {
     '已通过算子（torch_op_name）：' + okOps.map(function (o) { return o.op_name }).join(', '),
     '1. 写 cannbot_ops.py：CANNBOT_OPS 总开关 + 逐算子 CANNBOT_{OP} 覆盖，默认开启；加载各 .so，注册 torch.ops.npu.{op}。',
     '2. e2e 稳定性验证：在真实 pipeline 中多次调用（如 24 层 × 50 样本连续调用，含大 N/Cin/Co 配置），e2e_stable=true。',
-    '3. 【诚实降级（v1 教训）】若某 kernel 实测慢于 torch fallback，默认关闭该算子（如 SPCONV_SKIP_CANNBOT=1），但保留 kernel + 设计文档。',
-    '4. 把 .so 路径、torch_op_name、enabled_by_default 记入 notes。',
-    '返回 schema：ops_integrated / loader_path / e2e_stable / e2e_calls / success / notes。',
+    '3. 若 kernel 实测慢于原方案或必须默认关闭，保留源码和设计文档，但 success=false；不得把禁用或 fallback 状态计为 operator_gap_fixed。',
+    '4. 每个算子生成 operators/<op>/acceptance.json，完整填写 search/reference/build/validation/integration 结构化证据；运行 scripts/check_operator_acceptance.py --adapt ' + ctx.adaptation_path + ' 并通过。',
+    '5. 把 .so 路径、torch_op_name、enabled_by_default 记入 notes。验收运行期间禁止 fallback。',
+    '返回 schema：ops_integrated / loader_path / e2e_stable / e2e_calls / libraries_loaded / registrations_verified / fallback_used / acceptance_manifests / success / notes。',
   ].join('\n')
 
   integration = await agent(integPrompt, {
@@ -583,6 +645,11 @@ if (gap.has_gap && ascendOps.length > 0) {
     label: 'integrate',
   })
   log('CannbotDev 集成：e2e_stable=' + integration.e2e_stable + ' ops=' + integration.ops_integrated.length)
+  if (!integration.success || !integration.e2e_stable || integration.e2e_calls < 50 ||
+      !integration.libraries_loaded || !integration.registrations_verified || integration.fallback_used ||
+      integration.ops_integrated.length !== ascendOps.length || integration.acceptance_manifests.length !== ascendOps.length) {
+    return { model_id: modelId, stage: 'CannbotDev', status: 'operator_integration_failed', integration }
+  }
   } // end non-REPLAY cannbot dev
 } else {
   log('OperatorGap 无 ascend_c 算子，跳过 CannbotDev，直进 Benchmark')

@@ -40,7 +40,7 @@ Skill 与全部 references/scripts 位于 `.claude/skills/ascend-torch-cpt/`。�
 
 v2.2 新增 `cannbot-adapter` Agent、CANNBot 协同工作流和项目内同步脚本，用于处理AscendBridge自动适配调优无法覆盖的算子兼容与性能问题。
 
-- 采用四级决策顺序：优先使用可在 Ascend 上直接执行的标准 PyTorch 算子；标准实现存在功能缺口或经 profiling 确认性能不达标时，再尝试 `torch_npu` 提供的昇腾专用接口或优化实现；随后复用 GitCode 上 CANN 与昇腾社区的已有方案；只有这些路径均不可行时，才调用 CANNBot 生成 Ascend C 自定义算子
+- 采用四级决策顺序：优先使用可在 Ascend 上直接执行的标准 PyTorch 算子；随后只接受 `torch_npu` 提供的单一、公开、语义等价的原生接口（没有单一接口就判定没有，禁止组合多个接口冒充原生算子）；再通过 GitCode 服务端 API 全量枚举并搜索 [CANN](https://gitcode.com/cann) 与 [Ascend](https://gitcode.com/Ascend) 社区，禁止为搜索下载仓库；只有这些路径均不可行且搜索报告完整时，才调用 CANNBot 生成 Ascend C 自定义算子
 - 仅在真正进入第四级方案时执行 `scripts/sync_cannbot.sh --print-path`；脚本每次都会检查 `https://gitcode.com/cann/cannbot-skills.git` 的 `master` 最新版本
 - CANNBot 只下载到当前项目的 `.cache/cannbot/cannbot-skills/`，该目录已被 Git 忽略；仓库不内置其源码，也不会在项目外或 Claude 全局目录安装插件
 - 同步过程不会修改 `~/.claude/settings.json`，运行时也不会加载 CANNBot 根目录的 `AGENTS.md`、`CLAUDE.md` 或 `SessionStart` Hook，因此普通 Claude 会话仍将自己识别为 **SLAI-AscendBridge2**，不会自称 CANNBot
