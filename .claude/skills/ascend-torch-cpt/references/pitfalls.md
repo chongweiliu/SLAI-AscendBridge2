@@ -653,3 +653,59 @@ sys.meta_path.insert(0, _StubFinder())
 - **根因**：checkpoint 的能量输出是"去 per-element 参考"口径（OC20 All+MD 训练数据语义），extxyz 标签是 raw DFT 总能量，差 Σ N_el×ref_el（数百 eV 量级）。
 - **解法（定位三步）**：①逐帧打印 pred/true，发现 err∝natoms 且 err/natoms 随元素波动 → per-element 偏移指纹；②**最小二乘反解**：`E_raw − E_pred = A·ref`（A=每帧元素计数矩阵，≥元素数个帧）——残差骤降（368→2 eV）即证实；③训练 target 减 Σref、评估预测加回，统一 raw 口径。更精 ref 表（≥500 帧或官方 fit_references 脚本）可把残差压到 0.2 eV 级。
 - **通用**：跨口径（去参考 vs raw）能量差可达数百 eV，先查口径再谈模型精度；**力不受能量平移影响，是跨口径唯一可靠的先验对比指标**（MatterSim #93 同结论）；MLIP 力指标聚合口径必须写明（原子加权 vs 帧级可差 5×，EquiformerV2 实测 CPT 后两口径方向相反）。
+
+## 101. CPT 前必扫权重 NaN：safetensors 比特损坏尺寸校验无法发现（Qwen3-1.7B + OLMoE CPT 实证）
+- **症状**：训练第一步 loss=NaN；纯 fp32 前向也 NaN（与 autocast/NPU 无关）；`safetensors.torch.load_file` 加载不报错（文件结构完整，个别 tensor 内部有 NaN/Inf）。
+- **根因**：大文件下载过程中镜像 CDN/网络抖动导致**比特级静默损坏**——文件尺寸完全正确（`stat -c%s` 与 API 声称一致），但个别 tensor 的部分元素被改写为 NaN 或 1e38 级异常值。Qwen3-1.7B 的 `lm_head.weight` 有 80/311M 个 NaN + max=2.5e38；OLMoE 两个分片共 1065 个 NaN（分散在 `mlp.experts.*` 的 down/gate/up_proj）。
+- **铁律**：CPT 启动前（smoke 之前）**必须**对所有 `.safetensors` 做全量 NaN 扫描：
+  ```python
+  from safetensors.torch import load_file
+  import torch, glob
+  for f in sorted(glob.glob(f"{MODEL_DIR}/*.safetensors")):
+      for k, v in load_file(f).items():
+          n = int(torch.isnan(v).sum())
+          if n: print(f"CORRUPT {f} {k}: {n} NaN")
+  ```
+  耗时：2B 模型 ~30s，6.9B ~3min（CPU 即可，不占 NPU）。
+- **诊断顺序**：smoke 出 NaN → 先 CPU 前向（排除 NPU 算子问题）→ CPU 也 NaN → 扫权重 → 发现 NaN 即确认是权重问题（不是环境/autocast/attention impl）。
+- **修复**：删损坏分片后从可靠源（ModelScope 或 hf-mirror 恢复期）重下；重下后再扫一次确认 0 NaN。
+- **判定要点**：文件尺寸正确 ≠ 内容正确；`from_pretrained` 不报错 ≠ 权重干净（NaN 在 tensor 内部，safetensors header 完整）。
+
+## 102. FSDP2 模板 getattr 急切求值：对无 transformer 属性的模型直接 AttributeError（OLMoE CPT 实证）
+- **症状**：`cpt_fsdp.py` 在 `OlmoeForCausalLM` 上 `AttributeError: 'OlmoeForCausalLM' object has no attribute 'transformer'`，FSDP2 4 卡 smoke 直接崩溃。
+- **根因**：模板原写 `getattr(model.model,'layers',model.transformer.h)`——Python 的 `getattr(obj, name, default)` 中 **default 参数是急切求值的**：即使 `model.model.layers` 存在，`model.transformer.h` 也会被先求值作为 default 值；对没有 `transformer` 属性的模型（OLMoE 用 `model.model.layers`，无 `model.transformer`），`model.transformer` 直接 AttributeError。
+- **解法**：改用 `hasattr` 短路（模板已修复）：
+  ```python
+  inner = model.model if hasattr(model, 'model') else model.transformer
+  layers = inner.layers if hasattr(inner, 'layers') else inner.h
+  ```
+- **通用**：`getattr(obj, name, default_expr)` 的 `default_expr` **总是会被求值**（不是惰性的）；当 default 是属性访问链且可能不存在时，务必用 `hasattr` 或 `try/except` 替代。
+- **判定要点**：FSDP2 启动阶段 AttributeError 且属性名是 `transformer`/`h` → 检查 getattr default 是否急切求值。
+
+## 103. 大词表 CE OOM：Qwen3(151936 vocab) × fp32 logits 显存爆炸（Qwen3-1.7B CPT 实证）
+- **症状**：Qwen3-1.7B（vocab=151936, seq=2048, bs=8）单卡 64GB OOM——`cross_entropy_loss` 尝试分配 9.28GB，已占 56GB 后仅剩 4.5GB free。
+- **根因**：CE loss 的 logits 张量 = `bs × seq × vocab × 4bytes(fp32)` = `8 × 2048 × 151936 × 4 ≈ 9.3GB`；加上 log_softmax 中间态 ×2 ≈ 28GB 仅 CE 部分；64GB 卡放不下权重(4GB fp32) + 优化器(16GB) + 激活 + CE 中间态。
+- **解法（梯度累积回退阶梯）**：①bs 8→4 + GRAD_ACCUM=2（保持有效 batch=8）；②仍 OOM → bs 2 + GRAD_ACCUM=4；③仍 OOM → 降 SEQ_LEN 2048→1024；④终极：用 `LigerKernel` 或手写 chunked CE（分段算 log_softmax+gather，不实例化完整 logits）；⑤**优先降 bs + 开梯度检查点**，不要降 SEQ_LEN（短序列损害长程依赖学习）。
+- **经验阈值**：`vocab > 100K` 的模型（Qwen 系 151936、LLaMA3 128256）在 64GB 单卡上 bs×seq > 8192 就要警惕 CE OOM；`vocab < 50K`（OLMoE 50304、SmolLM2 49152）几乎不会 CE OOM。
+- **判定要点**：OOM 报错中 `cross_entropy_loss` / `Tried to allocate X GiB` 且 X 与 `bs×seq×vocab×4` 同量级 → CE OOM，降 bs+梯度累积。
+
+## 104. eval_cpt.py 不支持独立验证集：只有 held-out split，无法用预先准备的验证文件（4模型 CPT 实证）
+- **症状**：用户预先采样了 10 条验证集到 `val_sample.jsonl`，但 `eval_cpt.py` 模板只从 `DATA_FILE` 做 held-out split（`idx[n_tr:]`），不支持读独立的 `VAL_FILE`；强行把 `DATA_FILE` 指向验证文件会导致 held-out 逻辑错乱（total=10, n_tr=1, held=9 条全用）。
+- **解法**：模板已加 `VAL_FILE` 环境变量（优先级 > held-out split）：
+  ```bash
+  export VAL_FILE=$WS_DIR/val_sample.jsonl  # 独立验证集（10条，训练未使用）
+  # 或不设 VAL_FILE，自动从 DATA_FILE held-out split（原行为不变）
+  ```
+- **通用**：评估脚本应支持"独立验证集"和"held-out split"两种模式，独立验证集优先——它保证验证数据**绝对未被训练使用**（held-out split 依赖种子一致性，数据预处理改了种子就漏）。
+- **判定要点**：用户提供了独立验证文件但评估结果异常 → 检查脚本是否支持 VAL_FILE。
+
+## 105. prepare_data 全量 tokenize 浪费 + smoke 首步耗时不可外推（4模型 CPT 实证）
+- **症状 A（数据浪费）**：Qwen2.5-Coder 的 codeparrot 3 万条样本全量 tokenize 耗时 10min+，但训练 200 步只需 1600 块（~3.3M tokens）；OLMoE 的 wikitext 11 万行更久。
+- **解法 A**：`prepare_data.py` 已加 `CAP_TOKENS` 环境变量——tokenize 到指定上限即停：
+  ```bash
+  export CAP_TOKENS=15000000  # ~15M tokens 足够 200 步 × bs 8 × seq 2048 = 3.3M 块
+  ```
+  耗时从 10min 降到 2min。设 0 = 不限制（原行为不变）。
+- **症状 B（首步虚高）**：Qwen3-1.7B smoke 首步 12s，稳态 1.04s/步——首步含 NpuFusedAdamW 优化器状态初始化（ fused kernel 编译 + buffer 分配），10×+ 虚高。
+- **解法 B**：smoke 取**第 2 步**的 s/step 外推总时长；或 smoke ≥3 步取后 2 步均值。已在 SKILL.md 阶段 6 标注（`首 import ~90s 摊进前几步虚高，取稳态步`），此处补充"NpuFusedAdamW 首步初始化"这一具体根因。
+- **判定要点**：smoke 第 1 步 s/step > 第 2 步 3×+ → 优化器初始化开销，取稳态步外推。

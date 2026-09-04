@@ -38,6 +38,7 @@ MODEL_DIR=os.environ["MODEL_DIR"]; DATA_FILE=os.environ["DATA_FILE"]; WS_DIR=os.
 OUT=os.path.join(WS_DIR,"outputs"); CKPT=os.path.join(OUT,"cpt_model_state.pt")
 DEVICE="npu:0"; SEED=int(os.environ.get("SEED","42")); N_VAL=int(os.environ.get("N_VAL","10"))
 RATIO=float(os.environ.get("RATIO","1.0")); TRAIN_RATIO=RATIO  # 训练用的比例，held-out=其余
+VAL_FILE=os.environ.get("VAL_FILE","")  # 独立验证集路径(优先于 held-out split, #104)
 MAX_NEW=int(os.environ.get("MAX_NEW","128"))
 REMAP=os.environ.get("REMAP","0")=="1"
 
@@ -82,12 +83,18 @@ def main():
     torch.npu.set_device(0)
     tok=AutoTokenizer.from_pretrained(MODEL_DIR,trust_remote_code=True)
     if tok.pad_token is None: tok.pad_token=tok.eos_token
-    recs=[json.loads(l) for l in open(DATA_FILE,encoding='utf-8') if l.strip()]
-    total=len(recs); n_tr=int(total*TRAIN_RATIO)
-    rng=random.Random(SEED); idx=list(range(total)); rng.shuffle(idx)
-    held=idx[n_tr:]; val=[recs[i] for i in held[:N_VAL]]
+    # 验证集来源(优先级: VAL_FILE 独立验证集 > 从训练集 held-out split, #104)
+    if VAL_FILE and os.path.exists(VAL_FILE):
+        val=[json.loads(l) for l in open(VAL_FILE,encoding='utf-8') if l.strip()][:N_VAL]
+        held=list(range(len(val)))
+        print(f"[val] VAL_FILE={VAL_FILE} 取 {len(val)} 条(独立验证集)",flush=True)
+    else:
+        recs=[json.loads(l) for l in open(DATA_FILE,encoding='utf-8') if l.strip()]
+        total=len(recs); n_tr=int(total*TRAIN_RATIO)
+        rng=random.Random(SEED); idx=list(range(total)); rng.shuffle(idx)
+        held=idx[n_tr:]; val=[recs[i] for i in held[:N_VAL]]
+        print(f"[val] held_out={len(held)} 取 {len(val)} 条(训练集 held-out)",flush=True)
     json.dump(val,open(os.path.join(OUT,'val_samples.json'),'w',encoding='utf-8'),ensure_ascii=False,indent=2)
-    print(f"[val] held_out={len(held)} 取 {len(val)} 条",flush=True)
     res={"base":[],"cpt":[]}; summ={}
     for tag in ["base","cpt"]:
         print(f"\n===== eval {tag} =====",flush=True)

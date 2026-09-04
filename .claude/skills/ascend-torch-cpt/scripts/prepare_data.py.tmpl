@@ -15,6 +15,7 @@ NUM_STEPS=int(os.environ.get("NUM_STEPS","100"))
 BATCH_SIZE=int(os.environ.get("BATCH_SIZE","16"))
 WORLD_SIZE=int(os.environ.get("WORLD_SIZE","1"))
 SEED=int(os.environ.get("SEED","42"))
+CAP_TOKENS=int(os.environ.get("CAP_TOKENS","0"))  # 打包token上限(0=不限制); 只需少量块时避免全量tokenize, #105
 random.seed(SEED); torch.manual_seed(SEED)
 
 def read_records(path):
@@ -71,6 +72,7 @@ def main():
     if tok.pad_token is None: tok.pad_token=tok.eos_token
     all_ids=[]
     for rec in subset:
+        if CAP_TOKENS and len(all_ids)>=CAP_TOKENS: break  # #105: 够量即停, 避免全量 tokenize
         ids=to_text_tokens(rec,tok)
         if ids: all_ids.extend(ids)
     n_tok=len(all_ids); n_raw=n_tok//SEQ_LEN
