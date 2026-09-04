@@ -76,11 +76,12 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - **第一步：源可达性矩阵探测（~30s，必做）**：`bash robust_download.sh probe`（从 `scripts/robust_download.sh.tmpl` 复制）探测**当日**可用性（hf-mirror/huggingface/modelscope/github/raw/codeload/zenodo），先建"当日可用源清单"再定路线，**不按历史经验盲试**（源逐日漂移 #89）。权重降级链：本地 → ModelScope → Zenodo（API 拿清单+md5）→ hf-mirror（禁 Xet #38）→ GitHub（三级降级+截断抢救 #90）。
 - 大权重文件优先 ModelScope `resolve/master/<file>` 直链；**官方示例数据/权重可能只在某一平台镜像目录**（GitHub ≠ ModelScope 镜像；全网按名搜索失败 ≠ 不存在，递归列全平台目录树+官方 config 相对路径线索，#94）。
 - **大文件下载与开发并行**：下载挂后台后立刻用小子集推进阶段 3-6，勿干等；大文件用 `robust_download.sh get`（多路 Range+分块断点续传+size/md5 终检，`sha256:` 前缀支持），小文件用 `fetch`；GB 级 tarball 下完必须流级校验（`gzip -t`，#68）。**下载是长跑阶段**：按 T4 每 1–2min 刷进度。
+- **CPT 前必扫权重 NaN**（#101）：safetensors 尺寸正确 ≠ 内容正确（比特级损坏致 lm_head 80 NaN）；smoke 前用 `load_file` 全量 `torch.isnan` 扫描（2B~30s, 7B~3min），出 NaN 先 CPU 前向确认再重下损坏分片。
 - 非 PyTorch 原生权重（Keras `.pkl`/`.h5`）：pickle 纯 numpy 元组可直接解包（无需 TF），逐层复刻 PyTorch 架构后做**形状严格校验+同形交换消融+语义 sanity**三重验证（#84–#86）。
 - 数据集只有 train 分割时用 seed 重建 held-out（references/eval-metrics.md）。
 
 ### 阶段 3 · 语料格式转换与打包（按范式分支）
-- **A. 文本 LM**：读语料（jsonl/json/parquet/csv）→ 判定格式（chat `{"messages"}` 用 `apply_chat_template`；`{"text"}` 直接 tokenize；其它取可读字段）→ 打包 `seq_len` 定长块（不足步数则循环重采样，记录 epoch 数）→ `scripts/prepare_data.py.tmpl`，**务必打印**总样本/子集样本/总 token/块数/epoch 估计。数据边界（去重/分块/混合/packing vs padding）见 references/data-prep.md。**多卡必设 `WORLD_SIZE=N`**（否则 need 算少→内循环重复采样）。
+- **A. 文本 LM**：读语料（jsonl/json/parquet/csv）→ 判定格式（chat `{"messages"}` 用 `apply_chat_template`；`{"text"}` 直接 tokenize；其它取可读字段）→ 打包 `seq_len` 定长块（不足步数则循环重采样，记录 epoch 数）→ `scripts/prepare_data.py.tmpl`，**务必打印**总样本/子集样本/总 token/块数/epoch 估计。大语料设 `CAP_TOKENS` 避免 tokenize 浪费（#105）。数据边界（去重/分块/混合/packing vs padding）见 references/data-prep.md。**多卡必设 `WORLD_SIZE=N`**（否则 need 算少→内循环重复采样）。
 - **B. diffusers 生成式**：解码→resize 到原生分辨率→VAE 编码（输入 `[B,C,T,H,W]` #48，编码上 NPU 规避 cgroup OOM #44/#46）→ 缓存 latent+text_emb（预计算-后训练模式）；text_encoder 巨大时可缓存 embedding 或退零嵌入兜底（#49）。用 `prepare_generative_data.py.tmpl`，全流程见 references/generative-diffusion-cpt.md。
 - **C. 音频-LLM**：soundfile 读 16k → `AutoProcessor(text=, audio=)`（单数 kwarg #56）→ labels 掩 pad+prompt+audio 特殊 token（漏 mask 致 loss 虚高 ~8× #58）；forward 须传 input_features**和** feature_attention_mask（#57）；冻 audio_tower+projector 训 language_model。见 references/audio-llm-cpt.md + `cpt_audio_llm.py.tmpl`。
 - **D. MLIP 力场**：ase 读 EXTXYZ（能量+力标签）→ 官方 GraphConverter 构图（cutoff/threebody_cutoff）；能量基准差对齐见阶段 8-D。
@@ -101,8 +102,8 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 ### 阶段 6 · 生成训练脚本并 smoke
 - 按范式选模板：文本 `cpt_train.py.tmpl`（单卡+DDP 自动检测）/`cpt_fsdp.py.tmpl`/`cpt_mp.py.tmpl`；扩散 `cpt_diffusion.py.tmpl`；音频 `cpt_audio_llm.py.tmpl`。模板已支持断点续训（`RESUME=1` 默认关）与梯度累积（references/resume.md）。
 - 模板通用化：文本 `AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 remap；组件分离加载见各范式 reference。
-- **smoke**：2 步确认前向+反向+优化器 step 全通过、loss 合理再上正式；扩散先对 backbone 与 VAE 分别单组件前向 smoke（抓 NPU 算子问题 #50）。**smoke 的 s/step 不可外推正式用时**（首 import ~90s 摊进前几步虚高，取稳态步）。
-- 踩坑先 grep references/pitfalls.md（模板已规避多数）。
+- **smoke**：2 步确认前向+反向+优化器 step 全通过、loss 合理再上正式；扩散先对 backbone 与 VAE 分别单组件前向 smoke（抓 NPU 算子问题 #50）。**smoke 的 s/step 不可外推正式用时**（首 import ~90s + NpuFusedAdamW 首步状态初始化 ~10×虚高，取稳态第 2 步, #105）。
+- 踩坑先 grep references/pitfalls.md（模板已规避多数）。**大词表(>100K vocab) CE OOM** 先降 bs+梯度累积保持有效 batch，不降 seq_len（#103）。**FSDP2 取 transformer 层勿用 getattr 默认值**（急切求值致 AttributeError, #102，模板已修复）。
 - **官方训练栈首次死锁/OOM → 立即 MINREPRO**（模型+collater+单批显存复现，~20 行）定位是模型需求还是栈问题，**禁止盲调 batch/换卡试错**（#95）；栈级不可用则拆组件自管轻量循环。
 
 > **范围声明**：本 skill 覆盖单机多卡（1–8 卡）；多机需 `torchrun --nnodes` + RDMA/HCCL 跨机配置，不在本 skill 范围。
@@ -115,7 +116,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 
 ### 阶段 8 · 训练前后域内评估（按范式分支；对比三原则见 references/eval-metrics.md）
 **通用**：base vs CPT ①严格同条件（同种子一切随机源+确定性自检）②协议锚定（base 关键指标与论文/官方数字同量级才算协议对）③持平可能是正确结论（短程 CPT 域内收敛基座预期 ±1%）；**过拟合检查**：held-out 须独立 split；train loss 趋 0 + held-out 不改善=红旗；**数据量是泛化关键杠杆**（非步数）。多卡训练后别立刻单卡评估（显存异步回收 #32）；评估载入前 `torch.npu.empty_cache()`。
-- **A. 文本 LM**（`eval_cpt.py.tmpl`）：PPL/NLL（公式务必取负 #5）/next-token acc；chat 数据加末轮生成 F1；域内语料用域内指标，勿强行套 MMLU。
+- **A. 文本 LM**（`eval_cpt.py.tmpl`）：PPL/NLL（公式务必取负 #5）/next-token acc；chat 数据加末轮生成 F1；域内语料用域内指标，勿强行套 MMLU。支持 `VAL_FILE` 独立验证集（优先于 held-out split, #104），保证验证数据绝对未被训练使用。
 - **B. diffusers**（`eval_diffusion.py.tmpl`）：固定 σ 算 velocity MSE（Δ<0 训练有效）+ 采样生成定性；勿套 PPL。
 - **C. 音频-LLM**：held-out 转写 CE loss（base 全新 vs CPT `strict=False`，Δ<0 有效）；勿套文本 PPL/velocity MSE。
 - **D. MLIP 力场**（#91–#93）：能量 MAE(eV 与 meV/atom)+力 MAE/RMSE(eV/Å)+力方向余弦；**评估循环禁 @torch.no_grad()**（力=-∂E/∂x 需 autograd 图 #92）；能量基准差用 **shift-only scaling** 对齐（shift 拟合自训练集、scale 保留原值保力基线 #93）；性能用单结构前向+力微分延迟。
