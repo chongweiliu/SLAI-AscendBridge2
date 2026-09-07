@@ -881,3 +881,44 @@ sys.meta_path.insert(0, _StubFinder())
   ```
 - **代价**：模型不学习文本条件 → 生成质量受限；但 CPT 的核心目标（噪声预测/去噪能力）仍有效。
 - **判定要点**：text encoder 显存 > 模型+优化器 → 用 zero embeddings 跳过。
+
+## 121. NPU embedding 不支持 float 索引：所有 index tensor 必须 torch.long（layoutlmv3/dinov2 CPT 实证）
+- **症状**：`RuntimeError: Expected tensor for argument #1 'indices' to have one of the following scalar types: Long, Int; but got torch.FloatTensor` 或 `aclnnEmbedding failed, error code 161002, Tensor indices not implemented for DT_FLOAT`。
+- **根因**：NPU 的 embedding kernel（`aclnnEmbedding`）**不支持 float 索引**，只支持 INT32/INT64；CPU embedding 支持 float→int 自动转换，但 NPU 不会。
+- **影响范围**：所有含 embedding 层的模型（word_embedding、position_embedding、token_type_embedding、coordinate_embedding）。
+- **解法**：确保**所有** index tensor 显式为 `torch.long`：
+  ```python
+  input_ids = input_ids.long().to(device)        # 不是 .float()
+  bbox = bbox.long()                            # coordinate embedding 需要 int 坐标
+  position_ids = torch.arange(L, dtype=torch.long, device=device)  # 显式 long
+  token_type_ids = torch.zeros(B, L, dtype=torch.long, device=device)
+  ```
+- **通用**：任何 NPU 上的 embedding 查找（input_ids、bbox、position_ids、token_type_ids）都必须是 long/int 类型。模型内部自动创建的 position_ids 可能是 float → 需显式传入 long 版本。
+- **判定要点**：embedding/embed 报错 + "got FloatTensor" 或 "DT_FLOAT" → 检查所有 index tensor dtype。
+
+## 122. LayoutLMv3 tokenizer __call__ 要求 bbox：用 backend_tokenizer 绕过（layoutlmv3 CPT 实证）
+- **症状**：`ValueError: You must provide corresponding bounding boxes` — LayoutLMv3Tokenizer 的 `__call__()` 方法强制检查 bbox 参数。
+- **根因**：LayoutLM 系列 tokenizer 设计为多模态（文本+bbox），`__call__()` 内部校验 bbox 非空；纯文本 MLM CPT 无 bbox 数据时无法直接用。
+- **解法**：用 `backend_tokenizer.encode_batch()` 绕过 `__call__` 的 bbox 检查：
+  ```python
+  tok = AutoTokenizer.from_pretrained(MODEL_DIR)  # 加载正常
+  # 不用 tok(texts, ...) — 会报 bbox 错误
+  enc = tok.backend_tokenizer.encode_batch(texts)  # 绕过 bbox 检查
+  input_ids = [e.ids for e in enc]
+  # 手动 pad
+  ```
+- **通用**：任何 LayoutLM 系列模型（LayoutLMv1/v2/v3）在纯文本 CPT 场景都适用。
+- **判定要点**：LayoutLM tokenizer `ValueError: bounding boxes` → 用 `backend_tokenizer.encode_batch()`。
+
+## 123. TimesFM 输出是对象不是 tensor：用 full_predictions 取中位数分位数（timesfm CPT 实证）
+- **症状**：`AttributeError: 'TimesFmOutputForPrediction' object has no attribute 'dim'` — 模型输出不是 tensor，而是自定义对象。
+- **根因**：TimesFmModelForPrediction 返回 `TimesFmOutputForPrediction` 对象，不是 tensor；直接做 `pred[:,-32:]` 会报错。
+- **解法**：访问 `full_predictions` 属性（shape `[B, horizon, num_quantiles]`），取中位数分位数：
+  ```python
+  out = model(past_values=ctx_tensor)  # 输入用 past_values，不是 input_ids
+  pred = out.full_predictions  # [B, 128, 10] (horizon=128, 10 quantiles)
+  pred = pred[:, :32, 5]      # 取前32步, 中位数分位数 → [B, 32]
+  loss = F.mse_loss(pred, target)
+  ```
+- **通用**：任何返回自定义对象（非 tensor）的模型，先检查 `type(out)` 和 `dir(out)`，找到正确的 tensor 属性。
+- **判定要点**：模型输出 `hasattr(out, 'shape')` 为 False → 检查 `type(out)` → 找 tensor 属性。
