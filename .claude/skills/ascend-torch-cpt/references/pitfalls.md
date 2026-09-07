@@ -744,3 +744,58 @@ sys.meta_path.insert(0, _StubFinder())
   - **数据准备**：MLM 用 `prepare_data.py.tmpl`（打包定长块，与 CausalLM 共用）；Seq2Seq 用 `prepare_data_seq2seq.py.tmpl`（保持 src-tgt pair，分别 tokenize）。
   - **评估**：MLM 用 `eval_mlm.py.tmpl`（MLM loss/PPL/masked acc）；Seq2Seq 用 `eval_seq2seq.py.tmpl`（翻译 CE/PPL）。
 - **判定要点**：`AutoModelForCausalLM` 加载报错或 loss 异常 → 检查 `config.model_type` 是否为 encoder/seq2seq 架构。
+
+## 110. ViT/MAE 模型 num_frames 不匹配：checkpoint 的 positional embedding shape 依赖 num_frames（Prithvi CPT 实证）
+- **症状**：`RuntimeError: Error(s) in loading state_dict for PrithviMAE` — key 完全匹配(0 missing, 0 unexpected)，但 `pos_embed` shape 不一致（checkpoint `[784, 1024]` vs model `[196, 1024]`）。
+- **根因**：Prithvi 的 `num_frames` 参数控制时间帧数，直接影响 positional embedding 的 patch 数（`num_frames × (img_size//patch_h) × (img_size//patch_w)` = `4×14×14=784` vs `1×14×14=196`）；checkpoint 用 `num_frames=4` 训练，若创建模型时设 `num_frames=1` 则 pos_embed shape 不匹配。
+- **解法**：①读 config.json 取 `num_frames`（如 4），创建模型时用同样的值；②数据只有单帧时，沿时间维 repeat：`x.unsqueeze(1).repeat(1, num_frames, 1, 1)` 生成 `[C, T, H, W]`。
+- **判定要点**：state_dict key 完全匹配但 load 失败 → 检查 pos_embed/positional_embedding shape → 确认 num_frames 一致。
+
+## 111. GeoTIFF tar.gz 逐文件读取极慢：3+ 分钟仍未完成数据加载（Prithvi CPT 实证）
+- **症状**：从 2.65GB tar.gz 中逐个 `extractfile` + rasterio 读 GeoTIFF，3+ 分钟仍在 "loading GeoTIFFs..."，NPU 空闲等待。
+- **根因**：tar.gz 是流式压缩，访问任意文件都要从头解压到目标位置（O(n) per file）；70 个文件 × ~2.65GB 解压流 = 极慢。
+- **解法**：**先批量预提取到磁盘**（`tarfile.extract` 一次性提取所有需要的 .tif 文件到本地目录，~1min 完成），再用 rasterio 从磁盘读（每个文件 <1s）：
+  ```python
+  import tarfile
+  t = tarfile.open(tar_path, 'r:*')
+  for name in t.getnames():
+      if name.endswith('.tif') and '/._' not in name:
+          t.extract(name, 'tif_data')  # 批量提取
+  t.close()
+  # 然后用 rasterio.open(disk_path) 读
+  ```
+- **判定要点**：数据加载时间 >> 训练时间 → 检查是否从 tar.gz 逐文件读取 → 预提取到磁盘。
+
+## 112. Science 模型用自定义代码加载：prithvi_mae.py 非 AutoModel 可加载（Prithvi CPT 实证）
+- **症状**：`AutoConfig.from_pretrained` 报 `TimmWrapperConfig requires timm` 或 config 字段全 None；`AutoModel.from_pretrained` 找不到对应类。
+- **根因**：Science/科研模型常把自定义实现代码（如 `prithvi_mae.py`）放在模型目录里，config.json 是 timm 风格（`{"architecture":"prithvi_eo_v2_300", ...}`），不是标准 transformers `architectures` 字段。
+- **解法**：`sys.path.insert(0, MODEL_DIR)` + 直接 import 自定义类 + 手动构造 + `load_state_dict`：
+  ```python
+  import sys; sys.path.insert(0, MODEL_DIR)
+  from prithvi_mae import PrithviMAE
+  model = PrithviMAE(img_size=224, patch_size=(1,16,16), num_frames=4, ...)
+  ckpt = torch.load(os.path.join(MODEL_DIR, "Prithvi_EO_V2_300M.pt"), map_location="cpu", weights_only=False)
+  if "model" in ckpt: ckpt = ckpt["model"]
+  model.load_state_dict(ckpt, strict=False)
+  ```
+- **判定要点**：`AutoConfig` 报 timm/None → 检查模型目录是否有 `*.py` 实现文件 → sys.path + 直接 import。
+
+## 113. 数据集嵌套 dict 字段：PubMedQA context 是 dict 不是 str（ClinicalBERT CPT 实证）
+- **症状**：`TypeError: can only concatenate str (not "dict") to str` — 采样脚本 `r.get('context','')` 返回 dict 而非 str。
+- **根因**：部分 HF 数据集的 parquet 列是嵌套 dict（PubMedQA 的 `context` = `{"contexts": ["..."], "labels": ["..."], "meshes": ["..."]}`），不是扁平 str。
+- **解法**：采样脚本需检测字段类型，dict 则取内部 list 拼接：
+  ```python
+  ctx = r.get('context', {})
+  ctx_list = ctx.get('contexts', []) if isinstance(ctx, dict) else [str(ctx)]
+  text = r.get('question','') + ' ' + ' '.join(ctx_list) + ' ' + r.get('long_answer','')
+  ```
+- **判定要点**：采样 TypeError → 检查 parquet 列值类型（`type(r[key])`）→ dict 则取内部字段。
+
+## 114. timm install 拉入 CUDA torch 破坏 torch_npu 环境（Prithvi CPT 实证）
+- **症状**：`pip install timm` 成功后 `import torch_npu` 报错或 torch 版本变为 CUDA 版（2.14.0），NPU 不可用。
+- **根因**：timm 的 setup.py pin `torch>=2.0`，pip 会拉入最新 CUDA torch + nvidia-cuda-* 包，覆盖已有的 torch_npu。
+- **解法**：**用 `--no-deps` 安装**（timm 纯 Python，只依赖 torch/torchvision 已有）：
+  ```bash
+  pip install timm --no-deps  # 不拉 torch/CUDA 依赖
+  ```
+- **判定要点**：`import timm` 后 `torch.__version__` 变为 CUDA 版 → 用 `--no-deps` 重装；system python 被污染需 `pip uninstall torch torchvision` 清理。
