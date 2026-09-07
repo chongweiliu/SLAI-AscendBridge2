@@ -922,3 +922,33 @@ sys.meta_path.insert(0, _StubFinder())
   ```
 - **通用**：任何返回自定义对象（非 tensor）的模型，先检查 `type(out)` 和 `dir(out)`，找到正确的 tensor 属性。
 - **判定要点**：模型输出 `hasattr(out, 'shape')` 为 False → 检查 `type(out)` → 找 tensor 属性。
+
+## 124. 音频模型 CPT 数据预处理：采样率不匹配 + dtype 转换（AST/Whisper CPT 实证）
+- **症状**：`ASTFeatureExtractor` 报错或静默失败（0 samples processed）；数据加载后 samples 列表为空。
+- **根因**：①音频数据集的采样率可能与模型期望不同（ESC-50 是 44100Hz，AST 期望 16000Hz）；②WAV 读取的 dtype 可能是 float64（processor 不支持，需 float32）；③processor 给 warning 但训练脚本的 `except: continue` 吞了实际错误。
+- **解法**：
+  ```python
+  import torchaudio.functional as TF
+  wav, sr = sf.read(io.BytesIO(data))  # sr 可能是 44100
+  wav = wav[:, 0] if wav.ndim > 1 else wav  # 立体声转单声道
+  wav = wav.astype(np.float32)  # float64 → float32
+  if sr != target_sr:
+      wav = TF.resample(torch.from_numpy(wav).float(), sr, target_sr).numpy()
+      sr = target_sr
+  feat = processor(wav, sampling_rate=sr, return_tensors='pt')
+  ```
+- **调试技巧**：把 `except: continue` 改成 `except Exception as e: print(f"ERR: {e}"); continue` 看到实际错误。
+- **通用**：任何音频模型 CPT 都需检查 `sr` 和 `dtype`；`torchaudio.functional.resample` 是 NPU 兼容的重采样方案。
+- **判定要点**：音频 CPT 0 samples → 检查 sr 和 dtype → 用 resample + float32 转换。
+
+## 125. SpeechT5 NPU 兼容性：decoder addmm INT64 + encoder-only 训练绕过（SpeechT5 CPT 实证）
+- **症状**：`RuntimeError: addmm: NPU function error, Tensor mat1 not implemented for DT_INT64, should be in [DT_FLOAT,DT_FLOAT16,DT_BFLOAT16]` — decoder 的线性层接收 INT64 输入。
+- **根因**：SpeechT5 的 decoder 内部有位置编码（`encode_positions.pe`）产生 INT64 tensor，直接传入后续线性层（addmm），NPU 不支持 INT64 matmul。
+- **解法：encoder-only MLM 绕过**：
+  1. 提取 encoder：`encoder = model.speecht5.encoder`（不是 `model.encoder` 或 `model.text_encoder`）
+  2. forward 用 `input_values`（不是 `input_ids`）：`encoder(input_values=masked_ids, attention_mask=attn)`
+  3. 加 MLM head：`mlm_head = nn.Linear(hidden_size, vocab_size)`
+  4. 跳过 decoder（不调用 `model.forward()`），只训 encoder + MLM head
+- **SpeechT5 processor 限制**：`SpeechT5Processor.__call__()` 不支持同时传 `text` 和 `audio`（报 "Cannot process both"）；用 `audio_target` 或分开调用 tokenizer/feature_extractor。
+- **通用**：任何 seq2seq 模型如果 decoder 在 NPU 上有 dtype 兼容问题，可提取 encoder 单独训练（encoder-only CPT，类似 BERT MLM）。
+- **判定要点**：SpeechT5/seq2seq decoder addmm INT64 → 提取 encoder → encoder-only MLM。

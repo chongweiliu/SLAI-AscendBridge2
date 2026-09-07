@@ -58,7 +58,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
     - **ViT/MAE 视觉模型（自定义代码，如 Prithvi）** → **Masked Image Modeling**（自定义训练脚本，MAE 75% patch mask + MSE 重建）；模型用 `sys.path.insert + import` 加载自定义 `.py`（#112），数据用 rasterio 读 GeoTIFF。
     - **VLM（如 Qwen2.5-VL）** → **文本头 CE**（用 `*ForConditionalGeneration` 加载，#115；文本头 CPT 与 CausalLM 同路，只喂文本无图像）。
     - **diffusers 生成式（SDXL/Wan）** → **DDPM noise MSE**（直接加载 UNet/DiT 组件，#117；版本不匹配用 shape-based key remap，#119；SDXL 需 added_cond_kwargs #118）。
-    - **视觉/时序专用模型**（dinov2 分类/rtdetr 检测/depth-anything 深度/timesfm 时序/layoutlmv3 文档）→ 各自原生 loss（CE/检测CE+bbox/MSE），用对应 `*ForImageClassification`/`*ForObjectDetection`/`AutoModelForDepthEstimation`/`TimesFmModelForPrediction` 类加载。**NPU embedding 所有 index tensor 必须 `torch.long`**（#121）；LayoutLMv3 tokenizer 用 `backend_tokenizer` 绕过 bbox（#122）；TimesFM 输出是对象取 `full_predictions[:,:,5]`（#123）。
+    - **视觉/时序/音频专用模型**（dinov2/rtdetr/depth/timesfm/layoutlmv3/whisper/ast/speecht5）→ 各自原生 loss（CE/检测CE/MSE），用对应 `*ForImageClassification` 等类加载。**NPU embedding 所有 index tensor 必须 `torch.long`**（#121）；LayoutLMv3 tokenizer 用 `backend_tokenizer`（#122）；TimesFM 输出取 `full_predictions[:,:,5]`（#123）；音频需 `torchaudio.resample`+float32（#124）；SpeechT5 decoder NPU 不兼容→encoder-only（#125）。
 11. **确定性 NPU 崩溃用"插桩→单批复现→二分"定位，变长 batch 必开 expandable_segments**（EE9999/507035 无 Python 堆栈；完整四步法 #79，多区域 checkpoint 反传 bug #78；s/step 渐进劣化特征 #80）。
 
 ## 工作流（9 阶段，每阶段都要在屏幕实时更新用时表）
@@ -152,7 +152,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 | **ViT/MAE 视觉** (自定义代码, 如 Prithvi) | MIM 75% mask + MSE 重建 | 自定义脚本+`sys.path` import | masked patch MSE |
 | **VLM 文本头** (Qwen2.5-VL 等) | next-token CE (文本头) | `*ForConditionalGeneration` 加载 (#115) | PPL/acc |
 | **diffusers 生成式** (SDXL/Wan DiT) | DDPM noise MSE on VAE latent | 直接加载组件 (#117) + shape remap (#119) | noise MSE |
-| **视觉/时序专用** (dinov2/rtdetr/depth/timesfm/layoutlmv3) | 各自原生 loss (CE/检测CE/MSE) | 对应 `*ForImageClassification` 等类加载 | loss/acc/MSE |
+| **视觉/时序/音频专用** (dinov2/rtdetr/depth/timesfm/layoutlmv3/whisper/ast/speecht5) | 各自原生 loss (CE/检测CE/MSE) | 对应 `*ForImageClassification` 等类加载 | loss/acc/MSE |
 | Keras/TF 权重 | 先复刻迁移（#84–86）再按原生范式 | 按范式 | 按范式 |
 
 并行：小模型(<3B)单卡 Eager+NpuFusedAdamW；中模型+步数>150 → DDP；单卡装不下优化器 → FSDP2；互联慢+大模型 → 模型并行；短训练(<150步)勿图模式。
