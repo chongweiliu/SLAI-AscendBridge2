@@ -1,0 +1,35 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# bench_hccl.py — 实测卡间 HCCL all-reduce 带宽 (判定互联快慢, 选型依据)
+import os, time, torch
+import torch_npu  # noqa: F401
+import torch.distributed as dist
+import torch.multiprocessing as mp
+
+WORLD = int(os.environ.get("BENCH_WORLD", "2"))
+SIZE_MB = int(os.environ.get("BENCH_SIZE_MB", "1024"))
+ITERS = int(os.environ.get("BENCH_ITERS", "20"))
+
+
+def worker(rank, world):
+    torch.npu.set_device(rank)
+    dist.init_process_group("hccl", rank=rank, world_size=world)
+    x = torch.ones(SIZE_MB * 1024 * 1024 // 2, dtype=torch.float16, device=f"npu:{rank}")
+    for _ in range(3):  # warmup
+        dist.all_reduce(x)
+    torch.npu.synchronize()
+    t0 = time.time()
+    for _ in range(ITERS):
+        dist.all_reduce(x)
+    torch.npu.synchronize()
+    dt = time.time() - t0
+    # all-reduce 总线带宽 = 2*(N-1)/N * size / t (ring 算法系数)
+    bus_bw = 2 * (world - 1) / world * (SIZE_MB / 1024) * ITERS / dt
+    if rank == 0:
+        print(f"[hccl-bench] world={world} tensor={SIZE_MB}MB iters={ITERS} "
+              f"time={dt:.2f}s per-op={dt/ITERS*1000:.1f}ms bus_bw={bus_bw:.1f}GB/s", flush=True)
+    dist.destroy_process_group()
+
+
+if __name__ == "__main__":
+    mp.spawn(worker, args=(WORLD,), nprocs=WORLD, join=True)
