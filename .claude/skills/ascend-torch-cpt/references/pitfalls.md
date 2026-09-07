@@ -709,3 +709,38 @@ sys.meta_path.insert(0, _StubFinder())
 - **症状 B（首步虚高）**：Qwen3-1.7B smoke 首步 12s，稳态 1.04s/步——首步含 NpuFusedAdamW 优化器状态初始化（ fused kernel 编译 + buffer 分配），10×+ 虚高。
 - **解法 B**：smoke 取**第 2 步**的 s/step 外推总时长；或 smoke ≥3 步取后 2 步均值。已在 SKILL.md 阶段 6 标注（`首 import ~90s 摊进前几步虚高，取稳态步`），此处补充"NpuFusedAdamW 首步初始化"这一具体根因。
 - **判定要点**：smoke 第 1 步 s/step > 第 2 步 3×+ → 优化器初始化开销，取稳态步外推。
+
+## 106. ASCEND_RT_VISIBLE_DEVICES 映射物理卡到逻辑 0：set_device(N) 致 Invalid device ID（5模型 CPT 实证）
+- **症状**：设 `ASCEND_RT_VISIBLE_DEVICES=2` 后 `torch.npu.set_device(2)` → `RuntimeError: Invalid device ID, open device 2 failed, error code 107001`。
+- **根因**：`ASCEND_RT_VISIBLE_DEVICES=N` 使 NPU 驱动**仅暴露 1 张物理卡**，该卡被重映射为**逻辑设备 0**；`set_device(N)` 找不到逻辑设备 N。
+- **解法**：单卡脚本**始终 `torch.npu.set_device(0)`**（DDP 用 `set_device(local_rank)`，因为 DDP 设 `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3` 时逻辑 ID 与物理 ID 一致）。模板 `cpt_mlm.py.tmpl` / `cpt_seq2seq.py.tmpl` 已按此修复。
+- **判定要点**：`ExchangeDevice` / `SetDevice` + `error code 107001` → 检查 set_device 参数是否等于 VISIBLE_DEVICES 值（应改为 0）。
+
+## 107. DataCollatorForLanguageModeling 等长序列不返回 attention_mask（bge-m3 CPT 实证）
+- **症状**：`KeyError: 'attention_mask'` — `collator(batch_ids)` 返回的 dict 只有 `input_ids` 和 `labels`，没有 `attention_mask`。
+- **根因**：当批次内所有序列**等长**（如 prepare_data 打包的定长块），collator 不需要 padding，因此不生成 `attention_mask`。
+- **解法**：用 `batch.get('attention_mask', torch.ones_like(input_ids))` 兜底（等长=全 1 mask）。模板已修复。
+- **判定要点**：MLM 训练 KeyError attention_mask → 检查是否等长定长块输入。
+
+## 108. BERT/XLMR 系 eos_token_id=None：prepare_data TypeError（distilbert/bert-NER CPT 实证）
+- **症状**：`TypeError: 'NoneType' object cannot be interpreted as an integer` — `to_text_tokens` 末尾 `+[tok.eos_token_id]` 时 BERT 系 eos_token_id=None。
+- **根因**：BERT/DistilBERT/XLM-RoBERTa 不使用 EOS token（用 `[SEP]` / `</s>` 代替），`eos_token_id` 属性为 None。
+- **解法**：fallback 链 `eos_token_id → sep_token_id → pad_token_id`：
+  ```python
+  eos_id = tok.eos_token_id if tok.eos_token_id is not None else tok.sep_token_id if tok.sep_token_id is not None else tok.pad_token_id
+  ```
+  模板 `cpt_mlm.py.tmpl` 的 tokenizer 初始化已含同样 fallback（`tok.pad_token=tok.eos_token or tok.unk_token or tok.sep_token`）。
+- **判定要点**：prepare_data TypeError NoneType → 检查 tokenizer.eos_token_id 是否 None（BERT 系必现）。
+
+## 109. Encoder/Seq2Seq 模型不能用 AutoModelForCausalLM：范式判定必须区分（5模型 CPT 实证）
+- **症状**：用 `cpt_train.py.tmpl`（AutoModelForCausalLM）加载 BERT/XLMR/NLLB → AttributeError 或 loss=NaN 或无 causal LM head。
+- **根因**：BERT/XLMR 是 **Encoder-only**（双向 attention，无 causal mask），NLLB 是 **Encoder-Decoder**（seq2seq）；`AutoModelForCausalLM` 只支持 Decoder-only 模型（GPT/Qwen/Llama）。
+- **解法（范式判定 → 模板选择）**：
+  | config.model_type | 范式 | 加载类 | 模板 | 损失 |
+  |---|---|---|---|---|
+  | bert, xlm-roberta, distilbert, roberta | Encoder MLM | AutoModelForMaskedLM | cpt_mlm.py.tmpl | DataCollatorForLanguageModeling 15% mask CE |
+  | m2m_100, t5, bart, marian | Seq2Seq | AutoModelForSeq2SeqLM | cpt_seq2seq.py.tmpl | 翻译 CE（labels pad→-100） |
+  | qwen, llama, gemma, mistral | CausalLM | AutoModelForCausalLM | cpt_train.py.tmpl | next-token CE |
+  - **数据准备**：MLM 用 `prepare_data.py.tmpl`（打包定长块，与 CausalLM 共用）；Seq2Seq 用 `prepare_data_seq2seq.py.tmpl`（保持 src-tgt pair，分别 tokenize）。
+  - **评估**：MLM 用 `eval_mlm.py.tmpl`（MLM loss/PPL/masked acc）；Seq2Seq 用 `eval_seq2seq.py.tmpl`（翻译 CE/PPL）。
+- **判定要点**：`AutoModelForCausalLM` 加载报错或 loss 异常 → 检查 `config.model_type` 是否为 encoder/seq2seq 架构。

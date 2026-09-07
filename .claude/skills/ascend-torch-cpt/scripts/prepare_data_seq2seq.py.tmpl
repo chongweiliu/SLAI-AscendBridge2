@@ -1,0 +1,62 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# prepare_data_seq2seq.py.tmpl — Seq2Seq 语料格式转换与预 tokenize
+# 输入: jsonl 每行 {"src":"...", "tgt":"..."} 或自定义字段名(环境变量 SRC_KEY/TGT_KEY)
+# 产出: input_ids.pt {src:[[ids]], tgt:[[ids]]} + data_stats.json
+# 适用: NLLB/M2M100, T5, BART, MarianMT 等所有 Seq2Seq 模型
+import os, json, random, torch
+from transformers import AutoTokenizer
+
+MODEL_DIR=os.environ["MODEL_DIR"]; DATA_FILE=os.environ["DATA_FILE"]; WS_DIR=os.environ["WS_DIR"]
+SEQ_LEN=int(os.environ.get("SEQ_LEN","512"))
+BATCH_SIZE=int(os.environ.get("BATCH_SIZE","16"))
+NUM_STEPS=int(os.environ.get("NUM_STEPS","100"))
+SEED=int(os.environ.get("SEED","42"))
+SRC_KEY=os.environ.get("SRC_KEY","src")   # json 中源文本字段名(如 en, src, source)
+TGT_KEY=os.environ.get("TGT_KEY","tgt")   # json 中目标文本字段名(如 zh, tgt, target)
+SRC_LANG=os.environ.get("SRC_LANG","")
+TGT_LANG=os.environ.get("TGT_LANG","")
+RATIO=float(os.environ.get("RATIO","1.0"))
+CAP_TOKENS=int(os.environ.get("CAP_TOKENS","0"))  # pair 数量上限(0=不限)
+random.seed(SEED); torch.manual_seed(SEED)
+
+def read_records(path):
+    recs=[]
+    for line in open(path,encoding='utf-8'):
+        line=line.strip()
+        if not line: continue
+        try: recs.append(json.loads(line))
+        except: pass
+    return recs
+
+def main():
+    out=os.path.join(WS_DIR,'outputs'); os.makedirs(out,exist_ok=True)
+    recs=read_records(DATA_FILE)
+    total=len(recs)
+    n_take=int(total*RATIO) if RATIO<1.0 else total
+    rng=random.Random(SEED); idx=list(range(total)); rng.shuffle(idx)
+    subset=[recs[i] for i in idx[:n_take]]
+    need=NUM_STEPS*BATCH_SIZE
+    kw={}
+    if SRC_LANG: kw['src_lang']=SRC_LANG
+    if TGT_LANG: kw['tgt_lang']=TGT_LANG
+    tok=AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True, **kw)
+    src_ids=[]; tgt_ids=[]
+    for r in subset:
+        s=r.get(SRC_KEY) or r.get('en') or r.get('source') or ''
+        t=r.get(TGT_KEY) or r.get('zh') or r.get('target') or ''
+        if not s or not t: continue
+        si=tok(s, truncation=True, max_length=SEQ_LEN)['input_ids']
+        ti=tok(text_target=t, truncation=True, max_length=SEQ_LEN)['input_ids']
+        src_ids.append(si); tgt_ids.append(ti)
+        if CAP_TOKENS and len(src_ids)>=CAP_TOKENS: break
+        if len(src_ids)>=need: break
+    torch.save({'src':src_ids,'tgt':tgt_ids}, os.path.join(out,'input_ids.pt'))
+    stats={'total':total,'ratio':RATIO,'subset':n_take,'pairs':len(src_ids),
+           'seq_len':SEQ_LEN,'batch':BATCH_SIZE,'steps':NUM_STEPS,
+           'src_key':SRC_KEY,'tgt_key':TGT_KEY,'src_lang':SRC_LANG,'tgt_lang':TGT_LANG}
+    json.dump(stats,open(os.path.join(out,'data_stats.json'),'w'),ensure_ascii=False,indent=2)
+    print(f'[data] saved {len(src_ids)} pairs to input_ids.pt',flush=True)
+    print(json.dumps(stats,ensure_ascii=False,indent=2),flush=True)
+
+if __name__=='__main__': main()

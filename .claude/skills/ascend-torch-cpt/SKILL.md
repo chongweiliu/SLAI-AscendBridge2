@@ -48,6 +48,8 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
    - **T6 收尾汇总（不可省）**：**最终答复与 README 都必须含完整用时表**（9 阶段预计/实际/说明 + 合计 + 预估偏差一句话解释）。只写 README 不上屏算未完成。
 10. **按模型类型选训练范式（第一步，不可跳过）**，判定结果写进 `env_probe.json` 的 `model_type`/`train_paradigm`：
     - `ForCausalLM`/config+safetensors → **文本 LM**（CE loss，`cpt_train.py.tmpl`）；多模态文本头同路（references/multimodal-remap.md）。
+    - **Encoder 模型**（BERT/XLMR/DistilBERT, config.model_type 含 bert/roberta/distilbert）→ **MLM**（15% mask CE，`cpt_mlm.py.tmpl`，#109）；数据用 `prepare_data.py.tmpl`（打包定长块，与 CausalLM 共用）。
+    - **Seq2Seq 模型**（NLLB/T5/BART, config.model_type 含 m2m_100/t5/bart/marian）→ **翻译 CE**（`cpt_seq2seq.py.tmpl`，#109）；数据用 `prepare_data_seq2seq.py.tmpl`（保持 src-tgt pair）。
     - `model_index.json`+transformer/vae/text_encoder/scheduler → **diffusers 生成式**（流匹配 loss，references/generative-diffusion-cpt.md）。
     - `Qwen2Audio*`/audio-text-to-text → **音频-LLM**（转写 CE，references/audio-llm-cpt.md）。
     - MLX 格式 → 须换同源 PyTorch 基座（#47）。
@@ -85,6 +87,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - **B. diffusers 生成式**：解码→resize 到原生分辨率→VAE 编码（输入 `[B,C,T,H,W]` #48，编码上 NPU 规避 cgroup OOM #44/#46）→ 缓存 latent+text_emb（预计算-后训练模式）；text_encoder 巨大时可缓存 embedding 或退零嵌入兜底（#49）。用 `prepare_generative_data.py.tmpl`，全流程见 references/generative-diffusion-cpt.md。
 - **C. 音频-LLM**：soundfile 读 16k → `AutoProcessor(text=, audio=)`（单数 kwarg #56）→ labels 掩 pad+prompt+audio 特殊 token（漏 mask 致 loss 虚高 ~8× #58）；forward 须传 input_features**和** feature_attention_mask（#57）；冻 audio_tower+projector 训 language_model。见 references/audio-llm-cpt.md + `cpt_audio_llm.py.tmpl`。
 - **D. MLIP 力场**：ase 读 EXTXYZ（能量+力标签）→ 官方 GraphConverter 构图（cutoff/threebody_cutoff）；能量基准差对齐见阶段 8-D。
+- **E. Seq2Seq**：读语料 jsonl（`{"src":"en text","tgt":"zh text"}` 或自定义字段 SRC_KEY/TGT_KEY）→ 分别 tokenize src 和 tgt → 保存 `{src:[ids], tgt:[ids]}` → `prepare_data_seq2seq.py.tmpl`；NLLB 需设 SRC_LANG/TGT_LANG（如 eng_Latn/zho_Hans）。
 
 ### 阶段 4 · 训练方式自动选型（references/parallel-strategy.md）
 ```
@@ -100,7 +103,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - **precision**：fp32 主权重 + bf16 autocast（**不要**纯 bf16 前向 #4）；**lr**：CPT 基线 1e-5（全局 batch 大按 sqrt 上调；短训练保守值；照抄基座从零训练的调度会发散 #82）；**warmup** ~10% 步数 cosine 到 0；**optimizer**：`NpuFusedAdamW` + betas(0.9,0.95) wd=0.01 eps=1e-8 clip=1.0——**例外**：分阶段重建优化器（freeze/unfreeze 切换）用 plain AdamW（#87 跨阶段 saved-tensor 崩溃），小模型(<100M)融合无收益；**batch_size** 按"激活显存预算"估上限+2 步 smoke 验不 OOM（优先开梯度检查点而非降 bs，`use_reentrant=False`）；**attention**：full_attention 走 SDPA（→NPU fusion 自动路由）。
 
 ### 阶段 6 · 生成训练脚本并 smoke
-- 按范式选模板：文本 `cpt_train.py.tmpl`（单卡+DDP 自动检测）/`cpt_fsdp.py.tmpl`/`cpt_mp.py.tmpl`；扩散 `cpt_diffusion.py.tmpl`；音频 `cpt_audio_llm.py.tmpl`。模板已支持断点续训（`RESUME=1` 默认关）与梯度累积（references/resume.md）。
+- 按范式选模板：文本 `cpt_train.py.tmpl`（单卡+DDP 自动检测）/`cpt_fsdp.py.tmpl`/`cpt_mp.py.tmpl`；**Encoder MLM** `cpt_mlm.py.tmpl`（单卡+DDP）；**Seq2Seq** `cpt_seq2seq.py.tmpl`（单卡+DDP）；扩散 `cpt_diffusion.py.tmpl`；音频 `cpt_audio_llm.py.tmpl`。模板已支持断点续训（`RESUME=1` 默认关）与梯度累积（references/resume.md）。**单卡 set_device(0) 不是 VISIBLE_DEVICES 值**（#106）；MLM 模型 pad_token fallback eos→unk→sep（#108）。
 - 模板通用化：文本 `AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 remap；组件分离加载见各范式 reference。
 - **smoke**：2 步确认前向+反向+优化器 step 全通过、loss 合理再上正式；扩散先对 backbone 与 VAE 分别单组件前向 smoke（抓 NPU 算子问题 #50）。**smoke 的 s/step 不可外推正式用时**（首 import ~90s + NpuFusedAdamW 首步状态初始化 ~10×虚高，取稳态第 2 步, #105）。
 - 踩坑先 grep references/pitfalls.md（模板已规避多数）。**大词表(>100K vocab) CE OOM** 先降 bs+梯度累积保持有效 batch，不降 seq_len（#103）。**FSDP2 取 transformer 层勿用 getattr 默认值**（急切求值致 AttributeError, #102，模板已修复）。
@@ -117,6 +120,8 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 ### 阶段 8 · 训练前后域内评估（按范式分支；对比三原则见 references/eval-metrics.md）
 **通用**：base vs CPT ①严格同条件（同种子一切随机源+确定性自检）②协议锚定（base 关键指标与论文/官方数字同量级才算协议对）③持平可能是正确结论（短程 CPT 域内收敛基座预期 ±1%）；**过拟合检查**：held-out 须独立 split；train loss 趋 0 + held-out 不改善=红旗；**数据量是泛化关键杠杆**（非步数）。多卡训练后别立刻单卡评估（显存异步回收 #32）；评估载入前 `torch.npu.empty_cache()`。
 - **A. 文本 LM**（`eval_cpt.py.tmpl`）：PPL/NLL（公式务必取负 #5）/next-token acc；chat 数据加末轮生成 F1；域内语料用域内指标，勿强行套 MMLU。支持 `VAL_FILE` 独立验证集（优先于 held-out split, #104），保证验证数据绝对未被训练使用。
+- **E. Encoder MLM**（`eval_mlm.py.tmpl`）：MLM loss/PPL/masked token acc；collator 15% mask + attention_mask fallback（#107）；NaN 样本排除。
+- **F. Seq2Seq**（`eval_seq2seq.py.tmpl`）：翻译 CE loss/PPL；labels pad→-100；NaN 样本排除；支持 SRC_LANG/TGT_LANG。
 - **B. diffusers**（`eval_diffusion.py.tmpl`）：固定 σ 算 velocity MSE（Δ<0 训练有效）+ 采样生成定性；勿套 PPL。
 - **C. 音频-LLM**：held-out 转写 CE loss（base 全新 vs CPT `strict=False`，Δ<0 有效）；勿套文本 PPL/velocity MSE。
 - **D. MLIP 力场**（#91–#93）：能量 MAE(eV 与 meV/atom)+力 MAE/RMSE(eV/Å)+力方向余弦；**评估循环禁 @torch.no_grad()**（力=-∂E/∂x 需 autograd 图 #92）；能量基准差用 **shift-only scaling** 对齐（shift 拟合自训练集、scale 保留原值保力基线 #93）；性能用单结构前向+力微分延迟。
@@ -129,7 +134,9 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 
 | 模型类型 | 范式/损失 | 脚本 | 评估 |
 |---|---|---|---|
-| 文本 LM / 多模态文本头 | next-token CE | `cpt_train.py.tmpl` | PPL/acc/F1 |
+| 文本 LM / 多模态文本头 (CausalLM) | next-token CE | `cpt_train.py.tmpl` | PPL/acc/F1 |
+| **Encoder MLM** (BERT/XLMR/DistilBERT) | MLM 15% mask CE | `cpt_mlm.py.tmpl` | MLM loss/PPL/acc |
+| **Seq2Seq** (NLLB/T5/BART/Marian) | 翻译 CE (labels pad→-100) | `cpt_seq2seq.py.tmpl` | 翻译 CE/PPL |
 | diffusers 生成式 | 流匹配 on VAE latent | `cpt_diffusion.py.tmpl` | velocity MSE+采样 |
 | 音频-LLM | 转写 CE（mask audio token） | `cpt_audio_llm.py.tmpl` | 转写 CE loss/WER |
 | MLIP 力场 | 能量(per-atom)+力（力=-∂E/∂x） | 按官方库复用+patch | E/F MAE（禁 no_grad） |
@@ -178,4 +185,4 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 ## scripts（标准模板）
 见 `scripts/*.tmpl`，复制到 `${WS_DIR}/` 按当前模型/语料替换占位。模板已规避多数踩坑（set_to_none=False、gradient_as_bucket_view=False、expandable_segments、autocast、grad-ckpt）。`run_env.sh.tmpl` 的 `WS_DIR` 已自动指向 `training-ws/<模型名>-cpt/`；`timing_table.py.tmpl` 用于用时表（核心原则 9）；`robust_download.sh.tmpl` 用于阶段 2 源探测/可靠下载（#88–#90）。
 
-按范式选模板：文本 LM → `prepare_data.py.tmpl`+`cpt_train.py.tmpl`(+fsdp/mp)；扩散 → `prepare_generative_data.py.tmpl`+`cpt_diffusion.py.tmpl`；音频 → `cpt_audio_llm.py.tmpl`。
+按范式选模板：文本 LM → `prepare_data.py.tmpl`+`cpt_train.py.tmpl`(+fsdp/mp)；**Encoder MLM** → `prepare_data.py.tmpl`+`cpt_mlm.py.tmpl`+`eval_mlm.py.tmpl`；**Seq2Seq** → `prepare_data_seq2seq.py.tmpl`+`cpt_seq2seq.py.tmpl`+`eval_seq2seq.py.tmpl`；扩散 → `prepare_generative_data.py.tmpl`+`cpt_diffusion.py.tmpl`；音频 → `cpt_audio_llm.py.tmpl`。
