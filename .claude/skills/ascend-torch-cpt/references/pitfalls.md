@@ -799,3 +799,85 @@ sys.meta_path.insert(0, _StubFinder())
   pip install timm --no-deps  # 不拉 torch/CUDA 依赖
   ```
 - **判定要点**：`import timm` 后 `torch.__version__` 变为 CUDA 版 → 用 `--no-deps` 重装；system python 被污染需 `pip uninstall torch torchvision` 清理。
+
+## 115. VLM 模型不能用 AutoModelForCausalLM：需用特定类加载（Qwen2.5-VL CPT 实证）
+- **症状**：`ValueError: Unrecognized configuration class Qwen2_5_VLConfig for AutoModelForCausalLM`。
+- **根因**：VLM（如 Qwen2.5-VL）的 `model_type`（如 `qwen2_5_vl`）不在 `AutoModelForCausalLM` 的 CONFIG_MAPPING 中；VLM 有独立的模型类。
+- **解法**：用 VLM 专用类加载，文本头 CPT 只喂文本（无图像），forward 与 CausalLM 相同（`input_ids + labels` → next-token CE）：
+  ```python
+  from transformers import Qwen2_5_VLForConditionalGeneration
+  model = Qwen2_5_VLForConditionalGeneration.from_pretrained(MODEL_DIR, torch_dtype=...)
+  out = model(input_ids=batch, attention_mask=attn, labels=batch)  # 文本头 CE
+  ```
+- **判定要点**：`AutoModelForCausalLM` 报 `Unrecognized configuration class` → 检查 `config.model_type` 是否为 VLM 类型 → 用对应的 `*ForConditionalGeneration` 类。
+
+## 116. 大模型(>3B) fp32+NpuFusedAdamW 单卡 OOM：改 bf16 权重 + plain AdamW（Qwen2.5-VL CPT 实证）
+- **症状**：3.755B 模型 fp32(15GB)+NpuFusedAdamW 优化器(30GB)+梯度(15GB)=60GB，64GB 卡 OOM；即使 bs=1+seq=1024 也不行。
+- **根因**：fp32 主权重 + NpuFusedAdamW 的 fp32 优化器状态 + fp32 梯度 = 3×params 显存，3.75B × 3 × 4 bytes = 45GB 仅权重+优化器+梯度，CE 激活另需 ~15GB。
+- **解法**：①模型 `torch_dtype=torch.bfloat16`（权重 7.5GB + 梯度 7.5GB + 优化器 15GB = 30GB）；②优化器用 `torch.optim.AdamW`（NpuFusedAdamW **不支持 bf16**，报 `Fused optimizer's parameters must be either float32 or float16, but received torch.bfloat16`）：
+  ```python
+  model = ModelClass.from_pretrained(MODEL_DIR, torch_dtype=torch.bfloat16, ...)
+  optim = torch.optim.AdamW(model.parameters(), lr=LR, betas=(0.9,0.95), ...)  # 不是 NpuFusedAdamW
+  ```
+- **代价**：bf16 主权重精度低于 fp32（#4），短程 CPT（200步）可接受；长训练或精度敏感场景仍需 FSDP2 分片。
+- **判定要点**：>3B 模型 fp32 单卡 OOM + NpuFusedAdamW 报 bf16 不支持 → 改 bf16 + plain AdamW。
+
+## 117. diffusers --no-deps 后 pipeline 加载失败：直接加载组件（SDXL CPT 实证）
+- **症状**：`StableDiffusionXLPipeline.from_pretrained()` 报 `ImportError: cannot import name 'get_cached_repo_tree' from 'huggingface_hub'`。
+- **根因**：`pip install diffusers --no-deps`（#114 避免拉 CUDA torch）不安装 huggingface_hub 的新函数，pipeline 加载路径依赖这些函数。
+- **解法**：跳过 pipeline，**直接加载组件**（UNet/VAE/text_encoder 独立 from_pretrained）：
+  ```python
+  from diffusers.models import UNet2DConditionModel, AutoencoderKL
+  from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
+  unet = UNet2DConditionModel.from_pretrained(f"{MODEL_DIR}/unet", variant="fp16")
+  vae = AutoencoderKL.from_pretrained(f"{MODEL_DIR}/vae", variant="fp16")
+  te1 = CLIPTextModel.from_pretrained(f"{MODEL_DIR}/text_encoder", variant="fp16")
+  ```
+- **判定要点**：pipeline from_pretrained 报 huggingface_hub import 错 → 用组件直接加载。
+
+## 118. SDXL UNet forward 需要 added_cond_kwargs：text_embeds + time_ids（SDXL CPT 实证）
+- **症状**：UNet forward `TypeError: argument of type 'NoneType' is not iterable`。
+- **根因**：SDXL UNet 的 forward **强制要求** `added_cond_kwargs={"text_embeds": pooled, "time_ids": ids}`（微条件），缺则 `text_embeds` 为 None → 检查 `if x in text_embeds` 崩溃。
+- **解法**：
+  ```python
+  pooled = te2(ids2, output_hidden_states=True).text_embeds  # [B, 1280]
+  time_ids = torch.tensor([[0,0,1024,1024,0,0]]).repeat(B,1)  # 原始尺寸+裁剪+目标尺寸
+  pred = unet(noisy, ts, encoder_hidden_states=emb,
+              added_cond_kwargs={"text_embeds": pooled, "time_ids": time_ids}).sample
+  ```
+- **判定要点**：SDXL UNet forward TypeError NoneType → 检查 added_cond_kwargs。
+
+## 119. diffusers 版本不匹配：checkpoint 与库版本架构不同 → shape-based key remap（Wan2.1 CPT 实证）
+- **症状**：`WanTransformer3DModel.from_pretrained()` 报 `patch_embedding.bias expected shape [5120], but got [1536]`；或 825 个 key 名称几乎全不同（0 匹配）。
+- **根因**：checkpoint 用 diffusers 0.30.0 创建（`_diffusers_version: "0.30.0"`），库版本 0.40.0 改了默认参数（`num_attention_heads` 40→12 导致 dim 5120→1536）和 key 命名约定。
+- **解法（shape-based key remap，通用）**：
+  ```python
+  from collections import defaultdict
+  # 1. 构造模型（用 checkpoint config 的正确参数，不是库默认值）
+  model = ModelClass(num_attention_heads=12, attention_head_dim=128, ...)  # dim=12*128=1536
+  # 2. 按 tensor shape 自动匹配 key
+  model_sd = model.state_dict()
+  m_by_s = defaultdict(list); c_by_s = defaultdict(list)
+  for k,v in model_sd.items(): m_by_s[tuple(v.shape)].append(k)
+  for k,v in ckpt_sd.items(): c_by_s[tuple(v.shape)].append(k)
+  remapped = {}
+  for shape, mkeys in m_by_s.items():
+      ckeys = c_by_s.get(shape, [])
+      if len(mkeys)==1 and len(ckeys)==1: remapped[mkeys[0]]=ckpt_sd[ckeys[0]]
+      elif len(mkeys)==len(ckeys) and len(mkeys)>0:
+          for mk,ck in zip(sorted(mkeys),sorted(ckeys)): remapped[mk]=ckpt_sd[ck]
+  model.load_state_dict(remapped, strict=False)  # 825/825 mapped, 0 missing
+  ```
+- **通用**：此方法适用于**任何**版本不匹配的 checkpoint 加载（DiT/VAE/任意模型），只要架构相同（参数数和 shape 一致），key 名称不同可自动映射。
+- **判定要点**：from_pretrained 报 shape mismatch 或 key 不匹配 → 检查 `_diffusers_version` → 用 shape-based remap。
+
+## 120. 大型 text encoder 跳过：T5 11.4GB 太大 → zero embeddings 兜底（Wan2.1 CPT 实证）
+- **症状**：Wan2.1 的 T5 (UMT5-XXL) bf16 权重 11.4GB，单卡放不下 DiT(1.4B)+T5(11.4GB)+VAE(0.5GB)+优化器。
+- **根因**：视频生成模型的 text encoder 常为超大型 T5/CLIP，CPT 只需训 DiT/UNet，text encoder 冻结但仍需加载用于编码。
+- **解法**：跳过 text encoder，用 **zero embeddings** 作为 cross-attention 输入：
+  ```python
+  text_emb = torch.zeros(B, text_len, text_dim, device=device, dtype=torch.bfloat16)
+  out = dit(latents, timesteps, encoder_hidden_states=text_emb)
+  ```
+- **代价**：模型不学习文本条件 → 生成质量受限；但 CPT 的核心目标（噪声预测/去噪能力）仍有效。
+- **判定要点**：text encoder 显存 > 模型+优化器 → 用 zero embeddings 跳过。
