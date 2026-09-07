@@ -58,6 +58,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
     - **ViT/MAE 视觉模型（自定义代码，如 Prithvi）** → **Masked Image Modeling**（自定义训练脚本，MAE 75% patch mask + MSE 重建）；模型用 `sys.path.insert + import` 加载自定义 `.py`（#112），数据用 rasterio 读 GeoTIFF。
     - **VLM（如 Qwen2.5-VL）** → **文本头 CE**（用 `*ForConditionalGeneration` 加载，#115；文本头 CPT 与 CausalLM 同路，只喂文本无图像）。
     - **diffusers 生成式（SDXL/Wan）** → **DDPM noise MSE**（直接加载 UNet/DiT 组件，#117；版本不匹配用 shape-based key remap，#119；SDXL 需 added_cond_kwargs #118）。
+    - **视觉/时序专用模型**（dinov2 分类/rtdetr 检测/depth-anything 深度/timesfm 时序/layoutlmv3 文档）→ 各自原生 loss（CE/检测CE+bbox/MSE），用对应 `*ForImageClassification`/`*ForObjectDetection`/`AutoModelForDepthEstimation`/`TimesFmModelForPrediction` 类加载。**NPU embedding 所有 index tensor 必须 `torch.long`**（#121）；LayoutLMv3 tokenizer 用 `backend_tokenizer` 绕过 bbox（#122）；TimesFM 输出是对象取 `full_predictions[:,:,5]`（#123）。
 11. **确定性 NPU 崩溃用"插桩→单批复现→二分"定位，变长 batch 必开 expandable_segments**（EE9999/507035 无 Python 堆栈；完整四步法 #79，多区域 checkpoint 反传 bug #78；s/step 渐进劣化特征 #80）。
 
 ## 工作流（9 阶段，每阶段都要在屏幕实时更新用时表）
@@ -109,7 +110,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 
 ### 阶段 6 · 生成训练脚本并 smoke
 - 按范式选模板：文本 `cpt_train.py.tmpl`（单卡+DDP 自动检测）/`cpt_fsdp.py.tmpl`/`cpt_mp.py.tmpl`；**Encoder MLM** `cpt_mlm.py.tmpl`（单卡+DDP）；**Seq2Seq** `cpt_seq2seq.py.tmpl`（单卡+DDP）；扩散 `cpt_diffusion.py.tmpl`；音频 `cpt_audio_llm.py.tmpl`。模板已支持断点续训（`RESUME=1` 默认关）与梯度累积（references/resume.md）。**单卡 set_device(0) 不是 VISIBLE_DEVICES 值**（#106）；MLM 模型 pad_token fallback eos→unk→sep（#108）。
-- 模板通用化：文本 `AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 remap；**VLM** 用 `*ForConditionalGeneration` 加载（#115）；**ViT/Science 自定义代码模型**用 `sys.path.insert(0, MODEL_DIR)` + 直接 import `*.py`（#112），checkpoint 的 `num_frames`/`img_size` 必须与 config 一致（#110）。**diffusers 版本不匹配**时用 shape-based key remap（#119，通用解法，按 tensor shape 自动匹配 825+ keys）；**SDXL UNet** forward 需 `added_cond_kwargs`（#118）；**大型 text encoder**（T5 11.4GB）可跳过用 zero embeddings（#120）。**>3B 模型 fp32+NpuFusedAdamW 单卡 OOM** → 改 bf16 权重 + `torch.optim.AdamW`（#116）。
+- 模板通用化：文本 `AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 remap；**VLM** 用 `*ForConditionalGeneration` 加载（#115）；**ViT/Science 自定义代码模型**用 `sys.path.insert(0, MODEL_DIR)` + 直接 import `*.py`（#112），checkpoint 的 `num_frames`/`img_size` 必须与 config 一致（#110）。**diffusers 版本不匹配**时用 shape-based key remap（#119，通用解法，按 tensor shape 自动匹配 825+ keys）；**SDXL UNet** forward 需 `added_cond_kwargs`（#118）；**大型 text encoder**（T5 11.4GB）可跳过用 zero embeddings（#120）。**>3B 模型 fp32+NpuFusedAdamW 单卡 OOM** → 改 bf16 权重 + `torch.optim.AdamW`（#116）。**NPU embedding 所有 index tensor（input_ids/bbox/position_ids）必须 `torch.long`**（#121）；LayoutLMv3 tokenizer 用 `backend_tokenizer.encode_batch` 绕过 bbox（#122）。
 - **smoke**：2 步确认前向+反向+优化器 step 全通过、loss 合理再上正式；扩散先对 backbone 与 VAE 分别单组件前向 smoke（抓 NPU 算子问题 #50）。**smoke 的 s/step 不可外推正式用时**（首 import ~90s + NpuFusedAdamW 首步状态初始化 ~10×虚高，取稳态第 2 步, #105）。
 - 踩坑先 grep references/pitfalls.md（模板已规避多数）。**大词表(>100K vocab) CE OOM** 先降 bs+梯度累积保持有效 batch，不降 seq_len（#103）。**FSDP2 取 transformer 层勿用 getattr 默认值**（急切求值致 AttributeError, #102，模板已修复）。
 - **官方训练栈首次死锁/OOM → 立即 MINREPRO**（模型+collater+单批显存复现，~20 行）定位是模型需求还是栈问题，**禁止盲调 batch/换卡试错**（#95）；栈级不可用则拆组件自管轻量循环。
@@ -129,6 +130,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - **F. Seq2Seq**（`eval_seq2seq.py.tmpl`）：翻译 CE loss/PPL；labels pad→-100；NaN 样本排除；支持 SRC_LANG/TGT_LANG。
 - **G. ViT/MAE 视觉**：masked patch MSE（Δ<0 改善）；MAE forward 返回 (loss, pred, mask)；归一化数据上 MSE 极小时可能持平（模型已饱和）。
 - **H. diffusers 生成式**（SDXL/Wan）：DDPM noise MSE on VAE latents（Δ<0 改善）；预计算 VAE latents + text emb → 训练时只加载 UNet/DiT；base vs CPT 各跑 10 条 held-out。
+- **I. 视觉/时序专用**：图像分类 CE acc、检测 CE+bbox loss、深度 MSE、时序 MSE、文档 MLM loss/PPL/acc；按模型原生指标评估。
 - **B. diffusers**（`eval_diffusion.py.tmpl`）：固定 σ 算 velocity MSE（Δ<0 训练有效）+ 采样生成定性；勿套 PPL。
 - **C. 音频-LLM**：held-out 转写 CE loss（base 全新 vs CPT `strict=False`，Δ<0 有效）；勿套文本 PPL/velocity MSE。
 - **D. MLIP 力场**（#91–#93）：能量 MAE(eV 与 meV/atom)+力 MAE/RMSE(eV/Å)+力方向余弦；**评估循环禁 @torch.no_grad()**（力=-∂E/∂x 需 autograd 图 #92）；能量基准差用 **shift-only scaling** 对齐（shift 拟合自训练集、scale 保留原值保力基线 #93）；性能用单结构前向+力微分延迟。
@@ -150,6 +152,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 | **ViT/MAE 视觉** (自定义代码, 如 Prithvi) | MIM 75% mask + MSE 重建 | 自定义脚本+`sys.path` import | masked patch MSE |
 | **VLM 文本头** (Qwen2.5-VL 等) | next-token CE (文本头) | `*ForConditionalGeneration` 加载 (#115) | PPL/acc |
 | **diffusers 生成式** (SDXL/Wan DiT) | DDPM noise MSE on VAE latent | 直接加载组件 (#117) + shape remap (#119) | noise MSE |
+| **视觉/时序专用** (dinov2/rtdetr/depth/timesfm/layoutlmv3) | 各自原生 loss (CE/检测CE/MSE) | 对应 `*ForImageClassification` 等类加载 | loss/acc/MSE |
 | Keras/TF 权重 | 先复刻迁移（#84–86）再按原生范式 | 按范式 | 按范式 |
 
 并行：小模型(<3B)单卡 Eager+NpuFusedAdamW；中模型+步数>150 → DDP；单卡装不下优化器 → FSDP2；互联慢+大模型 → 模型并行；短训练(<150步)勿图模式。
