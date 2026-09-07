@@ -55,6 +55,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
     - MLX 格式 → 须换同源 PyTorch 基座（#47）。
     - Keras/TF `.pkl`/`.h5` → **PyTorch 复刻+权重迁移**（#84–#86）。
     - **MLIP 力场（能量+力输出，如 MatterSim/EquiformerV2/MACE）** → **能量+力联合回归**（力=-∂E/∂x autograd 或 direct force head；评估禁 no_grad #92、shift-only scaling #93、后端静默降级 patch #91、科研包兼容链 #99、能量 per-element 参考口径 #100）。
+    - **ViT/MAE 视觉模型（自定义代码，如 Prithvi）** → **Masked Image Modeling**（自定义训练脚本，MAE 75% patch mask + MSE 重建）；模型用 `sys.path.insert + import` 加载自定义 `.py`（#112），数据用 rasterio 读 GeoTIFF。
 11. **确定性 NPU 崩溃用"插桩→单批复现→二分"定位，变长 batch 必开 expandable_segments**（EE9999/507035 无 Python 堆栈；完整四步法 #79，多区域 checkpoint 反传 bug #78；s/step 渐进劣化特征 #80）。
 
 ## 工作流（9 阶段，每阶段都要在屏幕实时更新用时表）
@@ -80,6 +81,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - **大文件下载与开发并行**：下载挂后台后立刻用小子集推进阶段 3-6，勿干等；大文件用 `robust_download.sh get`（多路 Range+分块断点续传+size/md5 终检，`sha256:` 前缀支持），小文件用 `fetch`；GB 级 tarball 下完必须流级校验（`gzip -t`，#68）。**下载是长跑阶段**：按 T4 每 1–2min 刷进度。
 - **CPT 前必扫权重 NaN**（#101）：safetensors 尺寸正确 ≠ 内容正确（比特级损坏致 lm_head 80 NaN）；smoke 前用 `load_file` 全量 `torch.isnan` 扫描（2B~30s, 7B~3min），出 NaN 先 CPU 前向确认再重下损坏分片。
 - 非 PyTorch 原生权重（Keras `.pkl`/`.h5`）：pickle 纯 numpy 元组可直接解包（无需 TF），逐层复刻 PyTorch 架构后做**形状严格校验+同形交换消融+语义 sanity**三重验证（#84–#86）。
+- **ViT/Science 模型需额外依赖**：`pip install timm --no-deps`（避免拉入 CUDA torch 覆盖 torch_npu, #114）；GeoTIFF 数据需 `pip install rasterio`；tar.gz 中批量读 GeoTIFF 极慢，先预提取到磁盘（#111）。
 - 数据集只有 train 分割时用 seed 重建 held-out（references/eval-metrics.md）。
 
 ### 阶段 3 · 语料格式转换与打包（按范式分支）
@@ -87,6 +89,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - **B. diffusers 生成式**：解码→resize 到原生分辨率→VAE 编码（输入 `[B,C,T,H,W]` #48，编码上 NPU 规避 cgroup OOM #44/#46）→ 缓存 latent+text_emb（预计算-后训练模式）；text_encoder 巨大时可缓存 embedding 或退零嵌入兜底（#49）。用 `prepare_generative_data.py.tmpl`，全流程见 references/generative-diffusion-cpt.md。
 - **C. 音频-LLM**：soundfile 读 16k → `AutoProcessor(text=, audio=)`（单数 kwarg #56）→ labels 掩 pad+prompt+audio 特殊 token（漏 mask 致 loss 虚高 ~8× #58）；forward 须传 input_features**和** feature_attention_mask（#57）；冻 audio_tower+projector 训 language_model。见 references/audio-llm-cpt.md + `cpt_audio_llm.py.tmpl`。
 - **D. MLIP 力场**：ase 读 EXTXYZ（能量+力标签）→ 官方 GraphConverter 构图（cutoff/threebody_cutoff）；能量基准差对齐见阶段 8-D。
+- **F. ViT/MAE 视觉**：rasterio 读 GeoTIFF → 归一化(config mean/std) → 裁剪/resize 到 img_size → `[C, T, H, W]`（单帧沿 T 维 repeat, #110）→ MAE forward(mask_ratio) → MSE 重建 loss。tar.gz 先预提取到磁盘（#111）。数据集嵌套 dict 字段需取内部 list（#113）。
 - **E. Seq2Seq**：读语料 jsonl（`{"src":"en text","tgt":"zh text"}` 或自定义字段 SRC_KEY/TGT_KEY）→ 分别 tokenize src 和 tgt → 保存 `{src:[ids], tgt:[ids]}` → `prepare_data_seq2seq.py.tmpl`；NLLB 需设 SRC_LANG/TGT_LANG（如 eng_Latn/zho_Hans）。
 
 ### 阶段 4 · 训练方式自动选型（references/parallel-strategy.md）
@@ -104,7 +107,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 
 ### 阶段 6 · 生成训练脚本并 smoke
 - 按范式选模板：文本 `cpt_train.py.tmpl`（单卡+DDP 自动检测）/`cpt_fsdp.py.tmpl`/`cpt_mp.py.tmpl`；**Encoder MLM** `cpt_mlm.py.tmpl`（单卡+DDP）；**Seq2Seq** `cpt_seq2seq.py.tmpl`（单卡+DDP）；扩散 `cpt_diffusion.py.tmpl`；音频 `cpt_audio_llm.py.tmpl`。模板已支持断点续训（`RESUME=1` 默认关）与梯度累积（references/resume.md）。**单卡 set_device(0) 不是 VISIBLE_DEVICES 值**（#106）；MLM 模型 pad_token fallback eos→unk→sep（#108）。
-- 模板通用化：文本 `AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 remap；组件分离加载见各范式 reference。
+- 模板通用化：文本 `AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 remap；**ViT/Science 自定义代码模型**用 `sys.path.insert(0, MODEL_DIR)` + 直接 import `*.py`（#112），checkpoint 的 `num_frames`/`img_size` 必须与 config 一致（#110）。
 - **smoke**：2 步确认前向+反向+优化器 step 全通过、loss 合理再上正式；扩散先对 backbone 与 VAE 分别单组件前向 smoke（抓 NPU 算子问题 #50）。**smoke 的 s/step 不可外推正式用时**（首 import ~90s + NpuFusedAdamW 首步状态初始化 ~10×虚高，取稳态第 2 步, #105）。
 - 踩坑先 grep references/pitfalls.md（模板已规避多数）。**大词表(>100K vocab) CE OOM** 先降 bs+梯度累积保持有效 batch，不降 seq_len（#103）。**FSDP2 取 transformer 层勿用 getattr 默认值**（急切求值致 AttributeError, #102，模板已修复）。
 - **官方训练栈首次死锁/OOM → 立即 MINREPRO**（模型+collater+单批显存复现，~20 行）定位是模型需求还是栈问题，**禁止盲调 batch/换卡试错**（#95）；栈级不可用则拆组件自管轻量循环。
@@ -122,6 +125,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - **A. 文本 LM**（`eval_cpt.py.tmpl`）：PPL/NLL（公式务必取负 #5）/next-token acc；chat 数据加末轮生成 F1；域内语料用域内指标，勿强行套 MMLU。支持 `VAL_FILE` 独立验证集（优先于 held-out split, #104），保证验证数据绝对未被训练使用。
 - **E. Encoder MLM**（`eval_mlm.py.tmpl`）：MLM loss/PPL/masked token acc；collator 15% mask + attention_mask fallback（#107）；NaN 样本排除。
 - **F. Seq2Seq**（`eval_seq2seq.py.tmpl`）：翻译 CE loss/PPL；labels pad→-100；NaN 样本排除；支持 SRC_LANG/TGT_LANG。
+- **G. ViT/MAE 视觉**：masked patch MSE（Δ<0 改善）；MAE forward 返回 (loss, pred, mask)；归一化数据上 MSE 极小时可能持平（模型已饱和）。
 - **B. diffusers**（`eval_diffusion.py.tmpl`）：固定 σ 算 velocity MSE（Δ<0 训练有效）+ 采样生成定性；勿套 PPL。
 - **C. 音频-LLM**：held-out 转写 CE loss（base 全新 vs CPT `strict=False`，Δ<0 有效）；勿套文本 PPL/velocity MSE。
 - **D. MLIP 力场**（#91–#93）：能量 MAE(eV 与 meV/atom)+力 MAE/RMSE(eV/Å)+力方向余弦；**评估循环禁 @torch.no_grad()**（力=-∂E/∂x 需 autograd 图 #92）；能量基准差用 **shift-only scaling** 对齐（shift 拟合自训练集、scale 保留原值保力基线 #93）；性能用单结构前向+力微分延迟。
@@ -140,6 +144,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 | diffusers 生成式 | 流匹配 on VAE latent | `cpt_diffusion.py.tmpl` | velocity MSE+采样 |
 | 音频-LLM | 转写 CE（mask audio token） | `cpt_audio_llm.py.tmpl` | 转写 CE loss/WER |
 | MLIP 力场 | 能量(per-atom)+力（力=-∂E/∂x） | 按官方库复用+patch | E/F MAE（禁 no_grad） |
+| **ViT/MAE 视觉** (自定义代码, 如 Prithvi) | MIM 75% mask + MSE 重建 | 自定义脚本+`sys.path` import | masked patch MSE |
 | Keras/TF 权重 | 先复刻迁移（#84–86）再按原生范式 | 按范式 | 按范式 |
 
 并行：小模型(<3B)单卡 Eager+NpuFusedAdamW；中模型+步数>150 → DDP；单卡装不下优化器 → FSDP2；互联慢+大模型 → 模型并行；短训练(<150步)勿图模式。

@@ -59,7 +59,8 @@ def to_text_tokens(rec, tok):
     if "input_ids" in ids or hasattr(ids,'input_ids'):
         ids=ids["input_ids"] if "input_ids" in ids else ids.input_ids
     if hasattr(ids,'tolist'): ids=ids.tolist()
-    return [int(x) for x in ids]+[tok.eos_token_id]
+    eos_id = tok.eos_token_id if tok.eos_token_id is not None else tok.sep_token_id if tok.sep_token_id is not None else tok.pad_token_id  # BERT/XLMR eos=None fallback (#108)
+    return [int(x) for x in ids]+[eos_id]
 
 def main():
     out=os.path.join(WS_DIR,'outputs'); os.makedirs(out,exist_ok=True)
