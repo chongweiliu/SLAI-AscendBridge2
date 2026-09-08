@@ -952,3 +952,23 @@ sys.meta_path.insert(0, _StubFinder())
 - **SpeechT5 processor 限制**：`SpeechT5Processor.__call__()` 不支持同时传 `text` 和 `audio`（报 "Cannot process both"）；用 `audio_target` 或分开调用 tokenizer/feature_extractor。
 - **通用**：任何 seq2seq 模型如果 decoder 在 NPU 上有 dtype 兼容问题，可提取 encoder 单独训练（encoder-only CPT，类似 BERT MLM）。
 - **判定要点**：SpeechT5/seq2seq decoder addmm INT64 → 提取 encoder → encoder-only MLM。
+
+## 126. FSDP2：优化器在 fully_shard 之前构建 → step 静默无效（无报错、loss 平坦、ckpt=base）
+- **症状**：训练全程 loss 几乎不动且各次运行 loss 逐 step 完全一致（仅随 lr 缩放系数变化）；backward 正常、梯度存在（DTensor 非 None）、`optim.step()` 无任何报错；训完 `full_tensor()` 聚合保存的 ckpt 与 base 权重 diff=0。
+- **根因**：`fully_shard` 会**替换模块的 Parameter 对象**（并非原地把 .data 换成 DTensor）。在此之前用 `model.named_parameters()`/`parameters()` 收集的参数（含参数组 dict）全部是死引用；优化器每步更新的是被换掉的旧 tensor，模型里的新 DTensor 从未被更新。CPU/gloo 上同样复现 → 与 NPU 无关，是 FSDP2 通用语义。
+- **危险点**：无任何报错/警告，loss 也不会 NaN，只有"ckpt==base"或"不同 lr 下 loss 完全一致"能暴露；且 pre-shard 全量 abs sum 与 post-shard 分片 abs sum 数值不同（差 N 倍），极易把"数值变了"误判为"权重更新了"（验证权重更新必须用同一对象前后对比，或直接 diff ckpt vs base）。
+- **解法**：**优化器（以及任何参数列表/参数组）必须在所有 `fully_shard` 调用之后构建**：
+  ```python
+  for layer in layers: fully_shard(layer, mp_policy=mp, reshard_after_forward=True)
+  fully_shard(model, mp_policy=mp, reshard_after_forward=True)
+  optim = torch.optim.AdamW(model.parameters(), ...)   # 之后!
+  ```
+- **验收动作**：正式训练前先用大 lr（如 1e-3）跑 2-3 步 smoke，确认 loss 明显变化（或 ckpt diff≠0），再换正式 lr；小 lr 短 smoke 无法区分"没更新"和"更新慢"。
+- （实测：torch 2.10.0 / transformers 5.14.1，Qwen3_5ForConditionalGeneration 图片 CPT 4×Ascend910）
+
+## 127. FSDP2 + hccl：`dist.all_gather_object` 保存阶段死锁（两次实证）
+- **症状**：训练 100 步正常完成，进入 ckpt 保存阶段后整体卡死——部分 rank 已打印 mem 统计并存活、其余 rank 消失（4 进程只剩 2-3 个，存活者 CPU 空转或 100%+ 自旋），无任何报错/Traceback/OOM；`HCCL_CONNECT_TIMEOUT=7200` 使僵局持续数小时。
+- **根因**：`dist.all_gather_object`（对象集合通信）在该 torch 2.10.0+cpu / torch_npu 2.10.0.post2 / hccl 组合上不可靠；且此时某 rank 若先退出（或进入异常状态），其余 rank 在 collective 中无限等待。张量集合通信（all_gather/broadcast on plain tensors）与 `full_tensor()` 均正常，仅 object 版本出事。
+- **解法**：保存/收尾阶段**不要用 object 集合通信**。各 rank 独立 `json.dump` 自己的统计到文件（`mem_rank{r}.json`），rank0 需要汇总时直接读文件；同步只靠 `dist.barrier()` + 张量版 `full_tensor()`（该路径多次验证可靠）。
+- **识别**：训练日志最后几行是各 rank 的统计打印但无 "[done]"；进程数 < nproc 且无 CPU 活动的 rank 消失。
+- （实测：NuExtract3 4.54B 图片 CPT 4×Ascend910，两次卡死 → 改独立落盘后成功）
