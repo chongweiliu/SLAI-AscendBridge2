@@ -1,25 +1,35 @@
-# 并行策略选型（单卡 / DDP / FSDP2 / 模型并行）
+# 并行策略选型（单卡 / DDP / ZeRO-1 / FSDP2 / 模型并行）
 
-## 决策树（**先探测卡间互联速度**，见下「卡间互联探测」）
+## 决策树（**先定量实测卡间带宽**，见下「卡间互联探测」）
 ```
-先查卡间互联：hccn_tool -i <devid> -ip -g 是否配了 RoCE IP？带宽是否 ≥25GB/s？
-├─ 否（RoCE 未配 / PCIe ~2GB/s，互联慢）→ 大模型直接走【模型并行 device_map】(#24)，
+先跑 bench_hccl.py 实测 all-reduce 带宽（不要只凭 hccn_tool 推断，单机内走 HCCS 与 RoCE 无关）：
+├─ <10GB/s（PCIe 级，互联慢）→ 大模型直接走【模型并行 device_map】(#24)，
 │      不要用 FSDP2（其 all-gather/reduce-scatter 会通信-bound，实测慢 8×）
-└─ 是（互联正常）→ 按下面常规决策树：
+└─ ≥50GB/s（HCCS/RoCE 正常）→ 按下面常规决策树：
     单卡能装下整套(权重+优化器状态+激活)？
     ├─ 能 → 想多卡提速 且 步数>~150？
     │      ├─ 是 → DDP（每卡持完整参数/梯度/优化器）
     │      └─ 否 → 单卡 Eager + NpuFusedAdamW + SDPA
-    └─ 不能 → FSDP2（参数/梯度/优化器分片，fully_shard）
+    └─ 不能 → 差距小(缺 5~15GB)？ → ZeRO-1（ZeroRedundancyOptimizer，改动最小）
+             → 差距大/想扩到 4~8 卡 → FSDP2（参数/梯度/优化器分片，fully_shard）
 ```
 
 ## 卡间互联探测（选型前必做）
 ```bash
 # 是否配了 RoCE IP（没配 = 只能走慢速 PCIe）
 /usr/local/Ascend/driver/tools/hccn_tool -i <devid> -ip -g
-# 报 "no ip was preset" → 互联慢，大模型优先模型并行而非 FSDP2
+# 报 "no ip was preset" → 无 RoCE（仅影响跨机；单机内走 HCCS）
 ```
-- 定量确认：跑 2 步训练 + torch_npu.profiler，看 `operator_details.csv` 里 `HcclAllGather`+`HcclReduceScatter` 占比。>50% 说明通信-bound，改模型并行。
+- **判读红线（踩过坑）**：hccn_tool **空输出 ≠ "no ip was preset"**，两者含义不同；且注意路径 `/usr/bin/hccn_tool` 与 `/usr/local/Ascend/driver/tools/hccn_tool` 可能是不同工具。**RoCE 只决定跨机互联，单机多卡芯片间走 HCCS 高速总线（与 RoCE 配置无关）**——不要仅凭 hccn_tool 无 RoCE 输出就断定"单机互联慢"（实测误判案例：hccn_tool 空输出推断慢速，实为 HCCS 103GB/s）。
+- **定量基准（首选，10 秒出结果）**：跑 `scripts/bench_hccl.py.tmpl` 实测 all-reduce 总线带宽：
+  - `≥50GB/s`：互联正常，DDP/FSDP2 照常选
+  - `<10GB/s`（PCIe 级）：互联慢，大模型优先模型并行
+  ```bash
+  ASCEND_RT_VISIBLE_DEVICES=0,1 BENCH_WORLD=2 BENCH_SIZE_MB=1024 BENCH_ITERS=20 \
+    MASTER_ADDR=127.0.0.1 MASTER_PORT=29533 $PYTHON bench_hccl.py
+  # 示例输出: bus_bw=103.2GB/s (Atlas 910 单机 2 卡, HCCS)
+  ```
+- 训练级确认（存疑时）：跑 2 步训练 + torch_npu.profiler，看 `operator_details.csv` 里 `HcclAllGather`+`HcclReduceScatter` 占比。>50% 说明通信-bound，改模型并行。
 
 ## 选型表（单张 ~65GB NPU，bf16 权重 + fp32 AdamW 状态，近似）
 
@@ -39,6 +49,23 @@
 - 通信：反向一次 all-reduce（梯度平均），开销小。
 - 启动：`torchrun --nproc_per_node=8 cpt_ddp.py`，hccl 后端。
 - `find_unused_parameters=True`（有 tie/embedding 未用参数时安全，但有开销；确认无未用参数时可 False 提速）。
+
+## 何时用 ZeRO-1（朴素 DDP 差一点装不下的中间档）
+`torch.optim.ZeroRedundancyOptimizer`（PyTorch 原生，纯 Python，NPU 可用）= ZeRO-1：DDP 数据并行不变，
+只把 **AdamW 的 m/v 优化器状态**按 rank 分片（省 8 字节/参数 ÷ N）。适用于"朴素 DDP 差 5~15GB 装不下、
+又不想上 FSDP2 全套改造"的场景（如 3–7B 模型 2 卡）。
+
+- 每卡显存 ≈ 权重 4 + 梯度 4 + AdamW 8/N 字节/参数：4.2B/2卡 ≈ 52GB ✅、/4卡 ≈ 34GB ✅
+- 与 DDP 组合即可（`fully_shard` 不需要）；ZeRO-2/3 没有一对一原生物，直接用 FSDP2
+- DeepSpeed 原版 ZeRO 不在本技能范围（Ascend 需专用适配分支，本技能定位为 PyTorch 原生）
+- 代码改动极小（在 DDP 骨架上只换优化器一行）：
+```python
+optim = torch.optim.ZeroRedundancyOptimizer(
+    trainable, optimizer_class=torch.optim.AdamW, lr=LR, betas=(0.9, 0.95),
+    weight_decay=0.01, foreach=False)
+# 注意: ZeRO-1 的 ckpt 保存需在各 rank 收集 optimizer state 分片 (param_groups 同 rank 对齐),
+# 短训练可接受 rank0 只存 model state + 提示 optimizer 分片位置; 长训练用 FSDP2 更规范
+```
 
 ## 何时用 FSDP2
 
@@ -132,3 +159,20 @@ optim.step(); optim.zero_grad(set_to_none=False)
 ## 多卡选空闲卡
 无 `npu-smi` 时，用 `torch.npu.mem_get_info(i)` 逐卡查 free 显存，选空闲卡。
 单卡：`ASCEND_RT_VISIBLE_DEVICES=<idle_card>`；多卡：全可见，`torch.npu.set_device(local_rank)`。
+
+## 附录: device_map 单进程模型上叠加 DDP 的显存压法（实测 4.5B/65GB 卡）
+当朴素 DDP 全训练态超卡（如 4.2B×16B=67GB>65GB）又想先试 DDP 时，按优先级压显存（实测案例）：
+1. **冻结非关键参数**：冻结 embed_tokens(+tied lm_head) 与视觉塔——可训练 4.2B→3.57B（省 ~10GB）。
+   CPT 语义变化（embedding/lm_head 不更新），只建议短测试用，正式训练走 FSDP2。
+2. **冻结部分保持 bf16**：`from_pretrained(torch_dtype=bf16)` 后仅对可训练参数 `p.data=p.data.float()`
+   上转 fp32 master（冻结部分省一半，又省 ~2GB）。
+3. **`gradient_as_bucket_view=True`**：DDP 梯度桶直接视图化 `.grad`，省一份梯度大小的桶内存
+   （4.2B fp32 梯度桶 ≈ 14GB！默认 False 会双倍占）——但因此**不能用 NpuFusedAdamW**（融合优化器
+   与桶视图冲突），须用 `AdamW(foreach=False)`。
+- 结论：压到极限后 4.5B 在 2×65GB 上也只勉强贴线（静态 ~59GB + 激活/logits 峰值 2~4GB），
+  大词表模型（24.8 万 vocab 的 CE logits fp32 峰值可达 ~7GB@bs2）随 batch 线性放大，极易 OOM。
+  **教学价值大于实用价值：预算不够时正路是 FSDP2 / ZeRO-1，而不是给 DDP 挤显存。**
+
+## 实测基准脚本
+`scripts/bench_hccl.py.tmpl`：torchrun-free 的 HCCL all-reduce 带宽基准（torch.multiprocessing.spawn），
+选型前必跑，10 秒判定互联档位。实测参考：Atlas 910 单机 2 卡 HCCS = 103GB/s（fast 档）。
