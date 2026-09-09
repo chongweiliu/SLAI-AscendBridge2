@@ -81,7 +81,7 @@ def check_adaptation(adapt_dir: Path, skip_status: bool = False) -> list[str]:
     demo_content = demo_path.read_text(encoding="utf-8")
     if len(demo_content.strip().split("\n")) < 20:
         errors.append("demo.py 内容过少（至少 20 行）")
-    required_keywords = ["import torch", "device", "--dry-run"]
+    required_keywords = ["import torch", "device", "--dry-run", "--smoke-test"]
     missing = [keyword for keyword in required_keywords if keyword not in demo_content]
     if missing:
         errors.append(f"demo.py 缺少关键词: {missing}")

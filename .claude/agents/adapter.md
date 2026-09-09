@@ -152,7 +152,7 @@ SendMessage(recipient="adapter-1", content="action=adapt\nmodel_id={model_id}\na
 
 | 文件/目录 | 必须 | 说明 |
 |----------|------|------|
-| `demo.py` | ✅ | 主脚本，支持 `--dry-run` |
+| `demo.py` | ✅ | 主脚本，支持 `--dry-run` 和 `--smoke-test` |
 | `pyproject.toml` | ✅ | 依赖配置，含 cuda/ascend 可选 extra |
 | `README.md` | ✅ | 说明文档 |
 | `.status.json` | ✅ | 适配状态记录 |
@@ -160,6 +160,8 @@ SendMessage(recipient="adapter-1", content="action=adapt\nmodel_id={model_id}\na
 | `models/` | 自动 | 模型缓存目录（运行时创建） |
 | `.venv/` | 自动 | 虚拟环境（uv sync 创建） |
 | `uv.lock` | 自动 | 依赖锁定文件（uv sync 创建） |
+| `environment_validation.json` | 自动 | completed 门禁生成的隔离环境验收报告 |
+| `environment_validation.log` | 自动 | 隔离依赖重建和 smoke test 日志 |
 
 **权责**：**严禁**创建 `model_files/` 或 `accuracy_run_perf.py`，由 npu-optimizer 独占。
 
@@ -188,6 +190,9 @@ SendMessage(recipient="adapter-1", content="action=adapt\nmodel_id={model_id}\na
 3. **output.txt 存在**：必须通过 `uv run python demo.py --dry-run > output.txt 2>&1` 生成，包含完整运行日志
 4. **check_adaptation 通过**：`uv run python adaptation/scripts/check_adaptation.py --adapt "{adapt_name}"` 全部检查通过（adapt_name 由 `model_id` 经 `model_id_to_safe_name` 得到；可用 `--skip-status` 跳过 `.status.json`，仅用于本地手动验证）
 5. **.status.json**：`status=completed`，`stages.dry_run` 存在且（`npu_detected=true` 或 `device` 以 `cuda` 开头）
+6. **隔离环境验收**：completed 门禁在 `adaptation_path/.validation/{run_id}` 中仅按 `pyproject.toml` 和 `uv.lock` 重建依赖，并执行 `demo.py --smoke-test`
+
+`--smoke-test` 必须覆盖模型加载、预处理、一次 NPU/CUDA 前向计算和后处理，并确认没有静默回退到 CPU。验收成功后临时目录会删除，只保留 `environment_validation.json` 和 `environment_validation.log`；失败时保留现场供排查。
 
 ---
 
@@ -388,7 +393,7 @@ print("[Success] Dry run completed.")
 | 1 | 目录存在 | `adaptations/{sanitized_model_name}/` 不存在 |
 | 2 | demo.py 存在 | `demo.py` 文件不存在 |
 | 3 | demo.py 内容有效 | 文件少于 20 行 |
-| 4 | demo.py 关键代码 | 缺少 `import torch`、`device` 或 `--dry-run` |
+| 4 | demo.py 关键代码 | 缺少 `import torch`、`device`、`--dry-run` 或 `--smoke-test` |
 | 5 | pyproject.toml 存在 | `pyproject.toml` 文件不存在 |
 | 6 | README.md 存在 | `README.md` 文件不存在 |
 | 7 | uv.lock 有效 | `uv.lock` 不存在，或未包含 ascend/torch_npu 或 cuda 相关依赖 |
@@ -973,6 +978,14 @@ uv run python demo.py
 
 加载预训练权重，模型与 tokenizer 缓存到 `models/` 目录。
 
+### Smoke Test（真实权重最小推理）
+
+\`\`\`bash
+uv run --extra ascend python demo.py --smoke-test
+\`\`\`
+
+用于 completed 隔离环境验收，必须覆盖模型加载、预处理、一次硬件前向计算和后处理，不得回退 CPU。
+
 ### 保存全部输出
 
 \`\`\`bash
@@ -983,7 +996,7 @@ uv run python demo.py > output.txt 2>&1
 
 | 文件 | 说明 |
 |------|------|
-| `demo.py` | 主脚本，支持 `--dry-run` |
+| `demo.py` | 主脚本，支持 `--dry-run` 和 `--smoke-test` |
 | `pyproject.toml` | 依赖配置，含 cuda/ascend 可选 extra |
 | `models/` | 模型缓存目录（自动创建） |
 | `output.txt` | 运行输出（命令行重定向生成） |

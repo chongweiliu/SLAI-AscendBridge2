@@ -11,7 +11,7 @@ description: 将 PyTorch 模型适配到 Ascend NPU。提供设备选择、环�
 
 1. **环境配置**：确保 `pyproject.toml` 正确配置（参考 `uv-env-setup` skill）。
 2. **代码适配**：使用 `demo.py.j2` 模板生成 `demo.py`。
-3. **验证**：Dry Run 跑通，`check_adaptation.py` 通过。
+3. **验证**：Dry Run 跑通，`check_adaptation.py` 通过，并由 completed 门禁在隔离环境执行 `--smoke-test`。
 
 ## 1. 模板与设备检测
 
@@ -48,6 +48,14 @@ uv run python demo.py --dry-run
 
 - `from_pretrained(..., device_map="auto", cache_dir=CACHE_DIR)`；
 - 模型与 tokenizer 缓存到 `adaptations/<name>/models/`。
+
+隔离环境验收使用真实权重执行最小推理：
+
+```bash
+uv run --no-sync --extra ascend python demo.py --smoke-test
+```
+
+该模式至少覆盖模型加载、预处理、一次硬件前向计算和后处理，且不得回退 CPU。
 
 ## 4. 保存输出与验证
 
