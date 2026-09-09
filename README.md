@@ -16,7 +16,7 @@
 
 v2.3 新增 `ascend-torch-cpt` Skill，把任意 HuggingFace 模型 + 训练语料在昇腾 NPU（Ascend 910/910B/910C/950 等）上端到端跑一遍继续预训练（Continued Pre-Training, CPT），并产出训练脚本、loss 曲线（含公网直链）、概要总结与训练前后域内评估。
 
-用户只需给出【模型权重路径】+【训练数据集路径】即可启动；其余超参由 Skill 据模型规模、硬件显存与数据规模自动择优。核心能力：
+用户只需给出【模型权重路径】+【训练数据集路径】即可启动；其余超参由 Skill 据模型规模、硬件显存与数据规模自动择优（也可以提示词输入超参内容）。核心能力：
 
 - **训练范式自动选型（10 类，不止文本 LM）**：按模型 config 第一步判定训练范式并全局分支——文本 LM / 多模态文本头（next-token CE）、Encoder MLM（BERT/XLMR/DistilBERT，15% mask CE）、Seq2Seq（NLLB/T5/BART，翻译 CE）、diffusers 流匹配（SD3.5/Wan2.2 等，VAE latent + velocity loss）、diffusers DDPM（SDXL/Wan DiT，noise MSE）、音频-LLM（Qwen2-Audio，转写 CE + audio token 掩码）、MLIP 力场（MatterSim/EquiformerV2/MACE，能量 + 力=-∂E/∂x 联合回归）、ViT/MAE 视觉（Prithvi，75% patch mask + MSE 重建）、VLM 文本头（Qwen2.5-VL/Qwen3-VL，`ForConditionalGeneration` 加载只训文本头）、视觉/时序/音频专用模型（dinov2/rtdetr/depth/timesfm/layoutlmv3/whisper/ast/speecht5，各自原生 loss）；另支持 Keras/TF `.pkl`/`.h5` → PyTorch 权重复刻迁移（形状严格校验 + 同形交换消融）
 - **训练方式自动选型**：单卡 Eager / DDP（每卡持完整参数）/ FSDP2（`fully_shard` 分片）/ 模型并行（`device_map="auto"`，互联慢时大模型实测 8× 加速），按参数量、单卡显存与**卡间互联实测**（`hccn_tool` 探测 RoCE/PCIe + HCCL 基准脚本）自动决定
