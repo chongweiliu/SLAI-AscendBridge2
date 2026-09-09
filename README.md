@@ -2,7 +2,7 @@
 
 `SLAI-AscendBridge2` 是一款面向华为昇腾 NPU 的自动化智能体编排、单模型适配与推理部署框架，用于将 PyTorch 模型迁移到 Ascend。它支持从模型发现、环境治理、代码适配、精度评测到 NPU 性能优化的闭环流程；如果需要，也可以继续扩展到第四阶段 `business_benchmark`。
 
-当前版本为 **v2.3**。在 v2.0 模型适配、评测和优化能力的基础上：v2.1 新增 **vLLM-Ascend 自动部署**能力（本机/SSH/Kubernetes/CCE/ACK 推理服务部署与真实请求验收）；v2.2 新增 **CANNBot 按需协同适配**（仅在标准 PyTorch 与 `torch_npu` 专用接口均无法解决算子缺口时，才调用 CANNBot 生成 Ascend C 自定义算子）；v2.3 新增 **昇腾 NPU 继续预训练（CPT）** 能力，通过 `ascend-torch-cpt` Skill 把任意 HF 模型 + 语料在昇腾 NPU 上端到端跑通继续预训练，覆盖单卡/DDP/FSDP2 自动选型、torch_npu 融合路径、超参自动择优、loss 曲线、前后 PPL/acc/F1 评估与断点续训。
+当前版本为 **v2.3**。在 v2.0 模型适配、评测和优化能力的基础上：v2.1 新增 **vLLM-Ascend 自动部署**能力（本机/SSH/Kubernetes/CCE/ACK 推理服务部署与真实请求验收）；v2.2 新增 **CANNBot 按需协同适配**（仅在标准 PyTorch 与 `torch_npu` 专用接口均无法解决算子缺口时，才调用 CANNBot 生成 Ascend C 自定义算子）；v2.3 新增 **昇腾 NPU 继续预训练（CPT）** 能力，通过 `ascend-torch-cpt` Skill 把任意 HF 模型 + 语料在昇腾 NPU 上端到端跑通继续预训练，覆盖 10 类训练范式自动选型（文本 LM / Encoder MLM / Seq2Seq / 扩散流匹配与 DDPM / 音频-LLM / MLIP 力场 / ViT-MAE / VLM 文本头 / 视觉时序音频专用 + Keras→PyTorch 迁移）、单卡/DDP/FSDP2/模型并行自动选型、torch_npu 融合路径、超参自动择优、实时用时表、loss 曲线（公网直链）、训练前后域内评估与断点续训，附 127 条实战踩坑与 20 个标准脚本模板。
 
 这个仓库是**框架仓**，负责脚本、检查器、调度骨架、dashboard、`.claude` 下的 agents / skills / agent-memory，以及 prompt 模板，不默认携带公开 adaptation 集合。模型级 adaptation 建议放在独立仓库 `SLAI-AscendBridge2-Adaptations`，或按你的内部目录结构单独维护。
 
@@ -18,15 +18,18 @@ v2.3 新增 `ascend-torch-cpt` Skill，把任意 HuggingFace 模型 + 训练语�
 
 用户只需给出【模型权重路径】+【训练数据集路径】即可启动；其余超参由 Skill 据模型规模、硬件显存与数据规模自动择优。核心能力：
 
-- **训练方式自动选型**：单卡 Eager / DDP（每卡持完整参数）/ FSDP2（`fully_shard` 分片），按模型参数量与单卡显存自动决定
-- **torch_npu 融合路径**：`NpuFusedAdamW` 融合优化器、`F.scaled_dot_product_attention`→NPU fusion attention 自动路由、`TASK_QUEUE_ENABLE` 异步算子下发；图模式（torchair）仅长训练/推理用
-- **超参自动择优**：precision（fp32 主权重 + bf16 autocast）、lr/batch/seq/warmup、梯度检查点、梯度累积，并附 OOM 6 级回退阶梯
-- **数据格式自动转换**：jsonl/json/parquet/csv 均支持；`{"messages"}` chat 格式或 `{"text"}` 纯文本自动识别，按 `seq_len` 打包
-- **断点续训**：周期存 `ckpt_latest.pt`（模型+优化器+step），`RESUME=1` 中断续训
-- **loss 曲线 + 公网直链**：matplotlib 画图，catbox.moe/0x0.st/uguu.se 顺序上传取直链，外网全不通降级表格
-- **训练前后评估**：PPL / next-token acc / mean NLL + 生成 Precision/Recall/F1/EM（chat 数据），给出“训练是否有效”结论
-- **踩坑清单与标准模板**：21 条真实踩坑（含 FSDP2、torch_npu autoload、NpuFusedAdamW 与 FSDP2 不兼容、torch.load weights_only 等）+ 7 个可直接复用的脚本模板
-- **多模态模型支持**：多模态 checkpoint → 文本头权重重映射（如 Qwen3.5 `ForConditionalGeneration` → `ForCausalLM`）
+- **训练范式自动选型（10 类，不止文本 LM）**：按模型 config 第一步判定训练范式并全局分支——文本 LM / 多模态文本头（next-token CE）、Encoder MLM（BERT/XLMR/DistilBERT，15% mask CE）、Seq2Seq（NLLB/T5/BART，翻译 CE）、diffusers 流匹配（SD3.5/Wan2.2 等，VAE latent + velocity loss）、diffusers DDPM（SDXL/Wan DiT，noise MSE）、音频-LLM（Qwen2-Audio，转写 CE + audio token 掩码）、MLIP 力场（MatterSim/EquiformerV2/MACE，能量 + 力=-∂E/∂x 联合回归）、ViT/MAE 视觉（Prithvi，75% patch mask + MSE 重建）、VLM 文本头（Qwen2.5-VL/Qwen3-VL，`ForConditionalGeneration` 加载只训文本头）、视觉/时序/音频专用模型（dinov2/rtdetr/depth/timesfm/layoutlmv3/whisper/ast/speecht5，各自原生 loss）；另支持 Keras/TF `.pkl`/`.h5` → PyTorch 权重复刻迁移（形状严格校验 + 同形交换消融）
+- **训练方式自动选型**：单卡 Eager / DDP（每卡持完整参数）/ FSDP2（`fully_shard` 分片）/ 模型并行（`device_map="auto"`，互联慢时大模型实测 8× 加速），按参数量、单卡显存与**卡间互联实测**（`hccn_tool` 探测 RoCE/PCIe + HCCL 基准脚本）自动决定
+- **torch_npu 融合路径**：`NpuFusedAdamW` 融合优化器、`F.scaled_dot_product_attention`→NPU fusion attention 自动路由、`TASK_QUEUE_ENABLE` 异步算子下发、`expandable_segments` 显存策略（FSDP2 自动守卫切换）；图模式（torchair）仅长训练/推理用
+- **超参自动择优**：precision（fp32 主权重 + bf16 autocast；>3B 改 bf16 权重 + plain AdamW）、lr/batch/seq/warmup（CPT 基线 1e-5，照抄从零调度会发散）、梯度检查点、梯度累积，并附 OOM 6 级回退阶梯
+- **模型与语料自动获取**：`robust_download.sh` 先做当日 6 源可达性矩阵探测（hf-mirror/HuggingFace/ModelScope/GitHub/codeload/Zenodo），多路 Range 分块断点续传 + md5/sha256 终检；下载挂后台与脚本开发并行不干等；**CPT 前权重 NaN 全量扫描**（尺寸校验通过 ≠ 比特级完好）
+- **数据格式自动转换**：jsonl/json/parquet/csv/EXTXYZ/GeoTIFF/音频均支持；`{"messages"}` chat 格式或 `{"text"}` 纯文本自动识别，按 `seq_len` 打包并记录 epoch；Seq2Seq 保持 src-tgt pair，扩散模型预计算 VAE latent + text embedding
+- **断点续训**：周期存 `ckpt_latest.pt`（模型+优化器+step），`RESUME=1` 中断续训；best/final/latest 三份 ckpt 语义区分
+- **loss 曲线 + 公网直链**：matplotlib 画图（EMA 平滑），catbox.moe/0x0.st/uguu.se 顺序上传取直链，外网全不通降级表格
+- **全程实时用时表**：9 阶段预计/实际/ETA 表格按 T1–T6 六个硬性触发点实时刷新（进入即标 ⏳、完成即结 ✅、长跑每 1–2 分钟心跳外推 ETA），任何时刻都知道"现在做到哪、还要多久"
+- **训练前后评估（按范式选指标）**：文本 PPL / next-token acc / 生成 Precision/Recall/F1/EM（chat 数据）、MLM loss/masked acc、翻译 CE、velocity/noise MSE（扩散）、能量+力 MAE/RMSE（力场）、masked patch MSE（视觉）；对比三原则（严格同条件、协议锚定、持平可能是正确结论）+ 独立 held-out 过拟合检查，给出"训练是否有效"结论
+- **踩坑清单与标准模板**：**127 条真实踩坑**（FSDP2 优化器构建顺序、NpuFusedAdamW 与 FSDP2/DDP 兼容性、torch_npu autoload、`torch.load` weights_only、多模态键重映射、EE9999/507035 无堆栈崩溃的插桩二分定位等）+ **20 个可直接复用的脚本模板**（5 类范式训练脚本与对应数据准备/评估脚本、FSDP/模型并行变体、HCCL 互联基准、DDP 启动、断点续训、loss 绘图、用时表、可靠下载）+ 11 个专题 references（融合 API / 并行策略 / 超参择优 / 数据准备 / 断点续训 / 评估指标 / 多模态重映射 / 扩散生成式 / 音频-LLM / RL 后训练 / 踩坑清单）
+- **多模态模型支持**：多模态 checkpoint → 文本头权重重映射（如 Qwen3.5 `ForConditionalGeneration` → `ForCausalLM`；remap 全程搬 NPU 规避容器 cgroup 内存限制）
 
 > 范围：单机多卡（1–8 卡）。多机 CPT 需 `torchrun --nnodes` + RDMA/HCCL 跨机配置，属另一层复杂度，本 Skill 不含。
 
@@ -595,6 +598,69 @@ Agent 会继续收集目标主机、用户名和认证方式。密码、Token �
 - 本次生成的一键部署脚本或 YAML 路径
 
 部署失败时只清理本次创建的进程或调度资源，并保留必要的诊断信息。
+
+---
+
+### 6. 昇腾 NPU 继续预训练（CPT）
+
+适用场景：
+
+- 已有 HF 模型权重 + 领域语料，希望在昇腾 NPU 上做继续预训练 / 二次预训练 / CPT
+- 需要从范式判定、环境勘察、数据转换到训练评估的端到端闭环，不想手写训练脚本
+- 需要训练过程可观测（实时用时表、loss 曲线、公网直链）与训练前后对比结论
+
+#### 启动方式
+
+在仓库根目录启动 Claude 后，直接用自然语言给出【模型权重路径】+【训练数据集路径】，`ascend-torch-cpt` Skill 会自动触发：
+
+```text
+请在昇腾 NPU 上对 Qwen3.5-4B 做继续预训练。
+模型权重：/mnt/models/Qwen3.5-4B
+训练语料：/mnt/data/my_domain_corpus.jsonl（{"text"} 格式，约 200MB）
+```
+
+seq_len、batch、lr、并行方式、是否评估等未指定时，由 Skill 据模型规模、显存与数据规模自动择优；产物统一归档到 `training-ws/<模型名>-cpt/`。
+
+#### 多范式示例
+
+```text
+# Encoder MLM（BERT/XLMR/DistilBERT 类）
+请对 BiomedBERT 做继续预训练，权重 /mnt/models/BiomedBERT，语料 /mnt/data/pubmed.jsonl
+
+# Seq2Seq（NLLB/T5/BART 类，保持 src-tgt pair）
+请对 nllb-200-distilled-1.3B 做继续预训练，语料 /mnt/data/opus100-en-zh.jsonl（{"src","tgt"} 字段）
+
+# 扩散模型（diffusers 流匹配 / DDPM）
+请对 SD3.5-medium 做继续预训练，语料为 /mnt/data/images/（图像目录）
+
+# 多模态文本头（VLM）
+请对 Qwen2.5-VL-3B 的文本头做继续预训练，语料 /mnt/data/vlm_text.jsonl
+
+# 力场（MLIP）
+请对 MatterSim 做继续预训练，数据 /mnt/data/structures.xyz（能量+力标签）
+```
+
+#### 自动流程（9 阶段，全程实时用时表）
+
+```text
+意图确认与路径核对（含训练范式判定，写进 env_probe.json）
+-> 环境/依赖勘察（NPU 实测 matmul、cgroup 内存限制、卡间互联 HCCL）
+-> 模型与数据集获取（6 源可达性矩阵探测 + 权重 NaN 全量扫描 + 下载与开发并行）
+-> 语料格式转换与打包（按范式分支：文本打包 / src-tgt / VAE latent 预计算 / 构图）
+-> 训练方式自动选型（单卡 Eager / DDP / FSDP2 / 模型并行）
+-> 超参自动择优（precision / lr / batch / seq / warmup / grad-ckpt / OOM 6 级回退）
+-> 生成训练脚本并 2 步 smoke（模板已规避 127 条已知坑）
+-> 正式训练（逐 step 日志 + 心跳 + loss 曲线 + 公网直链 + 周期 ckpt 断点续训）
+-> 训练前后域内评估 + 概要总结报告（含"训练是否有效"结论与完整用时表）
+```
+
+#### 产出清单（training-ws/&lt;模型名&gt;-cpt/）
+
+- 按范式生成的训练脚本（`cpt_train.py` / `cpt_mlm.py` / `cpt_seq2seq.py` / `cpt_diffusion.py` / `cpt_audio_llm.py` 等）与数据准备脚本
+- `logs/step_loss.jsonl` 逐 step 日志 + `outputs/loss_curve.png` loss 曲线（附公网可访问直链）
+- `outputs/train_summary.json` 训练概要 + `cpt_model_state.pt`（评估用）/ `ckpt_latest.pt`（续训用）
+- `outputs/eval_results.json` 训练前后域内评估对比（PPL/acc/F1/CE/MSE 等按范式选择）
+- `README.md` 总结报告（超参表、loss 收敛、关键修正记录、复跑命令 + 完整用时表）
 
 ---
 
