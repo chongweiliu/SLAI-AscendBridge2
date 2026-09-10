@@ -52,7 +52,6 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
     - **Seq2Seq 模型**（NLLB/T5/BART, config.model_type 含 m2m_100/t5/bart/marian）→ **翻译 CE**（`cpt_seq2seq.py.tmpl`，#109）；数据用 `prepare_data_seq2seq.py.tmpl`（保持 src-tgt pair）。
     - `model_index.json`+transformer/vae/text_encoder/scheduler → **diffusers 生成式**（流匹配 loss，references/generative-diffusion-cpt.md）。
     - `Qwen2Audio*`/audio-text-to-text → **音频-LLM**（转写 CE，references/audio-llm-cpt.md）。
-    - **TTS talker / speech codec-token LM（Qwen3-TTS/CosyVoice 类，双轨 text+codec 流，talker 只预测 codec0）** → **全流 codec next-token CE + 多码本 sub-head CE**（references/speech-codec-lm-cpt.md，`cpt_speech_codec.py.tmpl`；GGUF 权重不可训须换官方 HF）。
     - MLX 格式 → 须换同源 PyTorch 基座（#47）。
     - Keras/TF `.pkl`/`.h5` → **PyTorch 复刻+权重迁移**（#84–#86）。
     - **MLIP 力场（能量+力输出，如 MatterSim/EquiformerV2/MACE）** → **能量+力联合回归**（力=-∂E/∂x autograd 或 direct force head；评估禁 no_grad #92、shift-only scaling #93、后端静默降级 patch #91、科研包兼容链 #99、能量 per-element 参考口径 #100）。
@@ -149,7 +148,6 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 | **Seq2Seq** (NLLB/T5/BART/Marian) | 翻译 CE (labels pad→-100) | `cpt_seq2seq.py.tmpl` | 翻译 CE/PPL |
 | diffusers 生成式 | 流匹配 on VAE latent | `cpt_diffusion.py.tmpl` | velocity MSE+采样 |
 | 音频-LLM | 转写 CE（mask audio token） | `cpt_audio_llm.py.tmpl` | 转写 CE loss/WER |
-| TTS talker / speech codec-token LM | 全流 codec0 CE + 多码本 sub-head CE | `cpt_speech_codec.py.tmpl` | codec PPL / next-token acc / sub-head CE |
 | MLIP 力场 | 能量(per-atom)+力（力=-∂E/∂x） | 按官方库复用+patch | E/F MAE（禁 no_grad） |
 | **ViT/MAE 视觉** (自定义代码, 如 Prithvi) | MIM 75% mask + MSE 重建 | 自定义脚本+`sys.path` import | masked patch MSE |
 | **VLM 文本头** (Qwen2.5-VL 等) | next-token CE (文本头) | `*ForConditionalGeneration` 加载 (#115) | PPL/acc |
