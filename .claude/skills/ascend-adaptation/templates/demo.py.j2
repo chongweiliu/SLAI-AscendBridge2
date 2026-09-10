@@ -1,7 +1,7 @@
 """
 Template: .claude/skills/ascend-adaptation/templates/demo.py.j2
 Description: Standard Ascend adaptation demo script.
-Supports DRY RUN (random weights) and Full Run (real weights).
+Supports DRY RUN (random weights), smoke test, and Full Run (real weights).
 保存输出: uv run python demo.py > output.txt 2>&1
 """
 
@@ -57,7 +57,9 @@ def get_device():
 # ============================================================
 def main():
     parser = argparse.ArgumentParser(description="Ascend Adaptation Demo")
-    parser.add_argument("--dry-run", action="store_true", help="Force dry run mode (random weights)")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--dry-run", action="store_true", help="Force dry run mode (random weights)")
+    mode.add_argument("--smoke-test", action="store_true", help="Run one minimal inference with real weights")
     args = parser.parse_args()
 
     MODEL_ID = "{{ model_id }}"
@@ -79,7 +81,7 @@ def main():
     # Step 2: Model Loading (Dry Run vs Real)
     # ============================================================
     # --dry-run: 随机权重 + 缩小层数，快速验证架构与代码路径，不下载权重。
-    # 无 --dry-run: 加载预训练权重，使用 device_map="auto" 支持多卡。
+    # --smoke-test 或无参数: 加载预训练权重，使用 device_map="auto" 支持多卡。
 
     config = AutoConfig.from_pretrained(MODEL_ID, trust_remote_code=True, cache_dir=CACHE_DIR)
     nlayers = getattr(config, "num_hidden_layers", None) or getattr(config, "n_layer", "?")
@@ -123,7 +125,7 @@ def main():
     start_time = time.time()
 
     with torch.no_grad():
-        outputs = model.generate(**inputs, max_new_tokens=20, do_sample=False)
+        outputs = model.generate(**inputs, max_new_tokens=1 if args.smoke_test else 20, do_sample=False)
 
     assert outputs is not None and outputs.shape[0] > 0, "generate() returned empty output"
     end_time = time.time()

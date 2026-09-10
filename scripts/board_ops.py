@@ -1015,6 +1015,17 @@ def update_adaptation_status(model_id, adaptation_status, adaptation_notes="", a
             print(f"Intercepted: cannot set adaptation_status=completed until check passes for {adapt_name}")
             print(f"INTERCEPTED: model_id={model_id} owner={owner_to_idle or ''} notes={adaptation_notes[:200]}")
             sys.exit(1)
+        verify_ok, verify_err = _run_check_script(
+            Path(_PROJECT_ROOT) / "adaptation" / "scripts" / "verify_environment.py",
+            adapt_name,
+            "verify_environment.py",
+        )
+        if not verify_ok:
+            conn.close()
+            adaptation_notes = f"隔离环境重建或 smoke test 未通过。{verify_err}"
+            print(f"Intercepted: cannot set adaptation_status=completed until environment validation passes for {adapt_name}")
+            print(f"INTERCEPTED: model_id={model_id} owner={owner_to_idle or ''} notes={adaptation_notes[:200]}")
+            sys.exit(1)
 
     owner_val = "" if adaptation_status in ["completed", "skipped", "not_applicable", "needs_authorization", "pending"] else None  # Release owner if done
 

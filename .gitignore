@@ -5,6 +5,7 @@
 .uv-cache/
 .venv/
 .venv_user/
+adaptations/**/.validation/
 .cache*
 .env
 .DS_Store
