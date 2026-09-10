@@ -11,15 +11,18 @@
 #  T4 长跑心跳   : 任何预计>3min 阶段(下载/训练/评估)每 1–2min 轮询并重印表或 doing 行(带 ETA/已耗/百分比)
 #                  （"挂后台就消失"是明确违规；训练脚本自身另每~30s刷训练日志）
 #  T5 评估切换   : 阶段 8 每切换一个模型 -> 重印整表
-#  T6 收尾汇总   : 最终答复(上屏)与 README 都必须带完整用时表(阶段/预计/实际/说明+合计+预估偏差解释)
+#  T6 收尾汇总   : 最终答复(上屏)与 README 都必须带完整用时表(阶段/预计/实际/进度%/说明+合计整体%+剩余ETA+预计完成时刻)
 #
 # 用法: $PYTHON timing_table.py            # 读 timing.json 打印表
 #       $PYTHON timing_table.py --set 7 actual 175 "100步完成"      # 记实际用时+置done+说明
 #       $PYTHON timing_table.py --set 7 est 360 ""                  # 设该阶段预计用时
 #       $PYTHON timing_table.py --overall 1320 "~22min"               # 更新整体预估
-#       $PYTHON timing_table.py --doing 7 90 "50/200步 ETA1.5min loss2.3"  # 标记进行中+已耗时(可选)+说明, 重印整表
+#       $PYTHON timing_table.py --doing 7 90 "50/200步 ETA1.5min loss2.3"  # 标记进行中+已耗时+说明, 重印整表
+#       $PYTHON timing_table.py --doing 7 --pct 25 "loss 2.3"        # 显式百分比(--pct 0-100)
 #                                                                   (训练脚本每~30s调用, 实现全程实时刷新)
-import os, json, sys
+# 进度%自动解析: doing 的 note 含 "N/M" 模式(如 "50/200步"/"3/40分片")时自动算 N/M 为阶段进度;
+#               整体进度% = (已完成阶段预计之和 + doing阶段预计×阶段%) / 整体预估。
+import os, json, sys, re, datetime
 
 WS_DIR = os.environ.get("WS_DIR", os.getcwd())
 TFILE = os.path.join(WS_DIR, "outputs", "timing.json")
@@ -67,34 +70,76 @@ def fmt(s):
         return "—"
     if s < 60:
         return f"{s:.0f}s"
-    return f"{s/60:.1f}min"
+    if s < 3600:
+        return f"{s/60:.1f}min"
+    return f"{s/3600:.1f}h"
+
+
+def parse_pct(note):
+    """从 note 解析 "N/M" 模式为百分比（如 '50/200步'/'3/40分片'/'第7个/共24个'）。"""
+    if not note:
+        return None
+    m = re.search(r"(\d+(?:\.\d+)?)\s*/\s*(\d+(?:\.\d+)?)", note)
+    if m:
+        n, t = float(m.group(1)), float(m.group(2))
+        if t > 0 and n <= t * 1.05:  # 容忍轻微越界
+            return min(100.0, n / t * 100.0)
+    return None
 
 
 def render(d):
     ico = {"done": "✅done", "doing": "⏳doing", "pending": "⏳pending"}
     lines = []
-    lines.append("| 阶段 | 预计 | 实际 | 状态 | 说明 |")
-    lines.append("|---|---|---|---|---|")
+    lines.append("| 阶段 | 预计 | 实际 | 进度 | 状态 | 说明 |")
+    lines.append("|---|---|---|---|---|---|")
     sum_est = sum_act = 0.0
-    act_done = False
+    done_est = 0.0           # 已完成阶段的预计之和（算整体%用）
+    doing_progress_s = 0.0   # doing 阶段按阶段%折算的等效完成秒数
     for p in d["phases"]:
         est = p.get("est_s")
         act = p.get("actual_s")
         sum_est += est or 0
         if act is not None:
             sum_act += act
-        st = ico.get(p.get("status", "pending"), p.get("status", ""))
-        lines.append(f"| {p['id']} {p['name']} | {fmt(est)} | {fmt(act)} | {st} | {p.get('note','')} |")
+        st = p.get("status", "pending")
+        # 阶段进度%
+        pct = p.get("pct")
+        if st == "done":
+            pct_txt = "100%"
+            done_est += est or act or 0
+        elif st == "doing":
+            if pct is None:
+                pct = parse_pct(p.get("note", ""))
+            pct_txt = f"{pct:.0f}%" if pct is not None else "…"
+            if pct is not None and est:
+                doing_progress_s += est * pct / 100.0
+        else:
+            pct_txt = "—"
+        lines.append(f"| {p['id']} {p['name']} | {fmt(est)} | {fmt(act)} | {pct_txt} | {ico.get(st, st)} | {p.get('note','')} |")
     overall_est = d.get("overall_estimate_s")
     overall_note = d.get("overall_note", "")
+    # 整体进度%：优先 (已完成预计 + doing 折算) / 整体预估；无整体预估时退回已完成阶段占比
+    denom = overall_est or sum_est or None
+    overall_pct = None
+    if denom:
+        overall_pct = min(100.0, (done_est + doing_progress_s) / denom * 100.0)
+    # 剩余时间：整体预估×剩余比例（更稳），退回 overall_est - sum_act
     rem = None
     if overall_est:
-        rem = max(0, overall_est - sum_act)
+        if overall_pct is not None:
+            rem = overall_est * (1 - overall_pct / 100.0)
+        else:
+            rem = max(0, overall_est - sum_act)
+    pct_txt = f" **{overall_pct:.0f}%**" if overall_pct is not None else ""
     rem_txt = f" 剩余 ~{fmt(rem)}" if rem is not None else ""
+    eta_txt = ""
+    if rem is not None and rem > 0:
+        fin = datetime.datetime.now() + datetime.timedelta(seconds=rem)
+        eta_txt = f" 预计完成 {fin.strftime('%H:%M')}"
     overall_st = "进行中" if any(p.get("status") == "doing" for p in d["phases"]) else (
         "✅完成" if all(p.get("status") == "done" for p in d["phases"]) else "待开始")
     lines.append(f"| **合计** | **{fmt(overall_est) or overall_note or '—'}** "
-                 f"| **{fmt(sum_act) if sum_act else '—'}** | **{overall_st}** |{rem_txt} |")
+                 f"| **{fmt(sum_act) if sum_act else '—'}** |{pct_txt} | **{overall_st}** |{rem_txt}{eta_txt} |")
     return "\n".join(lines)
 
 
@@ -119,6 +164,7 @@ def main():
                 elif field == "actual":
                     p["actual_s"] = float(val)
                     p["status"] = "done"
+                    p.pop("pct", None)
                 elif field in ("status",):
                     p["status"] = val
                 if note is not None:
@@ -126,18 +172,25 @@ def main():
         save(d); print(render(d), flush=True); return
     if args[0] == "--doing" and len(args) >= 2:
         pid = int(args[1]); rest = args[2:]
-        # 第 2 个参数若可解析为浮点则作 actual_s(已耗时), 否则全部作 note
-        actual = None; note = ""
-        if rest:
-            try:
-                actual = float(rest[0]); note = " ".join(rest[1:])
-            except ValueError:
-                note = " ".join(rest)
+        # 兼容: --doing <id> [已耗时s] [note]  /  --doing <id> --pct <0-100> [note]
+        actual = None; note = ""; pct = None
+        if rest and rest[0] == "--pct" and len(rest) >= 2:
+            try: pct = float(rest[1])
+            except ValueError: pass
+            note = " ".join(rest[2:])
+        else:
+            if rest:
+                try:
+                    actual = float(rest[0]); note = " ".join(rest[1:])
+                except ValueError:
+                    note = " ".join(rest)
         for p in d["phases"]:
             if p["id"] == pid:
                 p["status"] = "doing"; p["note"] = note
                 if actual is not None:
                     p["actual_s"] = actual
+                if pct is not None:
+                    p["pct"] = pct
         save(d); print(render(d), flush=True); return
     print(render(d), flush=True)
 

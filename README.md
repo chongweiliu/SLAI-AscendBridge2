@@ -129,6 +129,7 @@ SLAI-AscendBridge2/
 ├── prompts/                           # team-lead prompt 模板
 ├── scripts/
 │   ├── board_ops.py                   # 看板 CRUD、心跳、任务分配
+│   ├── progress_table.py              # 通用长任务进度表（阶段/整体进度% + 剩余 ETA + 预计完成时刻）
 │   ├── get_model_info.py              # 模型元数据提取
 │   ├── download_datasets.py           # 数据集下载
 │   ├── dataset_mapping.py             # 模型 -> 数据集映射
@@ -701,6 +702,37 @@ uv run python accuracy_run_perf.py --use-pretrained
 ```
 
 如果当前模型只做到前三个阶段，可以不启用 `business_benchmark`。
+
+## 长任务进度汇报（进度百分比 + 剩余时间预估）
+
+批量适配、评测、优化、CPT 等多阶段长任务，用 `scripts/progress_table.py` 在屏幕实时维护一张含**进度百分比**与**剩余 ETA / 预计完成时刻**的进度表（解决"只看得到已进行多久、不知道还要多久"的问题）：
+
+```bash
+# 添加阶段（名称 + 预计秒数）并设整体预估
+uv run python scripts/progress_table.py --file /tmp/batch.json add "模型下载与环境准备" 1800
+uv run python scripts/progress_table.py --file /tmp/batch.json add "适配脚本开发" 3600
+uv run python scripts/progress_table.py --file /tmp/batch.json overall 10800 "~3h"
+
+# 执行中：标记进行中（note 含 "N/M" 自动解析阶段百分比；也可 --pct 显式指定）
+uv run python scripts/progress_table.py --file /tmp/batch.json doing 1 "9/24 模型已完成适配"
+uv run python scripts/progress_table.py --file /tmp/batch.json doing 1 --pct 75 "18/24 完成"
+
+# 完成即结（实际秒数）；随时 show 重印整表
+uv run python scripts/progress_table.py --file /tmp/batch.json done 1 3700 "24/24"
+uv run python scripts/progress_table.py --file /tmp/batch.json show
+```
+
+输出示例（合计行 = 整体进度% + 剩余 ETA + 预计完成时刻）：
+
+```text
+| # | 阶段 | 预计 | 实际 | 进度 | 状态 | 说明 |
+|---|---|---|---|---|---|---|
+| 0 | 模型下载与环境准备 | 30.0min | 35.0min | 100% | ✅done | 24/24 模型就绪 |
+| 1 | 适配脚本开发 | 60.0min | 22.5min | 38% | ⏳doing | 9/24 模型已完成适配 |
+| **合计** | **2 阶段** | **90.0min** | **57.5min** | **57%** | **进行中** | 剩余 ~38.6min 预计完成 16:22 |
+```
+
+配套约定：对 Claude 编排的长任务，可直接使用提示词"全程表格汇报用时：在这个过程中整体的用时估计以及每一阶段的大概用时和预计后续用时也请及时给出评估，并用表格等格式化方式在屏幕实时更新，最终完成整体实际用时汇总汇报"——agent 会按 T1–T6 触发点（开工基线/进入即标/完成即结/长跑心跳/切换重印/收尾汇总）调用进度表工具。CPT Skill 内置同源增强版 `timing_table.py.tmpl`（9 阶段骨架 + "N/M" 自动百分比 + 整体% + 预计完成时刻）。
 
 ## 与 adaptation 仓配合
 
