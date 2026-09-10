@@ -1,0 +1,262 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""corpus_to_sft.py.tmpl — 原始语料 → LoRA SFT 任务化切分器（4 模型实战验证，2026-09-10）
+
+把原始语料（维基/文章/代码/偏好对）任务化为单轮 chat 并按 30%/held-out 协议切分：
+  train.jsonl(N条) + probe_train.jsonl(前800, sweep用) + val_loss.jsonl(64, 择优判据)
+  + val10.jsonl(10, 最终验证) + split_meta.json(全部索引, 可审计不相交)
+
+用法:
+  python corpus_to_sft.py --kind wiki_zh --src <wikipedia.jsonl> --out-dir <ws>/outputs
+  python corpus_to_sft.py --kind wiki_en --src <wikitext parquet 目录> --out-dir <ws>/outputs
+  python corpus_to_sft.py --kind code    --src <codeparrot 目录(json.gz)> --out-dir <ws>/outputs
+  python corpus_to_sft.py --kind ultrafb --src <ultrafeedback train.json> --out-dir <ws>/outputs
+  可选: --n-train 3000 --n-probe 800
+
+【红线：无信息间隙】切点受 prefix_cap 约束 + 前缀不做事后截断（所见即所续），
+  内置自检 assert 全部 prefix ≤ cap×1.15 —— 见 references/pitfalls.md #26
+  （间隙曾致 codeparrot 83.7% 样本不可学，模型跳段生成、ROUGE -0.21）。
+
+【新增语料类型】在 LOADERS 加一个 `<kind>: loader函数`（返回 [(user素材, assistant素材), ...]），
+  并在 make_turn 加对应任务化模板 + 在 CAPS 加 prefix cap，其余协议自动复用。
+  详细范式表见 references/raw-corpus-to-sft.md。
+"""
+
+import argparse
+import gzip
+import json
+import os
+import random
+import re
+
+
+def split_zh_article(text, prefix_cap=400, cont_cap=800):
+    """中文维基条目：句子边界(。)切前缀/续写。返回 (user, assistant) 或 None。
+
+    切点窗口 [25%,45%]；若窗口越过 prefix_cap，改在 [cap*0.55, cap] 内找边界。
+    前缀不做事后截断 → 所见即所续，无信息间隙（修复 v1 的 37.4% 间隙 bug）。
+    """
+    text = (text or "").strip()
+    if len(text) < 400:
+        return None
+    lo, hi = int(len(text) * 0.25), int(len(text) * 0.45)
+    if hi > prefix_cap:
+        lo, hi = int(prefix_cap * 0.55), prefix_cap
+    cut = -1
+    for i in range(hi, lo, -1):
+        if text[i] in "。！？\n":
+            cut = i + 1
+            break
+    if cut <= 0:
+        return None
+    prefix, cont = text[:cut].strip(), text[cut:].strip()
+    if len(prefix) < 60 or len(cont) < 100:
+        return None
+    return prefix, cont[:cont_cap]  # 只截目标尾部（无信息损失），前缀完整
+
+
+def split_en_doc(text, prefix_cap=700, cont_cap=1300):
+    """英文文档：句号+空格边界切。切点受 prefix_cap 约束，前缀不截断（无间隙）。"""
+    text = re.sub(r"\s+", " ", (text or "").strip())
+    if len(text) < 600:
+        return None
+    lo, hi = int(len(text) * 0.25), int(len(text) * 0.45)
+    if hi > prefix_cap:
+        lo, hi = int(prefix_cap * 0.55), prefix_cap
+    cut = -1
+    for i in range(hi, lo, -1):
+        if text[i - 1] in ".!?" and (i >= len(text) or text[i] == " "):
+            cut = i
+            break
+    if cut <= 0:
+        return None
+    prefix, cont = text[:cut].strip(), text[cut:].strip()
+    if len(prefix) < 100 or len(cont) < 150:
+        return None
+    return prefix, cont[:cont_cap]
+
+
+def split_code(content, prefix_cap=900, cont_cap=1700):
+    """Python 代码：行边界切，切点 = min(50%字符, prefix_cap)。前缀不截断（无间隙）。"""
+    content = (content or "").strip()
+    if len(content) < 500:
+        return None
+    lines = content.split("\n")
+    half = sum(len(l) + 1 for l in lines)
+    target = min(half * 0.5, float(prefix_cap))  # 修复：切点被 cap 约束
+    acc, cut = 0, len(lines)
+    for i, l in enumerate(lines):
+        acc += len(l) + 1
+        if acc >= target:
+            cut = i + 1
+            break
+    prefix = "\n".join(lines[:cut]).strip()
+    if len(prefix) > prefix_cap * 1.15:  # 末行超长（压缩/长字符串行）：回退一行
+        cut = max(1, cut - 1)
+        prefix = "\n".join(lines[:cut]).strip()
+        if len(prefix) > prefix_cap * 1.15:
+            return None  # 单行即超 cap 的样本直接丢弃
+    cont = "\n".join(lines[cut:]).strip()
+    if len(prefix) < 120 or len(cont) < 150:
+        return None
+    return prefix, cont[:cont_cap]
+
+
+def make_turn(kind, prefix, cont):
+    """构造 (user, assistant) 对。"""
+    if kind == "wiki_zh":
+        u = f"请续写下面的中文维基百科条目。只输出续写的正文，不要解释：\n{prefix}"
+        a = cont
+    elif kind == "wiki_en":
+        u = f"Continue the following article. Output only the continuation:\n{prefix}"
+        a = cont
+    elif kind == "code":
+        u = f"请补全下面的 Python 代码，从截断处继续写，只输出代码：\n{prefix}"
+        a = cont
+    elif kind == "ultrafb":
+        u, a = prefix, cont
+    else:
+        raise ValueError(kind)
+    return u, a
+
+
+def load_wiki_zh(path):
+    recs = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            d = json.loads(line)
+            pa = split_zh_article(d.get("completion", ""))
+            if pa:
+                recs.append(pa)
+    return recs
+
+
+def load_wiki_en(path):
+    import pandas as pd
+    docs, cur = [], []
+    for shard in sorted(os.listdir(path)):
+        if not shard.endswith(".parquet") or not shard.startswith("train"):
+            continue
+        df = pd.read_parquet(os.path.join(path, shard))
+        for t in df["text"]:
+            t = (t or "").strip()
+            if not t:
+                if len(" ".join(cur)) >= 600:
+                    docs.append("\n".join(cur))
+                cur = []
+                continue
+            cur.append(t)
+            if len(" ".join(cur)) >= 2500:
+                docs.append("\n".join(cur))
+                cur = []
+    if len(" ".join(cur)) >= 600:
+        docs.append("\n".join(cur))
+    recs = []
+    for d in docs:
+        pa = split_en_doc(d)
+        if pa:
+            recs.append(pa)
+    return recs
+
+
+def load_code(path):
+    recs = []
+    for fn in sorted(os.listdir(path)):
+        if not fn.endswith(".json.gz"):
+            continue
+        with gzip.open(os.path.join(path, fn), "rt", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                d = json.loads(line)
+                pa = split_code(d.get("content", ""))
+                if pa:
+                    recs.append(pa)
+    return recs
+
+
+def load_ultrafb(path):
+    data = json.load(open(path, encoding="utf-8"))
+    recs = []
+    for d in data:
+        inst, chosen = (d.get("instruction") or "").strip(), (d.get("chosen") or "").strip()
+        if len(inst) < 20 or len(chosen) < 100:
+            continue
+        recs.append((inst[:600], chosen[:1500]))
+    return recs
+
+
+LOADERS = {"wiki_zh": load_wiki_zh, "wiki_en": load_wiki_en, "code": load_code, "ultrafb": load_ultrafb}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--kind", required=True, choices=list(LOADERS))
+    ap.add_argument("--src", required=True, help="原始数据集路径(文件或目录)")
+    ap.add_argument("--out-dir", required=True, help="outputs/ 目录")
+    ap.add_argument("--n-train", type=int, default=3000, help="训练池内实际写入 train.jsonl 的条数")
+    ap.add_argument("--n-probe", type=int, default=800, help="probe 用子集条数(train.jsonl 的前 n 条)")
+    args = ap.parse_args()
+
+    print(f"[load] kind={args.kind} src={args.src}", flush=True)
+    recs = LOADERS[args.kind](args.src)
+    n_raw = len(recs)
+    print(f"[load] raw usable records: {n_raw}", flush=True)
+
+    # 自检：前缀长度必须 ≤ cap*1.15（"所见即所续"，无信息间隙）
+    CAPS = {"wiki_zh": 400, "wiki_en": 700, "code": 900, "ultrafb": 600}
+    cap = CAPS[args.kind] * 1.15
+    n_over = sum(1 for p, _ in recs if len(p) > cap)
+    assert n_over == 0, f"[BUG] {n_over}/{n_raw} 条前缀超 cap（信息间隙）"
+
+    rng = random.Random(42)
+    idx = list(range(n_raw))
+    rng.shuffle(idx)
+    n_pool = int(n_raw * 0.3)
+    pool_idx, rest_idx = set(idx[:n_pool]), idx[n_pool:]
+
+    # 训练池内再随机取 n_train 条（tokenize 上限控制）
+    rng2 = random.Random(42)
+    train_idx = sorted(rng2.sample(sorted(pool_idx), min(args.n_train, n_pool)))
+
+    rest_shuf = list(rest_idx)
+    random.Random(7).shuffle(rest_shuf)
+    val_loss_idx = rest_shuf[:64]
+    val10_idx = rest_shuf[64:74]
+
+    os.makedirs(args.out_dir, exist_ok=True)
+
+    def write_jsonl(name, indices):
+        p = os.path.join(args.out_dir, name)
+        with open(p, "w", encoding="utf-8") as f:
+            for i in indices:
+                u, a = make_turn(args.kind, *recs[i])
+                f.write(json.dumps({"messages": [{"role": "user", "content": u},
+                                                 {"role": "assistant", "content": a}]},
+                                   ensure_ascii=False) + "\n")
+        print(f"[write] {p}: {len(indices)} 条", flush=True)
+
+    write_jsonl("train.jsonl", train_idx)
+    write_jsonl("probe_train.jsonl", train_idx[:args.n_probe])
+    write_jsonl("val_loss.jsonl", val_loss_idx)
+    write_jsonl("val10.jsonl", val10_idx)
+
+    # 切分元数据（可审计：训练/验证严格不相交）
+    meta = {"kind": args.kind, "src": args.src, "n_raw_usable": n_raw, "n_pool_30pct": n_pool,
+            "train_indices": train_idx, "val_loss_indices": val_loss_idx, "val10_indices": val10_idx,
+            "split_seed": 42, "note": "30% 池(seed42)；val_loss/val10 取自其余 70%，与训练池不相交"}
+    with open(os.path.join(args.out_dir, "split_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False)
+    inter1 = set(train_idx) & set(val_loss_idx)
+    inter2 = set(train_idx) & set(val10_idx)
+    inter3 = set(val_loss_idx) & set(val10_idx)
+    assert not inter1 and not inter2 and not inter3, "切分相交！"
+    print(f"[done] pool={n_pool} train={len(train_idx)} val_loss={len(val_loss_idx)} val10={len(val10_idx)} 不相交校验通过", flush=True)
+
+
+if __name__ == "__main__":
+    main()

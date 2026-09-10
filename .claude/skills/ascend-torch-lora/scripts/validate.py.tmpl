@@ -3,7 +3,7 @@
 # validate.py.tmpl — base vs LoRA teacher-forced 多轮验证 (ROUGE-L/字符重叠/生成长度)
 # 用法: python validate.py
 # 从未参与训练的数据选 N 条, 逐 assistant 轮生成 teacher, 与 GT 对比
-import os, json, random, time
+import os, json, random, re, time
 from collections import Counter
 
 os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
@@ -20,8 +20,12 @@ MODEL_DIR = os.environ.get("MODEL_DIR", "/mnt/model/Qwen3.5-0.8B")
 WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ADAPTER_DIR = os.environ.get("ADAPTER_DIR", os.path.join(WS, "outputs", "lora_adapter"))
 SRC = os.environ.get("VAL_SRC", os.environ.get("DATA_SRC", "/path/to/dataset.json"))
-OUT_JSON = os.path.join(WS, "outputs", "validation_results.json")
-OUT_MD = os.path.join(WS, "outputs", "validation_report.md")
+# OUT_JSON/OUT_MD 可 env 覆盖：对照实验必须指到独立文件，否则覆盖主结果（pitfalls #29）
+OUT_JSON = os.environ.get("OUT_JSON", os.path.join(WS, "outputs", "validation_results.json"))
+OUT_MD = os.environ.get("OUT_MD", os.path.join(WS, "outputs", "validation_report.md"))
+# 生成停止符：base 模型「模板收尾 token ≠ eos_token」时显式指定（如 Qwen2.5-Coder base 用
+# VAL_EOS_ID=151645 即 <|im_end|>；缺省用 tok.eos_token_id）（pitfalls #31）
+VAL_EOS_ID = os.environ.get("VAL_EOS_ID", "")
 SYSTEM_PROMPT = os.environ.get("SYSTEM_PROMPT", "你是一名乐于助人的助手。")
 N_VAL = int(os.environ.get("N_VAL", "10"))
 TRAIN_SEED = int(os.environ.get("SAMPLE_SEED", "42"))
@@ -79,11 +83,19 @@ def extract_boxed(text):
 
 
 def gen_once(model, tok, msgs):
-    ids = tok.apply_chat_template(msgs, tokenize=True, add_generation_prompt=True,
-                                  return_dict=True, return_tensors="pt")["input_ids"].to(next(model.parameters()).device)
+    # enable_thinking=False：Qwen3 系默认进思考模式输出 <think>...</think>（普通 token，
+    # skip_special_tokens 不剥），污染 ROUGE 口径；不识别该 kwarg 的模板 TypeError 兜底（pitfalls #32）
+    try:
+        ids = tok.apply_chat_template(msgs, tokenize=True, add_generation_prompt=True,
+                                      enable_thinking=False, return_dict=True,
+                                      return_tensors="pt")["input_ids"].to(next(model.parameters()).device)
+    except TypeError:
+        ids = tok.apply_chat_template(msgs, tokenize=True, add_generation_prompt=True,
+                                      return_dict=True, return_tensors="pt")["input_ids"].to(next(model.parameters()).device)
+    eos_id = int(VAL_EOS_ID) if VAL_EOS_ID else tok.eos_token_id
     with torch.no_grad():
         out = model.generate(input_ids=ids, max_new_tokens=MAX_NEW, do_sample=False,
-                             pad_token_id=tok.eos_token_id, eos_token_id=tok.eos_token_id)
+                             pad_token_id=eos_id, eos_token_id=eos_id)
     new = out[0][ids.shape[1]:]
     return tok.decode(new, skip_special_tokens=True).strip()
 
@@ -132,10 +144,14 @@ def evaluate(model, tok, records, tag):
                 pred = gen_once(model, tok, ctx)
             except Exception as e:
                 pred = f"[ERR {e}]"
-            r = rouge_l_f1(gt, pred)
-            co = char_overlap(gt, pred)
-            m = {"turn": ti, "gt": gt[:120], "pred": pred[:160], "rouge_l": round(r, 4),
-                 "char_overlap": round(co, 4), "gt_len": len(gt), "pred_len": len(pred)}
+            # 指标前剥离思考块（base/LoRA 同口径；<think> 非 special token 不会被
+            # skip_special_tokens 剥掉，pitfalls #32）
+            pred_clean = re.sub(r"<think>.*?</think>", "", pred, flags=re.S).strip()
+            r = rouge_l_f1(gt, pred_clean)
+            co = char_overlap(gt, pred_clean)
+            m = {"turn": ti, "gt": gt[:120], "pred": pred_clean[:160], "pred_raw_head": pred[:80],
+                 "rouge_l": round(r, 4), "char_overlap": round(co, 4),
+                 "gt_len": len(gt), "pred_len": len(pred_clean)}
             # 答案抽取精确匹配(③): 双方都有 boxed 时才计(可验证任务的最优客观指标)
             bg, bp = extract_boxed(gt), extract_boxed(pred)
             if bg is not None:
@@ -163,13 +179,25 @@ def main():
     raw = json.load(open(SRC, encoding="utf-8")) if (IS_ARRAY or SRC.endswith(".json")) else \
         [json.loads(l) for l in open(SRC, encoding="utf-8") if l.strip()]
     total = len(raw)
-    used = set(random.Random(TRAIN_SEED).sample(range(total), int(total * TRAIN_RATIO)))
+    # 预切分验证文件保护：源文件 ≤ N_VAL×2 条时视为已切分好的验证集，忽略 SAMPLE_RATIO
+    # 全量使用——否则默认 0.5 抽样会把 10 条 held-out 静默抽成 5 条（pitfalls #27）
+    ratio = TRAIN_RATIO
+    if total <= N_VAL * 2 and total > int(total * ratio):
+        print(f"[data] VAL_SRC 为预切分验证文件({total} 条)，忽略 SAMPLE_RATIO={ratio} 全量使用", flush=True)
+        ratio = 0.0
+    used = set(random.Random(TRAIN_SEED).sample(range(total), int(total * ratio)))
     unused = [i for i in range(total) if i not in used]
     val_idx = random.Random(VAL_SEED).sample(unused, min(N_VAL, len(unused)))
     records = [raw[i] for i in val_idx]
     print(f"[data] total={total} used={len(used)} unused={len(unused)} picked={len(records)}", flush=True)
 
     tok = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
+    # 无 chat template 的模型（如 OLMoE-0924）：注入与训练一致的 User/Assistant 模板（pitfalls #30）
+    if tok.chat_template is None:
+        tok.chat_template = ("{%- for message in messages %}{{ message['role'] | capitalize }}: "
+                             "{{ message['content'] }}{{ eos_token }}{%- endfor %}"
+                             "{%- if add_generation_prompt %}Assistant: {%- endif %}")
+        print("[tok] injected custom User/Assistant chat template (no native template)", flush=True)
     print("[model] base loading...", flush=True)
     load_kwargs = dict(dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="eager")
     if DEVICE_MAP:
