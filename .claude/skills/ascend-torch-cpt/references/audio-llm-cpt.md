@@ -115,3 +115,11 @@
 - TextGrid→`[Sxx]时间戳文本`转换；8通道取ch0(#65)；120s分段(#64)。
 - 50会议×300步：first5→last5 1.119→0.110(-90%)，held-out(test独立会议) CE 1.106→0.146(**-87%**)，~0.45s/step。
 - 全程NPU算子通过；libgomp TLS(#55, import sklearn先)。
+
+## Qwen3-ASR 实战要点（librispeech CPT，2026-09，#129）
+- **repo 格式**：Qwen 原生 release repo 与 transformers 键不兼容（projector 错位→numel 检查误报"tokens N == features N"）；必须用 `Qwen/Qwen3-ASR-1.7B-hf`（-hf 后缀）。
+- **特征 100 倍数**：Encoder 要求 padded_feature_length ∈ n_window*2(100) 的倍数。**波形级补零到整秒**（`np.pad(arr,(0,-len(arr)%16000))`）最稳——token↔feature 对应不破坏；事后 pad 特征会踩 numel 检查。
+- **mask 必传**：`forward(input_ids=, attention_mask=, input_features=, input_features_mask=, labels=)`——input_features_mask 是处理器原生输出键。
+- **label 掩码**：prompt 长度 = prompt-only 模板（`add_generation_prompt=True`）tokenize 的 attention_mask.sum()；audio 占位 token（config.thinker_config.audio_token_id，如 151676）也掩。
+- **bs=1 最稳**：模板的 batch 对齐（padding/长度匹配）坑多，逐样本训练简单可靠（~0.35s/step）。
+- 实测：librispeech 400 样本 200 步，held-out 转写 CE 1.074→0.235(-78%)。

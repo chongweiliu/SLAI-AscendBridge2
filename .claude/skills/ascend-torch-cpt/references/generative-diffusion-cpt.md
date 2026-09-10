@@ -128,3 +128,9 @@ CONFLUX (VAE3D+修正流DiT3D+GRPO)，Ascend 910C 64GB，CANN 9.0.0 + torch_npu 
 | GRPO 算法 | Flow-GRPO(ODE→SDE + importance sampling + KL clip) | DDPO 式(可微奖励 + KL 近似) |
 | 独立评判 | image-space 分类器(decoded real volumes) | 同一 latent 分类器(循环) |
 | 训练规模 | 大规模 RL | 300 步 demo |
+
+## SD3.5 / Wan2.2 实战要点（2026-09，#130/#131 相关）
+- **SD3.5 组件下载**：ModelScope tree API `Root=` 不递归——SD3.5 repo 抓完只有 ComfyUI 单文件，transformer/vae/text_encoder{,_2}/tokenizer{,_2}/scheduler 子目录需逐个递归补齐（#130）。
+- **SD3.5-M 维度**：`encoder_hidden_states` 是**单张量 [B,77,4096]（仅 T5 维，joint_attention_dim=4096）**，非 6144 拼接；`pooled_projections` = cat(clip_L 768, clip_G 1280)=2048。CLIP 可正常编码 pooled、T5 用零嵌入（#120 变体）。
+- **Wan2.2（Diffusers 布局）**：组件 from_pretrained 直接加载免 remap；**VAE bf16 → 输入须 .to(bfloat16)**（fp32 输入报 conv3d dtype 错）；14B DiT 单卡 bf16+Adafactor 可训（~1.8s/step）；eval 前先 `del optim` + `p.grad=None` 释放再加载 base（否则 OOM）。
+- 实测：SD3.5 diffusiondb 流匹配 train 0.108→0.075；Wan2.2 ucf101 DDPM train 1.60→1.44，held-out noise MSE -10%。

@@ -58,7 +58,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
     - **ViT/MAE 视觉模型（自定义代码，如 Prithvi）** → **Masked Image Modeling**（自定义训练脚本，MAE 75% patch mask + MSE 重建）；模型用 `sys.path.insert + import` 加载自定义 `.py`（#112），数据用 rasterio 读 GeoTIFF。
     - **VLM（如 Qwen2.5-VL）** → **文本头 CE**（用 `*ForConditionalGeneration` 加载，#115；文本头 CPT 与 CausalLM 同路，只喂文本无图像）。
     - **diffusers 生成式（SDXL/Wan）** → **DDPM noise MSE**（直接加载 UNet/DiT 组件，#117；版本不匹配用 shape-based key remap，#119；SDXL 需 added_cond_kwargs #118）。
-    - **视觉/时序/音频专用模型**（dinov2/rtdetr/depth/timesfm/layoutlmv3/whisper/ast/speecht5）→ 各自原生 loss（CE/检测CE/MSE），用对应 `*ForImageClassification` 等类加载。**NPU embedding 所有 index tensor 必须 `torch.long`**（#121）；LayoutLMv3 tokenizer 用 `backend_tokenizer`（#122）；TimesFM 输出取 `full_predictions[:,:,5]`（#123）；音频需 `torchaudio.resample`+float32（#124）；SpeechT5 decoder NPU 不兼容→encoder-only（#125）。
+    - **视觉/时序/音频专用模型**（dinov2/rtdetr/depth/timesfm/layoutlmv3/whisper/ast/speecht5）→ 各自原生 loss（CE/检测CE/MSE），用对应 `*ForImageClassification` 等类加载。**NPU embedding 所有 index tensor 必须 `torch.long`**（#121）；LayoutLMv3 tokenizer 用 `backend_tokenizer`（#122）；TimesFM 输出取 `full_predictions[:,:,5]`（#123）；音频需 `torchaudio.resample`+float32（#124）；SpeechT5 decoder NPU 不兼容→encoder-only（#125）；**chronos-2** 用 chronos-forecasting 包、forward 带 future_target 返回 quantile loss、H 须 16 倍数（#136）。
 11. **确定性 NPU 崩溃用"插桩→单批复现→二分"定位，变长 batch 必开 expandable_segments**（EE9999/507035 无 Python 堆栈；完整四步法 #79，多区域 checkpoint 反传 bug #78；s/step 渐进劣化特征 #80）。
 
 ## 工作流（9 阶段，每阶段都要在屏幕实时更新用时表）
@@ -80,7 +80,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 
 ### 阶段 2 · 模型与数据集获取
 - **第一步：源可达性矩阵探测（~30s，必做）**：`bash robust_download.sh probe`（从 `scripts/robust_download.sh.tmpl` 复制）探测**当日**可用性（hf-mirror/huggingface/modelscope/github/raw/codeload/zenodo），先建"当日可用源清单"再定路线，**不按历史经验盲试**（源逐日漂移 #89）。权重降级链：本地 → ModelScope → Zenodo（API 拿清单+md5）→ hf-mirror（禁 Xet #38）→ GitHub（三级降级+截断抢救 #90）。
-- 大权重文件优先 ModelScope `resolve/master/<file>` 直链；**官方示例数据/权重可能只在某一平台镜像目录**（GitHub ≠ ModelScope 镜像；全网按名搜索失败 ≠ 不存在，递归列全平台目录树+官方 config 相对路径线索，#94）。
+- 大权重文件优先 ModelScope `resolve/master/<file>` 直链；**官方示例数据/权重可能只在某一平台镜像目录**（GitHub ≠ ModelScope 镜像；全网按名搜索失败 ≠ 不存在，递归列全平台目录树+官方 config 相对路径线索，#94）。**ModelScope tree API `Root=` 不递归子目录**——diffusers 类 pipeline 抓完只剩单文件+根元数据，组件子目录要逐个补（#130）；**FP8 块状 ckpt 反量化**时 scale 键名是替换（`X.weight`→`X.weight_scale_inv`）非拼接、产物须删 quantization_config（#139）。
 - **大文件下载与开发并行**：下载挂后台后立刻用小子集推进阶段 3-6，勿干等；大文件用 `robust_download.sh get`（多路 Range+分块断点续传+size/md5 终检，`sha256:` 前缀支持），小文件用 `fetch`；GB 级 tarball 下完必须流级校验（`gzip -t`，#68）。**下载是长跑阶段**：按 T4 每 1–2min 刷进度。
 - **CPT 前必扫权重 NaN**（#101）：safetensors 尺寸正确 ≠ 内容正确（比特级损坏致 lm_head 80 NaN）；smoke 前用 `load_file` 全量 `torch.isnan` 扫描（2B~30s, 7B~3min），出 NaN 先 CPU 前向确认再重下损坏分片。
 - 非 PyTorch 原生权重（Keras `.pkl`/`.h5`）：pickle 纯 numpy 元组可直接解包（无需 TF），逐层复刻 PyTorch 架构后做**形状严格校验+同形交换消融+语义 sanity**三重验证（#84–#86）。
@@ -88,7 +88,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 - 数据集只有 train 分割时用 seed 重建 held-out（references/eval-metrics.md）。
 
 ### 阶段 3 · 语料格式转换与打包（按范式分支）
-- **A. 文本 LM**：读语料（jsonl/json/parquet/csv）→ 判定格式（chat `{"messages"}` 用 `apply_chat_template`；`{"text"}` 直接 tokenize；其它取可读字段）→ 打包 `seq_len` 定长块（不足步数则循环重采样，记录 epoch 数）→ `scripts/prepare_data.py.tmpl`，**务必打印**总样本/子集样本/总 token/块数/epoch 估计。大语料设 `CAP_TOKENS` 避免 tokenize 浪费（#105）。数据边界（去重/分块/混合/packing vs padding）见 references/data-prep.md。**多卡必设 `WORLD_SIZE=N`**（否则 need 算少→内循环重复采样）。
+- **A. 文本 LM**：读语料（jsonl/json/parquet/csv）→ 判定格式（chat `{"messages"}` 用 `apply_chat_template`；`{"text"}` 直接 tokenize；其它取可读字段）→ 打包 `seq_len` 定长块（不足步数则循环重采样，记录 epoch 数）→ `scripts/prepare_data.py.tmpl`，**务必打印**总样本/子集样本/总 token/块数/epoch 估计。大语料设 `CAP_TOKENS` 避免 tokenize 浪费（#105）。数据边界（去重/分块/混合/packing vs padding）见 references/data-prep.md。**caption/text 字段可能是 list**（flickr 一图多 caption）→ tokenize 全空 → 打包 while 死循环：抽取时 join + 空块保护 + py-spy 定位（#128）。**多卡必设 `WORLD_SIZE=N`**（否则 need 算少→内循环重复采样）。
 - **B. diffusers 生成式**：解码→resize 到原生分辨率→VAE 编码（输入 `[B,C,T,H,W]` #48，编码上 NPU 规避 cgroup OOM #44/#46）→ 缓存 latent+text_emb（预计算-后训练模式）；text_encoder 巨大时可缓存 embedding 或退零嵌入兜底（#49）。用 `prepare_generative_data.py.tmpl`，全流程见 references/generative-diffusion-cpt.md。
 - **C. 音频-LLM**：soundfile 读 16k → `AutoProcessor(text=, audio=)`（单数 kwarg #56）→ labels 掩 pad+prompt+audio 特殊 token（漏 mask 致 loss 虚高 ~8× #58）；forward 须传 input_features**和** feature_attention_mask（#57）；冻 audio_tower+projector 训 language_model。见 references/audio-llm-cpt.md + `cpt_audio_llm.py.tmpl`。
 - **D. MLIP 力场**：ase 读 EXTXYZ（能量+力标签）→ 官方 GraphConverter 构图（cutoff/threebody_cutoff）；能量基准差对齐见阶段 8-D。
@@ -103,14 +103,14 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
         ├─ 能 → 想多卡提速且步数>~150 → DDP(hccl)；否则单卡 Eager
         └─ 不能 → FSDP2（fully_shard）
 ```
-经验阈值：权重占单卡 ≤~40% → 单卡；0.5–3B 常单卡/DDP；≥30B → FSDP2/模型并行；步数 <~150 不上图模式（torchair 首图编译 ~15min 摊销不了）；互联慢时大模型勿用 FSDP2（通信-bound，实测 97% 时间在通信）。
+经验阈值：权重占单卡 ≤~40% → 单卡；0.5–3B 常单卡/DDP；≥30B → FSDP2/模型并行；步数 <~150 不上图模式（torchair 首图编译 ~15min 摊销不了）；互联慢时大模型勿用 FSDP2（通信-bound，实测 97% 时间在通信）。**torch 2.10 fully_shard 无 device_id 参数**——用 `init_device_mesh("npu",(w,))` 传 mesh=；**超大模型 per-rank 加载偏斜撞 HCCL 120s 默认连接超时**——必设 `HCCL_CONNECT_TIMEOUT=1800` + 加载后 `dist.barrier()`（#137）。
 
 ### 阶段 5 · 超参自动择优（references/hyperparam-selection.md）
-- **precision**：fp32 主权重 + bf16 autocast（**不要**纯 bf16 前向 #4）；**lr**：CPT 基线 1e-5（全局 batch 大按 sqrt 上调；短训练保守值；照抄基座从零训练的调度会发散 #82）；**warmup** ~10% 步数 cosine 到 0；**optimizer**：`NpuFusedAdamW` + betas(0.9,0.95) wd=0.01 eps=1e-8 clip=1.0——**例外**：分阶段重建优化器（freeze/unfreeze 切换）用 plain AdamW（#87 跨阶段 saved-tensor 崩溃），小模型(<100M)融合无收益；**batch_size** 按"激活显存预算"估上限+2 步 smoke 验不 OOM（优先开梯度检查点而非降 bs，`use_reentrant=False`）；**attention**：full_attention 走 SDPA（→NPU fusion 自动路由）。
+- **precision**：fp32 主权重 + bf16 autocast（**不要**纯 bf16 前向 #4）；**lr**：CPT 基线 1e-5（全局 batch 大按 sqrt 上调；短训练保守值；照抄基座从零训练的调度会发散 #82）；**warmup** ~10% 步数 cosine 到 0；**optimizer**：`NpuFusedAdamW` + betas(0.9,0.95) wd=0.01 eps=1e-8 clip=1.0——**例外**：分阶段重建优化器（freeze/unfreeze 切换）用 plain AdamW（#87 跨阶段 saved-tensor 崩溃），小模型(<100M)融合无收益；**Adafactor 与 FSDP2 DTensor 不兼容**（in-place pow_）——超大模型装不下 AdamW 时改"冻结下半层+AdamW"而非 Adafactor（#138）；**batch_size** 按"激活显存预算"估上限+2 步 smoke 验不 OOM（优先开梯度检查点而非降 bs，`use_reentrant=False`）；**attention**：full_attention 走 SDPA（→NPU fusion 自动路由）。
 
 ### 阶段 6 · 生成训练脚本并 smoke
 - 按范式选模板：文本 `cpt_train.py.tmpl`（单卡+DDP 自动检测）/`cpt_fsdp.py.tmpl`/`cpt_mp.py.tmpl`；**Encoder MLM** `cpt_mlm.py.tmpl`（单卡+DDP）；**Seq2Seq** `cpt_seq2seq.py.tmpl`（单卡+DDP）；扩散 `cpt_diffusion.py.tmpl`；音频 `cpt_audio_llm.py.tmpl`。模板已支持断点续训（`RESUME=1` 默认关）与梯度累积（references/resume.md）。**单卡 set_device(0) 不是 VISIBLE_DEVICES 值**（#106）；MLM 模型 pad_token fallback eos→unk→sep（#108）。
-- 模板通用化：文本 `AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 remap；**VLM** 用 `*ForConditionalGeneration` 加载（#115）；**ViT/Science 自定义代码模型**用 `sys.path.insert(0, MODEL_DIR)` + 直接 import `*.py`（#112），checkpoint 的 `num_frames`/`img_size` 必须与 config 一致（#110）。**diffusers 版本不匹配**时用 shape-based key remap（#119，通用解法，按 tensor shape 自动匹配 825+ keys）；**SDXL UNet** forward 需 `added_cond_kwargs`（#118）；**大型 text encoder**（T5 11.4GB）可跳过用 zero embeddings（#120）。**>3B 模型 fp32+NpuFusedAdamW 单卡 OOM** → 改 bf16 权重 + `torch.optim.AdamW`（#116）。**NPU embedding 所有 index tensor（input_ids/bbox/position_ids）必须 `torch.long`**（#121）；LayoutLMv3 tokenizer 用 `backend_tokenizer.encode_batch` 绕过 bbox（#122）。
+- 模板通用化：文本 `AutoModelForCausalLM.from_pretrained(path, trust_remote_code=True, torch_dtype=float32)`；多模态走 remap；**VLM** 用 `*ForConditionalGeneration` 加载（#115）；**ViT/Science 自定义代码模型**用 `sys.path.insert(0, MODEL_DIR)` + 直接 import `*.py`（#112），checkpoint 的 `num_frames`/`img_size` 必须与 config 一致（#110）。**diffusers 版本不匹配**时用 shape-based key remap（#119，通用解法，按 tensor shape 自动匹配 825+ keys）；**SDXL UNet** forward 需 `added_cond_kwargs`（#118）；**大型 text encoder**（T5 11.4GB）可跳过用 zero embeddings（#120）。**>3B 模型 fp32+NpuFusedAdamW 单卡 OOM** → 改 bf16 权重 + `torch.optim.AdamW`（#116）。**NPU embedding 所有 index tensor（input_ids/bbox/position_ids）必须 `torch.long`**（#121）；LayoutLMv3 tokenizer 用 `backend_tokenizer.encode_batch` 绕过 bbox（#122）。**NPU CE 不做标签越界检查**——标签≥头维度时输出假 loss 0.0，先查 `max(label)<n_cls`（#132）；**旧命名 config**（GOT "GOT"→"got_ocr2"）patch model_type+显式新类（#135）；**原生格式 TTS**（CosyVoice3 llm.pt=Qwen2 骨架）键前缀 remap 后按文本 LM 训（#134）；**DepthPro 必须 processor 1536 且禁 NpuFusedAdamW**（#131）；**Qwen3-ASR 类**须官方 -hf repo+波形整秒补零+input_features_mask+prompt-only 掩码（#129）。
 - **smoke**：2 步确认前向+反向+优化器 step 全通过、loss 合理再上正式；扩散先对 backbone 与 VAE 分别单组件前向 smoke（抓 NPU 算子问题 #50）。**smoke 的 s/step 不可外推正式用时**（首 import ~90s + NpuFusedAdamW 首步状态初始化 ~10×虚高，取稳态第 2 步, #105）。
 - 踩坑先 grep references/pitfalls.md（模板已规避多数）。**大词表(>100K vocab) CE OOM** 先降 bs+梯度累积保持有效 batch，不降 seq_len（#103）。**FSDP2 取 transformer 层勿用 getattr 默认值**（急切求值致 AttributeError, #102，模板已修复）。
 - **官方训练栈首次死锁/OOM → 立即 MINREPRO**（模型+collater+单批显存复现，~20 行）定位是模型需求还是栈问题，**禁止盲调 batch/换卡试错**（#95）；栈级不可用则拆组件自管轻量循环。
@@ -120,11 +120,11 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 ### 阶段 7 · 正式训练 + loss 曲线 + 公网直链
 - 逐 step 记 `step, loss, lr, elapsed, s/step, tok/s` 到 `logs/step_loss.jsonl` + stdout（心跳按时间折算，屏幕 ≤2–3 分钟必有输出）；每 ~30s 外推剩余 ETA 并刷用时表（T4）。
 - **中期评估成本预计算**（10 帧计时×次数，>总时长 20% 先调间隔/帧数；base 评估缓存复用 #96）；**三份 ckpt 语义**（best 非 EMA 评估默认 / final EMA / latest 续训；短程训练慎用 EMA #97）；长实验 `timeout 2×预估` 且监控方 2× 预期无输出即杀（#98）。
-- 训完出 `train_summary.json`；保存 `cpt_model_state.pt`（评估用）+ `ckpt_latest.pt`（续训用，按时间基准周期保存 ≤5 次、间隔 ≥15min，训练结束总存一次，见 references/resume.md）。
+- 训完先出 `train_summary.json`（step_loss 日志即可算）并做完 held-out 评估，**之后**才尝试 FSDP2 全量聚合保存——`full_tensor()` 逐 tensor 聚合可能间歇性死锁（#140/#127）；保存 `cpt_model_state.pt`（评估用）+ `ckpt_latest.pt`（续训用，按时间基准周期保存 ≤5 次、间隔 ≥15min，训练结束总存一次，见 references/resume.md）。
 - 画 loss 曲线（`plot_loss.py.tmpl`，EMA 平滑）并尝试上传公网直链（catbox→0x0→uguu）；外网全不通降级表格展示。产物全部存 `<模型名>-cpt/`。
 
 ### 阶段 8 · 训练前后域内评估（按范式分支；对比三原则见 references/eval-metrics.md）
-**通用**：base vs CPT ①严格同条件（同种子一切随机源+确定性自检）②协议锚定（base 关键指标与论文/官方数字同量级才算协议对）③持平可能是正确结论（短程 CPT 域内收敛基座预期 ±1%）；**过拟合检查**：held-out 须独立 split；train loss 趋 0 + held-out 不改善=红旗；**数据量是泛化关键杠杆**（非步数）。多卡训练后别立刻单卡评估（显存异步回收 #32）；评估载入前 `torch.npu.empty_cache()`。
+**通用**：base vs CPT ①严格同条件（同种子一切随机源+确定性自检）②协议锚定（base 关键指标与论文/官方数字同量级才算协议对）③持平可能是正确结论（短程 CPT 域内收敛基座预期 ±1%）；**过拟合检查**：held-out 须独立 split；train loss 趋 0 + held-out 不改善=红旗；**回归/检测/分类头模型走 MLM 范式时 base 对照无意义**（MLM 头随机初始化，#133），如实记录口径以训练收敛佐证；**数据量是泛化关键杠杆**（非步数）。多卡训练后别立刻单卡评估（显存异步回收 #32）；评估载入前 `torch.npu.empty_cache()`。
 - **A. 文本 LM**（`eval_cpt.py.tmpl`）：PPL/NLL（公式务必取负 #5）/next-token acc；chat 数据加末轮生成 F1；域内语料用域内指标，勿强行套 MMLU。支持 `VAL_FILE` 独立验证集（优先于 held-out split, #104），保证验证数据绝对未被训练使用。
 - **E. Encoder MLM**（`eval_mlm.py.tmpl`）：MLM loss/PPL/masked token acc；collator 15% mask + attention_mask fallback（#107）；NaN 样本排除。
 - **F. Seq2Seq**（`eval_seq2seq.py.tmpl`）：翻译 CE loss/PPL；labels pad→-100；NaN 样本排除；支持 SRC_LANG/TGT_LANG。
