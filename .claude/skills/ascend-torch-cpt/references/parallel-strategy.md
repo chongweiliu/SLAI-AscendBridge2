@@ -176,3 +176,11 @@ optim.step(); optim.zero_grad(set_to_none=False)
 ## 实测基准脚本
 `scripts/bench_hccl.py.tmpl`：torchrun-free 的 HCCL all-reduce 带宽基准（torch.multiprocessing.spawn），
 选型前必跑，10 秒判定互联档位。实测参考：Atlas 910 单机 2 卡 HCCS = 103GB/s（fast 档）。
+
+## FSDP2 超大模型实战清单（36B/80B MoE @ 8×910，2026-09，#137/#138/#140）
+- **torch 2.10 fully_shard 签名无 device_id**（新版才有）→ `mesh = init_device_mesh("npu", (world,))`，`fully_shard(layer, mesh=mesh, mp_policy=mp, reshard_after_forward=True)`；分片自动落 mesh 设备。
+- **HCCL 连接超时**：160GB 级 per-rank from_pretrained 加载偏斜 > 默认 120s → Get_Socket_Timeout/hcclCommInit 失败。必设 `HCCL_CONNECT_TIMEOUT=1800`、`HCCL_EXEC_TIMEOUT=3600`，并在 fully_shard 前 `dist.barrier()` 对齐各 rank。
+- **Adafactor ✗ FSDP2**：其内部 `torch.norm(grad).square_().div_()` in-place 对 DTensor 崩（_NormPartial→Replicate）。80B 全训 AdamW 状态 ~80GB/卡装不下 → **冻结前 N 层**（80B 冻 36 层=20.4B 可训练，AdamW ~35GB/卡 ✓）；clip_grad_norm_ 对 DTensor 的 in-place 也可能崩（try/except 兜底，Adafactor/AdamW 自带裁剪）。
+- **保存保险顺序**（#140）：训完立即写 summary（step_loss 可算）→ in-process held-out 评估（FSDP 前向直接跑）→ 最后才逐 tensor full_tensor() 聚合（36B 实测一次成功一次挂死，间歇性）。
+- **kill -9 残留**：多进程 kill -9 后 NPU 显存不立即回收，立即重启报 TsdOpen failed——等 1-2 分钟至 npu-smi 归零。
+- 实测：36B qwen3_5_moe 17.7s/step（200 步 59min，held-out nll -11.8%）；80B qwen3_next（FP8→bf16）冻结 36 层 43s/step（held-out nll -14.5%）。

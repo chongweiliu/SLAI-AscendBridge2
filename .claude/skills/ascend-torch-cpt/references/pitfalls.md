@@ -972,3 +972,72 @@ sys.meta_path.insert(0, _StubFinder())
 - **解法**：保存/收尾阶段**不要用 object 集合通信**。各 rank 独立 `json.dump` 自己的统计到文件（`mem_rank{r}.json`），rank0 需要汇总时直接读文件；同步只靠 `dist.barrier()` + 张量版 `full_tensor()`（该路径多次验证可靠）。
 - **识别**：训练日志最后几行是各 rank 的统计打印但无 "[done]"；进程数 < nproc 且无 CPU 活动的 rank 消失。
 - （实测：NuExtract3 4.54B 图片 CPT 4×Ascend910，两次卡死 → 改独立落盘后成功）
+
+## 128. 数据字段是 list（flickr 类一图多 caption）→ tokenize 全空 → 打包 while 死循环
+- **症状**：prepare 阶段 99% CPU 十几分钟无输出；py-spy dump 显示卡在 `while len(blocks)<need: blocks.extend(base)`（base 为空列表）。
+- **根因**：HF 数据集 caption/text 字段可能是 **list**（flickr30k 每图 5 条 caption）。`isinstance(rec['text'], str)` 检查不过 → 走"最长字符串字段" fallback 也无候选 → 该条 tokenize 为 None；全部为 None 时 `blocks=[]`，补块 while 循环空转死循环。
+- **解法**：① 抽取层做 `isinstance(cap, list): cap=" ".join(map(str, cap))`；② prepare 打包前加空保护 `if not blocks and need>0: raise SystemExit("0 blocks — 检查字段类型")`；③ 卡死定位用 py-spy：`pip install py-spy && py-spy dump --pid <pid>` 直接看死循环行号。
+- （实测：flickr30k→Qwen3-VL 文本头 CPT，2026-09）
+
+## 129. Qwen3-ASR 类新音频模型四坑：原生 repo 不兼容 / 特征 100 倍数 / input_features_mask / prompt 掩码
+- **坑①（repo 格式）**：Qwen 原生 release repo 与 transformers 权重键不兼容（audio projector 键错位 → `inputs_embeds[mask].numel() != audio_features.numel()`，错误信息误报 "tokens: N, features: N" 数量相等）。**必须用官方 `-hf` 后缀 repo**（如 `Qwen/Qwen3-ASR-1.7B-hf`）。
+- **坑②（特征对齐）**：Encoder 要求 `padded_feature_length` 为 `n_window*2`（=100）的倍数。**最稳解法：波形级补零到整秒**（`np.pad(arr, (0, -len(arr) % 16000))`，16000 采样=100 帧），处理器自动产出合法特征且 audio token 对应关系不变；事后 pad 特征会破坏 token↔feature 数量对应。
+- **坑③（mask 必传）**：forward 必须传 `input_features_mask`（处理器原生输出该键），缺失报 `'NoneType' object has no attribute 'sum'`。
+- **坑④（label 掩码）**：掩 prompt 用 **prompt-only 模板**（`apply_chat_template(..., add_generation_prompt=True)`）tokenize 后的长度；直接 `labels[:, :attn.sum()] = -100` 会把全序列掩掉 → loss=nan 且全部 step 被 skip。
+- （实测：librispeech CPT，transformers 5.16.1，第 7 次修复才全通）
+
+## 130. SD3.5 双坑：ModelScope 非递归下载只剩单文件 + context 仅 T5 维 4096
+- **坑①（下载）**：ModelScope tree API `Root=` **不递归子目录**——SD3.5 官方 repo 抓完只有 `sd3.5_medium.safetensors` 单文件（ComfyUI 格式）+ 根元数据，transformer/vae/text_encoder/tokenizer 子目录全缺。diffusers 组件需逐子目录递归补齐；本地路径加载报 `HFValidationError: Repo id must be in the form...` 时先怀疑目录结构不完整。
+- **坑②（context 维度）**：SD3.5-M `joint_attention_dim=4096`——`encoder_hidden_states` 是**单张量 [B,77,4096]（仅 T5 维）**，不是 CLIP+T5 的 6144 拼接；喂 6144 报 `k-axis of the two inputs are different`。pooled_projections 才是 cat(clip_L 768, clip_G 1280)=2048。
+- （实测：diffusiondb 流匹配 CPT；同坑复用于任何"单文件+目录"双格式发布的模型）
+
+## 131. DepthPro：NpuFusedAdamW.step 崩（aclnnInplaceAdd 广播错）+ 输入必须 processor 1536
+- **坑①（优化器）**：`NpuFusedAdamW.step()` 在 DepthPro 上报 `EZ1001: 647141441 and 646551617 cannot broadcast`（aclnnInplaceAdd）。前向/反向均正常，仅融合优化器 step 崩——**换 plain `torch.optim.AdamW`** 即通。
+- **坑②（输入）**：DepthPro 必须走 `DepthProImageProcessor`（内部 resize 1536×1536 + fov 处理）；手工 resize 的 pixel_values 直喂会触发内部多尺度 patch 拼接广播错。GT depth 同步 resize 到 1536。
+- （实测：nyu-depth-v2 CPT；同类多尺度 patch 融合架构（fov/bbox fusion）都可能踩①）
+
+## 132. NPU cross_entropy 不做标签越界检查 → 假 loss 0.0（标签范围≠头维度）
+- **症状**：训练 loss 恒为 0.0/-0.0 或异常小；评估 loss 同样 0.0；acc 却为 0——loss 与 acc 互相矛盾。
+- **根因**：标签值超出 logits 类数（如 200 类标签喂 10 类头），NPU 的 CE kernel **不报越界错**（CPU 会报 `Target N is out of bounds`），直接输出垃圾值 0。实测 dinov3：imagenette 目录实为 tiny-imagenet **200 类**，10 类头全称假 loss。
+- **解法/验收**：**loss 出现精确 0.0 时第一反应查 `max(label) < logits.shape[-1]`**；数据集名与实际类数不强绑定（imagenette≈10、tiny-imagenet=200，镜像目录可能混用），先 `len(set(labels))` 核对。
+
+## 133. 回归/分类头模型走 MLM CPT：base 对照无意义（MLM 头随机初始化）
+- **场景**：原生为回归（ChemBERTa-MTR）、检测、分类输出的模型做 MLM 范式 CPT——checkpoint 无 MLM 头，`AutoModelForMaskedLM` 随机初始化 `cls.predictions.*`。
+- **后果**：base 评估 loss 是随机头输出（~14.5，比均匀分布还差），base vs cpt 对比无意义；新头 + 少样本（200 步×bs）训练极易过拟合（train 3.6 / val 17.5）。
+- **口径**：此类模型**不做 base MLM 对照**，如实记录"头随机初始化、口径不适用"，以训练收敛曲线 + 域内下游指标佐证；或改训其原生头任务。
+
+## 134. 原生格式 TTS 模型（CosyVoice3）：llm.pt 即 Qwen 骨架，键前缀 remap 文本 CPT
+- **结构**：CosyVoice3 发布为原生格式（llm.pt/flow.pt/hift.pt/yaml），无 transformers 类。`llm.pt` 的 LLM 部分 = **Qwen2-0.5B 骨架**：键 `llm.model.model.*` → Qwen2ForCausalLM 的 `model.*`（`llm.model.lm_head.weight`→`lm_head.weight`）；speech_embedding/llm_decoder 弃用。
+- **词表**：以 **embedding weight shape 为准**（实测 128011），tokenizer vocab_size 与之不符时改 `cfg.vocab_size=emb.shape[0]`。
+- **范式**：remap 后按普通文本 LM CE 训（ljspeech 转写文本），flow/hift 不动。
+
+## 135. 旧命名 config 的 checkpoint（GOT-OCR：model_type "GOT"）→ AutoModel 不认
+- **症状**：`AutoModelForCausalLM.from_pretrained` 报 `Model type should be one of ... GotOcr2Config ...`——列举里明明有该家族的新注册名。
+- **根因**：下载的旧 checkpoint config.json 用旧命名（`model_type: "GOT"`, `architectures: ["GOTQwenForCausalLM"]`），transformers 新版注册名是 `got_ocr2`/`GotOcr2ForConditionalGeneration`。
+- **解法**：patch config.json 的 `model_type`/`architectures` 为新注册名（元数据修正，权重不动）+ 代码显式 `from transformers import GotOcr2ForConditionalGeneration`。GOT 还需 `pip install verovio`。
+
+## 136. chronos-2 类时序基础模型：chronos-forecasting 包 + 训练 API
+- **加载**：`from chronos import Chronos2Model`（非 transformers AutoModel；config 注册为 t5 但类在独立包）。用 `m.base_model` 做训练模块。
+- **forward**：`m(context=[B,T], context_mask=bool, group_ids=long, num_output_patches=H//16, future_target=[B,H], future_target_mask=bool)` → 返回 `.loss`（quantile/CRPS）+ `.quantile_preds [B,21,H]`；**H 必须是 16 的倍数**（patch=16）。
+- **数据**：每条记录一条完整序列，训练时随机窗口切 context/future；评估固定窗口 + 中位数分位数 MSE。
+
+## 137. FSDP2 (torch 2.10)：fully_shard 无 device_id → init_device_mesh；大模型加载偏斜撞 HCCL 120s
+- **坑①（API 版本差异）**：torch 2.10 的 `fully_shard` 签名**没有 device_id 参数**（更新版本才有），传了报 `unexpected keyword argument`。正确做法：`mesh = init_device_mesh("npu", (world,))` 后 `fully_shard(layer, mesh=mesh, mp_policy=mp, reshard_after_forward=True)`——mesh 同时承担分片落卡。
+- **坑②（连接超时）**：160GB 级模型 per-rank `from_pretrained` 加载耗时不一，最快 rank 发起集合通信时最慢 rank 还在加载 → `Get_Socket_Timeout`/`hcclCommInitRootInfoConfig error 1`。**必设 `HCCL_CONNECT_TIMEOUT=1800`（默认仅 120s）+ `HCCL_EXEC_TIMEOUT=3600`**，并在加载完、fully_shard 前加 `dist.barrier()` 对齐。
+- （实测：80B MoE 8×910，9 次失败定位；36B 不设也可通是侥幸——加载快偏斜小）
+
+## 138. Adafactor 与 FSDP2 DTensor 不兼容（in-place pow_）→ 超大模型用"冻结下半层 + AdamW"
+- **症状**：Adafactor.step() 报 `aten.pow_.Scalar: in-place operations that require placement changes are not supported... (_NormPartial → Replicate)`——其内部 `torch.norm(grad).square_().div_()` 对 DTensor 梯度做 in-place。
+- **背景**：Adafactor 本是为省显存（80B 全训 AdamW 状态 ~80GB/卡装不下）而选，但与 FSDP2 互斥。
+- **解法**：**冻结前 N 层缩小可训练参数**（80B 冻下 36 层→20.4B 可训练，AdamW 全套 ~35GB/卡 ✓），`optim = AdamW([p for p in model.parameters() if p.requires_grad], ...)`。部分层 CPT 是显存受限下的正当策略；裁剪对 DTensor 的 in-place 同样会崩（wrap try/except 兜底）。
+
+## 139. FP8 块状 checkpoint 反量化：scale 键名是"替换"不是"拼接"；残留 quantization_config 会炸加载
+- **键名**：`X.weight` 的 scale 键是 **`X.weight_scale_inv`**（把 `.weight` 替换为 `.weight_scale_inv`），**不是** `X.weight` + `.weight_scale_inv` 拼接——拼错则全部 WARN "no scale" 且权重以原始 fp8 数值直接落盘（尺寸对、内容全错，加载不报错）。
+- **反量化**：Qwen FP8 为 128×128 块状：`w_bf16 = w.to(bf16) * scale.repeat_interleave(128,0).repeat_interleave(128,1)[:N,:K]`。
+- **残留配置**：反量化产物 config.json 必须删 `quantization_config`，否则 transformers 走 fp8 quantizer 路径直接崩（`update_tp_plan` NoneType）。
+- **验收**：反量化后抽 1-2 个 tensor 人工乘 scale 对拍，再全量加载。
+
+## 140. FSDP2 保存阶段死锁的保险姿势 + kill -9 后 NPU 显存残留
+- **坑①（保存死锁）**：训完逐 tensor `full_tensor()` 聚合全量 ckpt 可能挂死（#127 变体，36B 实测 30min+ 无产出；同脚本另一次却成功——间歇性）。**保险顺序：训练完立即写 train_summary（从 step_loss 日志即可）→ 做 in-process held-out 评估（FSDP 前向直接跑 val）→ 最后才尝试聚合保存**——保存挂死也不丢指标。
+- **坑②（显存残留）**：kill -9 大模型多进程后 NPU 显存不立即回收（npu-smi 仍显示 60GB+），立即重启新任务报 `TsdOpen failed`。**等 1-2 分钟至 `npu-smi` 归零再启**；清理用脚本文件匹配进程（防 pkill 自匹配误杀自身 shell）。
+- （实测：36B 两次保存一成一挂；kill -9 后 90s 内重启必 TsdOpen failed）
