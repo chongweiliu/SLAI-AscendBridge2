@@ -138,6 +138,13 @@ def main():
     print(f"[env] matmul ok sum={(x @ x).sum().item():.3f}", flush=True)
 
     tok = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
+    if tok.chat_template is None:  # 无模板模型(如 OLMoE-0924)：注入简单 User/Assistant 模板
+        # 与 validate.py.tmpl 的注入保持一致；掩码用 ASSISTANT_START='Assistant: '/ASSISTANT_END='<|endoftext|>'
+        # 详见 references/pitfalls.md #30
+        tok.chat_template = ("{%- for message in messages %}{{ message['role'] | capitalize }}: "
+                             "{{ message['content'] }}{{ eos_token }}{%- endfor %}"
+                             "{%- if add_generation_prompt %}Assistant: {%- endif %}")
+        print("[tok] injected custom User/Assistant chat template (no native template)", flush=True)
     print(f"[tok] vocab={len(tok)}", flush=True)
 
     print(f"[model] loading {MODEL_DIR} ...", flush=True)

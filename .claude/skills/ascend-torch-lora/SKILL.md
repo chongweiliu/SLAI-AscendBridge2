@@ -26,7 +26,7 @@ description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTo
 
 ## 输入（用户给路径即可启动）
 - **模型权重路径**（必填）：HF 目录（含 config.json/safetensors/tokenizer）。如 `/mnt/model/Qwen3.5-0.8B`。本地没有则从 modelscope / hf-mirror 下载（设 `HF_ENDPOINT=https://hf-mirror.com`）。
-- **对话数据集路径**（必填）：jsonl/json/parquet/csv 均可。每条需含多轮对话字段。`prepare_data.py.tmpl` 默认认 `{"dialogue":[{"student":...,"teacher":...}]}` 或 `{"messages":[{"role":"user","content":...},{"role":"assistant","content":...}]}` 两种格式自动识别；其它格式按 `references/label-masking.md` 的占位约定改 2 个解析函数即可。
+- **对话数据集路径**（必填）：jsonl/json/parquet/csv 均可。每条需含多轮对话字段。`prepare_data.py.tmpl` 默认认 `{"dialogue":[{"student":...,"teacher":...}]}` 或 `{"messages":[{"role":"user","content":...},{"role":"assistant","content":...}]}` 两种格式自动识别；其它格式按 `references/label-masking.md` 的占位约定改 2 个解析函数即可。**给的若是原始语料**（维基/文章/代码/偏好对），先用 `scripts/corpus_to_sft.py.tmpl` 任务化转 chat（4 种已验证范式 + 30%/held-out 切分协议，见 references/raw-corpus-to-sft.md）。
 - 可选：步数/轮次（epochs 与 steps 二选一，未给默认 150 步）、seq_len、batch、lr/lora_r 等超参（未给则由 `route_select.py` 按模型大小/步数/数据量自动择优，见 references/hyperparam-selection.md）、抽样比例（如取 50% 多轮）、用卡上限（--max-cards）、小模型是否多卡扩吞吐（--scale-up）。**单卡还是多卡、FSDP2 还是流水线由选路器按模型大小+空闲卡自动决定**，用户无需指定。
 - 工作目录：统一建在 **SLAI-AscendBridge2 仓库根目录下的 `lora-ws/` 内**（无则新建）。每个模型一个子目录 **`lora-ws/<模型名>-lora/`**（模型名取权重路径最后一段，如 `/mnt/model/Qwen3.5-0.8B` → `lora-ws/Qwen3.5-0.8B-lora/`）。所有脚本与产物统一归档于此，不散落到仓库根或其他位置。
 
@@ -63,9 +63,10 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
   ③ **ETA 外推**：用**末步增量（稳态步时）**×总步数——首步含 NPU 算子编译（可达数倍步时），平均法会高估 ETA 数倍（实测 45min 被均法报成 285min）
 **精度优先的保证**：三条路线的训练数值配置完全一致（bf16 autocast + grad-ckpt + eager + cosine），路线只影响并行方式不影响精度；训练前标签自检 + 训练后 base vs LoRA 验证门为强制步骤（见核心原则）。
 
-### 3. 数据准备（`prepare_data.py.tmpl`）
+### 3. 数据准备（`prepare_data.py.tmpl`；原始语料用 `corpus_to_sft.py.tmpl`）
 - 抽样（如取 50% 多轮）：固定 seed 可复现。
 - 转 chat messages：`[{"role":"system","content":...}, {"role":"user","content":student}, {"role":"assistant","content":teacher}, ...]`。
+- **原始语料（维基/文章/代码/偏好对）**：`corpus_to_sft.py.tmpl` 一条命令任务化（4 种范式）并产出 train/probe/val_loss/val10 四份文件 + 索引审计（30% 池 + held-out 严格不相交）；**切点受 prefix_cap 约束 + 前缀不截断 + 内置无间隙自检**（pitfalls #26：间隙曾致 83.7% 样本不可学、模型跳段生成）。
 - **loss 掩掩（核心，详见 references/label-masking.md）**：只对 assistant 回复 token 算 loss，user/system 标 -100。用**字符偏移映射法**（稳健，不依赖 chat template 实现）：① `apply_chat_template(tokenize=False)` 渲染全字符串；② `tok(rendered, return_offsets_mapping=True, add_special_tokens=False)` 拿 token→字符映射；③ 在字符串中 find assistant 块的起止特殊标记（如 `<|im_start|>assistant\n` ... `<|im_end|>\n`）得字符区间；④ token 的 offset 落在任一 assistant 区间即为 label token。**优先试 `return_assistant_tokens_mask=True`，但若返回全 0（如 Qwen3.5 的 bug）则用字符偏移法兜底。**
 
 ### 4. 训练脚本（`lora_train.py.tmpl` / `lora_train_fsdp.py.tmpl`，由第 2 步选定）
@@ -86,10 +87,13 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 - 上传 catbox.moe → 0x0.st → uguu.se 拿公网直链。
 
 ### 6. 验证（`validate.py.tmpl`，base vs LoRA 对比）
-- 从**未参与训练**的数据中选 N 条（复现训练抽样 seed 求补集，再另取 seed 选 N）。
+- 从**未参与训练**的数据中选 N 条（复现训练抽样 seed 求补集，再另取 seed 选 N）；**预切分好的验证文件**（≤N_VAL×2 条）模板自动全量使用，不会被 SAMPLE_RATIO 静默抽半（pitfalls #27）。
 - **teacher-forced 多轮**：逐 assistant 轮，用 GT 的 student/assistant 历史 + 当前 student 作上下文，`add_generation_prompt=True` 生成 teacher，与 GT 对比。
 - 指标：char-level ROUGE-L F1（LCS）、字符重叠（Jaccard multiset）、生成长度。三者互补（详见 references/eval-metrics.md）。
 - base 与 LoRA 各跑一遍，算 Δ。
+- **生成口径三注意**（pitfalls #31/#32/#30）：base 模型「模板收尾 token ≠ eos」时 `VAL_EOS_ID` 显式指定停止符；Qwen3 系自动 `enable_thinking=False` 且指标剥离 `<think>` 块；无模板模型自动注入 User/Assistant 模板（与训练一致）。
+- **对照实验**（备选超参验证）必须 `OUT_JSON` 指独立文件，否则覆盖主结果（pitfalls #29）。
+- **超参择优**：两阶段 sweep（lr×3 @ r16 → 最优 lr 下 r∈{8,32}，各 60 步）以 64 条 held-out assistant CE 为判据，协议与 4 模型实测数据见 references/hyperparam-selection.md；CE 与生成质量可能背离，开放式任务报告双证据（pitfalls #33）。
 
 ### 7. 概要总结
 - `SUMMARY.md`：环境/模型/数据/LoRA 配置/超参/loss 表/结论。
@@ -106,6 +110,8 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 8. **MoE 模型训练慢先查专家分发，优化前必须分相实测。** transformers 的 MoE eager 实现是 Python 逐专家循环（短序列下纯调度开销，每前向 7万+ 微小内核）。两条数学等价补丁：`MOE_IMPL=dense`（短序列 -34% 步时）/ `MOE_IMPL=gmm`（grouped GEMM，长序列 3-8×/省显存 30%），见 references/moe-optimization.md。优化决策靠分相计时探针（fwd/bwd/opt/comm），不靠直觉——GC 直觉上该关、实测该开。
 9. **报"昇腾不支持 X"之前，先走三步算子发现法**（见 references/npu-op-discovery.md）：① 盘点本机 CANN 注册接口（aclnnop 头文件 / torch_npu custom_ops / 二进制 schema）→ ② 搜 https://gitcode.com/cann 官方仓（ops-transformer / torchtitan-npu / catlass / cann-recipes-train）→ ③ 结合文档与参考案例写最小用例实测。PyTorch/CUDA 的函数在昇腾上几乎都有对应物；"NPU 无此内核"绝大多数时候只是"没找到入口"（grouped GEMM 曾被误判，次日即推翻）。结论必须写明排查范围与实测数据。
 10. **改动训练数值路径后必须做等价性验证**（三层）：微观 dx/dw 对照 → 同种子 step1 loss 近逐位 → 多步轨迹在噪声带内重合。注意 LoRA A 随机初始化导致 step2+ 天然有 ~0.5-2% 重跑偏差，勿误判（pitfalls #25）。
+11. **「前缀→续写」类任务化切分必须无信息间隙。** 切点受 prefix_cap 约束 + 前缀不做事后截断（所见即所续），切分器内置 `prefix ≤ cap×1.15` 自检（pitfalls #26：间隙曾致 codeparrot 83.7% 样本不可学、模型跳段生成、ROUGE -0.21，修复后转正）。
+12. **验证与批处理防三坑**：预切分验证文件全量使用（#27）；多工作区顺序批处理用子 shell 隔离 env（#28）；对照实验 OUT_JSON 指独立文件（#29）。生成验证口径：base 模板/eos 不一致用 VAL_EOS_ID（#31）、思考块剥离（#32）、无模板模型一致注入（#30）；CE 择优与生成质量可能背离，开放式任务双证据（#33）。
 
 ## 通用性矩阵（适用范围）
 
@@ -114,7 +120,9 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 | HF CausalLM 纯文本（Qwen2/3/3.5、Llama-2/3、GLM、Mistral、DeepSeek、Yi 等） | ✅ 完整验证 | 0.8B（单卡）~27B（FSDP2 8-die）两端实测 |
 | 多模态模型文本头（Qwen3.5-VL / Qwen2-VL 系） | ✅ 验证 | `AutoModelForCausalLM` 加载即文本头，纯文本 SFT 无需图像（pitfalls #10） |
 | 混合注意力（gated delta / linear attention） | ✅ 验证 | LoRA 目标自动发现含 in_proj_* 系列 |
-| MoE 模型 | ✅ 实测（Qwen3.6-35B-A3B, 14卡FSDP2） | 跑通且 loss 正常；**限制**：融合路由专家非 nn.Linear 挂不上 LoRA，仅注意力+共享专家被适配（21.2M 参数），见 pitfalls #21；**训练提速**：`MOE_IMPL=dense/gmm` 数学等价补丁（-34% 步时 / 长序列 3-8×），见 moe-optimization.md |
+| MoE 模型 | ✅ 实测（Qwen3.6-35B-A3B, 14卡FSDP2；OLMoE-1B-7B-0924 单卡） | 跑通且 loss 正常；**限制**：融合路由专家非 nn.Linear 挂不上 LoRA，仅注意力+共享专家被适配（21.2M 参数），见 pitfalls #21；**训练提速**：`MOE_IMPL=dense/gmm` 数学等价补丁（-34% 步时 / 长序列 3-8×），见 moe-optimization.md；OLMoE 实测 CE -20.9%/ROUGE +0.013（#30） |
+| 无原生 chat template 的模型（OLMoE-0924 等） | ✅ 实测 | 训练/验证一致注入 User/Assistant 模板 + ASSISTANT_START/END env（#30，模板已内置注入） |
+| 原始语料任务化（维基/文章/代码/偏好对 → SFT） | ✅ 实测（4 数据集） | `corpus_to_sft.py.tmpl` 4 种范式 + 无间隙切分自检 + 30%/held-out 协议，见 raw-corpus-to-sft.md（#26） |
 | 数据格式：messages / dialogue(student-teacher) / Alpaca | ✅ 验证 | prepare_data 三格式自动识别 |
 | chat 模板：ChatML / Llama-3 / Llama-2 / Mistral / DeepSeek | ✅ | 定界符表见 label-masking.md，可 env 覆盖 |
 | QLoRA / 量化基座 | ❌ 不支持 | 后续可扩展（NPU 量化路线另议） |
@@ -130,15 +138,17 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 ## 文件清单
 - `scripts/route_select.py.tmpl` — 自动选路器：模型大小+空闲卡+seq/steps → 单卡/FSDP2/device_map + 显存估算 + 自动超参 + export 启动块（纯标准库，无需 torch）
 - `scripts/prepare_data.py.tmpl` — 数据抽样 + 转 chat + loss 掩掩（字符偏移法）
-- `scripts/lora_train.py.tmpl` — LoRA SFT 训练（自动发现目标、NpuFusedAdamW、bf16、loss 记录）
+- `scripts/corpus_to_sft.py.tmpl` — 原始语料（维基/文章/代码/偏好对）任务化切分器：4 种范式 + 无间隙自检 + 30%/held-out 协议（2026-09-10 四数据集实战）
+- `scripts/lora_train.py.tmpl` — LoRA SFT 训练（自动发现目标、NpuFusedAdamW、bf16、loss 记录、无模板模型自动注入 chat template）
 - `scripts/lora_train_fsdp.py.tmpl` — 大模型 FSDP2 数据并行训练（27B 实测 2.18×/样本；含 expandable_segments 禁用与 train() 两个关键修复；MoE 可选 dense/gmm 等价提速补丁 + batch>1 右填充）
 - `scripts/plot_loss.py.tmpl` — loss 曲线 + 公网上传
-- `scripts/validate.py.tmpl` — base vs LoRA teacher-forced 多轮验证
+- `scripts/validate.py.tmpl` — base vs LoRA teacher-forced 多轮验证（预切分文件全量用/思考块剥离/VAL_EOS_ID/OUT_JSON 可覆盖/无模板注入）
 - `scripts/run_env.sh.tmpl` — 环境变量与 CANN source
-- `references/pitfalls.md` — 踩坑全集（25 条，避免重复浪费时间）
+- `references/pitfalls.md` — 踩坑全集（33 条，避免重复浪费时间）
 - `references/moe-optimization.md` — MoE 训练提速双路线（dense/gmm 补丁代码、选型表、等价性验证协议、已试错清单）
 - `references/npu-op-discovery.md` — 三步算子发现法（本机 CANN 接口盘点 → gitcode.com/cann 搜索 → 文档案例落地；报"不支持"前的强制排查流程）
 - `references/label-masking.md` — loss 掩掩三种方法 + 自检
-- `references/hyperparam-selection.md` — LoRA 超参自动选择规则（LR 按模型尺寸/warmup=10%步数/有效batch≈8/显存估算公式）
+- `references/hyperparam-selection.md` — LoRA 超参自动选择规则（LR 按模型尺寸/warmup=10%步数/有效batch≈8/显存估算公式）+ sweep 择优协议与 4 模型实测数据
 - `references/eval-metrics.md` — ROUGE-L/字符重叠/长度 三指标意义与选择
+- `references/raw-corpus-to-sft.md` — 原始语料→SFT 任务化（4 范式表、30%/held-out 切分协议、验证注意）
 - `references/env-pyproject.md` — uv pyproject 模板（ascend extra）

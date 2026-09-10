@@ -232,3 +232,63 @@ def patch_dense_moe():
 2. **强杀进程后 HCCL 瞬断**：`Communication_Error_Ranktable_Detect(EI0015): No rank can connect to the root node`——kill -9 残留与新启动竞争。处理：确认 `npu-smi` 显存回基线（~3GB/die）+ 无残留进程后重试即可，非硬件故障。
 3. **个别芯片"中毒"致全组挂死**：多卡训练在 barrier/首个集合通信无限挂死，或 `RunAicpuKfcResInitV2 aicpu execute failed`，伴随**全卡 HBM 假膨胀到 ~64GB 而 torch 峰值正常**（是 HCCL 缓冲+挂死重试累积的表象）。根因：某芯片被其它进程驻留/被强杀泄漏污染（任一芯片坏→全组挂）。定位：错误消息里的 `device(chipId:X, dieId:Y)`，**device N ↔ chipId N/2、dieId N%2**；修复：`ASCEND_RT_VISIBLE_DEVICES` 排除该芯片两个 die，world_size 相应减少。误判教训：别被 npu-smi 显示宿主机 PID 而 ps 是沙箱 PID 的现象带偏（PID namespace 差异是正常的）。
 4. **等价性验证判读**：训练脚本若未固定 `torch.manual_seed`，LoRA A 矩阵每次运行随机初始化——**lora_B 初始为 0 → step1 loss 跨运行必然（几乎）一致，step2+ 必然有小幅随机偏差（~0.5-2%）**。这是正常重跑差异，勿误判为"改动引入了不等价"；判定等价看 step1 逐位 + 多步轨迹是否在噪声带内重合。
+
+## #26 原始语料任务化切分的「前缀截断信息间隙」（2026-09-10，4 模型批量实测）
+
+**场景**：把原始语料（维基/代码/文章）切成「前缀→续写」SFT 任务时，若把 prefix 截断到 cap 而 GT 续写从**未截断前缀的末尾**开始，就产生模型不可见的间隙——模型看到的上文与它要续写的目标之间隔了一段看不见的内容。
+
+**实测危害**：codeparrot **83.7%** / wikitext **53.1%** / wiki-zh **37.4%** 样本带间隙；模型被迫学「凭文件开头猜中段」→ 生成时跳段（给 Ansible YAML 前缀却输出后面的 def main()），Qwen2.5-Coder 首轮 held-out ROUGE **-0.21**（看似 LoRA 训坏了，实为数据 bug）。
+
+**修复（三件套，已内置 `scripts/corpus_to_sft.py.tmpl`）**：
+1. **切点受 prefix_cap 约束**：目标切点窗口（如 25%~45%）越过 cap 时，改在 `[cap×0.55, cap]` 内找句/行边界；
+2. **前缀不做事后截断**（所见即所续）；目标（续写文本）尾部截断无害——模型只是学会较短完成；
+3. **切分器内置自检**：`assert 所有 prefix ≤ cap×1.15`（代码按行切时末行超长先回退一行，仍超则丢弃该样本）。
+
+修复后同协议重训：Coder ROUGE 转正 **+0.025**，3 模型 val CE 全部改善（Coder 1.086→0.976）。**任何「前缀→续写」构造都必须过这个自检。**
+
+## #27 validate.py 对预切分验证文件被 SAMPLE_RATIO 静默抽半（2026-09-10）
+
+`VAL_SRC` 传**预切分好的 held-out 文件**（如 10 条 val10.jsonl）时，模板默认 `SAMPLE_RATIO=0.5` 会把其中一半抽成 "used"，**10 条只评 5 条且无任何提示**——结果看起来完全正常，只有 `n_records=5` 才露馅（本轮连续两轮验证都中招，结果数字一模一样才发现）。
+
+**修复（模板已改）**：源文件 `total ≤ N_VAL×2` 时自动视为预切分验证集，忽略 SAMPLE_RATIO 全量使用并打印提示；`SRC=全量数据集` 的老用法（total 远大于 N_VAL）不受影响。手工调用旧版模板时显式 `SAMPLE_RATIO=0.0`。
+
+## #28 多工作区顺序批处理的 env.sh 泄漏（2026-09-10）
+
+循环 `source` 不同工作区的 env.sh 时，前一工作区 `export` 的变量会**残留到后续迭代**（后者的 env.sh 若不设置该变量就继承脏值）。本轮实例：OLMoE 的 `ASSISTANT_START='Assistant: '` 残留 → Coder/SmolLM2（ChatML 模型）渲染里找不到该标记 → **val_loss n=0 静默空结果**（mean_ce=0.000000 打印出来还像「极好」）。
+
+**修复**：批处理循环体必须用**子 shell 隔离** `( cd <ws>; source ./env.sh; <cmd> )`；或每个 env.sh 对所有可被别的工作区覆盖的变量显式写默认值（含 unset 语义做不到，就别依赖继承）。
+
+## #29 validate.py 的输出路径硬编码——对照实验验证会覆盖主结果（2026-09-10）
+
+`OUT_JSON` 固定为 `outputs/validation_results.json`。跑备选超参的对照验证（`ADAPTER_DIR` 指到别处）时会**把主配置的验证结果覆盖掉**（本轮 Qwen3 主验证被 alt 覆盖，靠日志才恢复，多花一轮重验）。
+
+**修复（模板已改）**：`OUT_JSON`/`OUT_MD` 支持环境变量覆盖；对照实验统一 `OUT_JSON=$WS/outputs/validation_alt_<tag>.json`。
+
+## #30 无 chat template 的模型：注入简单 User/Assistant 模板（2026-09-10，OLMoE-0924 实测）
+
+OLMoE-1B-7B-0924（instruct 模型）**不带 chat_template**，vocab 里连 `<|im_start|>` 都没有，eos=`<|endoftext|>`，`apply_chat_template` 直接报错。
+
+**修复（lora_train.py.tmpl 已内置）**：tokenizer 加载后 `if tok.chat_template is None:` 注入
+`"{%- for message in messages %}{{ message['role'] | capitalize }}: {{ message['content'] }}{{ eos_token }}{%- endfor %}{%- if add_generation_prompt %}Assistant: {%- endif %}"`
+并配 `ASSISTANT_START='Assistant: '` / `ASSISTANT_END='<|endoftext|>'`（字符偏移掩码用）。训练与验证**必须注入同一模板**（validate.py.tmpl 已同步）；生成以 eos 停止正常。base vs LoRA 在同格式下对比公平。实测 OLMoE LoRA 后 CE -20.9%、ROUGE +0.013。
+
+## #31 base 模型模板与 eos 不一致：生成停不住（2026-09-10，Qwen2.5-Coder 实测）
+
+Qwen2.5-Coder **base** 自带 ChatML 模板（assistant 轮以 `<|im_end|>` 收尾），但 `tokenizer.eos_token` 是 `<|endoftext|>`——`generate(eos_token_id=tok.eos_token_id)` 会一直生成到 max_new_tokens，长输出污染 ROUGE。
+
+**修复（模板已改）**：`VAL_EOS_ID` 环境变量显式指定停止 token（如 `VAL_EOS_ID=151645` 即 `<|im_end|>`）。给 base 模型做生成验证前先核对「模板收尾 token vs eos_token」是否一致。
+
+## #32 Qwen3 系思考块泄漏进指标（2026-09-10）
+
+Qwen3 生成时默认进思考模式输出 `<think>...</think>`；`<think>` 是**普通 token**，`skip_special_tokens=True` 不会剥掉，ROUGE 被 think 文本污染（base 写长 think、LoRA 学了空 think，两边口径还不一致）。
+
+**修复（validate.py.tmpl 已改，三处）**：① `apply_chat_template(..., enable_thinking=False)`（不识别该 kwarg 的模板 TypeError 兜底回退）；② 指标计算前正则剥离 `<think>.*?</think>`（base/LoRA 同口径）；③ 训练渲染的 assistant 轮自带空 `<think>\n\n</think>\n\n` 前缀属于该模板格式的一部分，不影响字符偏移掩码，无需处理。
+
+## #33 CE 择优判据与生成质量可能背离：贪心重复退化 + 对照方法论（2026-09-10）
+
+4 模型 sweep（64 条 held-out assistant CE 判据）一致选 lr=2e-4/r=32；但 Qwen3-1.7B + 中文维基续写 **CE -26.7%（PPL 36.7→14.1）的同时贪心 ROUGE 持平（-0.003）**，个别样本重复循环（同一句百科条目名 ×N）——CE 判据偏好尖锐分布，分布磨得过锐在贪心解码下易陷入循环。
+
+**判读方法论**：
+- **开放式续写任务 ROUGE 天然低且噪声大**（本轮 base 也仅 0.16），CE/PPL 是主证据，报告必须双证据（CE + 生成指标）；
+- 怀疑超参过锐时，用备选配置跑**完整对照**（60 步 sweep 看不出来），本轮 lr=1e-4/r=16 完整 200 步对照 ΔR-L=-0.019 更差 → 维持主配置；
+- 生成验证必须逐条看 10 条的 per-sample 表——重复退化会直接暴露在样本级，均值会掩盖它。
