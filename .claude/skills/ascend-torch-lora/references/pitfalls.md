@@ -292,3 +292,21 @@ Qwen3 生成时默认进思考模式输出 `<think>...</think>`；`<think>` 是*
 - **开放式续写任务 ROUGE 天然低且噪声大**（本轮 base 也仅 0.16），CE/PPL 是主证据，报告必须双证据（CE + 生成指标）；
 - 怀疑超参过锐时，用备选配置跑**完整对照**（60 步 sweep 看不出来），本轮 lr=1e-4/r=16 完整 200 步对照 ΔR-L=-0.019 更差 → 维持主配置；
 - 生成验证必须逐条看 10 条的 per-sample 表——重复退化会直接暴露在样本级，均值会掩盖它。
+
+## #34 切分时「源文件有序 + 索引排序」导致 probe 子集偏斜（2026-09-10，5 模型实测）
+
+从池内采样后若**保持索引升序**写盘，而源数据集本身按类别排序（imdb train 前 12500 全负例、后 12500 全正例），则 `train.jsonl` 前 N 条（= probe_train.jsonl）会**全部落在同一类别**（实测 probe 800 条全是 label 0）——sweep 在偏斜数据上择优，判据失真且无报错。
+
+**修复**：训练样本写盘前必须洗牌（`random.Random(43).shuffle(train_recs)`）；对有标签任务在训练器自检里打印**前 N 条标签分布**（本轮 `cls 标签分布: {0: 800}` 一眼暴露）。任何「取前 N 条当 probe/子集」的切片都先问一句：源文件是有序的吗？
+
+## #35 M2M100/NLLB 的 text_target 编码缺 tgt_lang：labels 带错语言码头（2026-09-10）
+
+`tok.src_lang = "eng_Latn"` 后用 `tok(text_target=中文)` 生成标签，**标签首 token 是 eng_Latn（源语言码）而不是 zho_Hans**——训练目标与生成时 `forced_bos_token_id=zho_Hans` 的分布不一致，CE 偏高且不收敛。
+
+**修复**：编码目标句前必须 `tok.tgt_lang = "zho_Hans"`（M2M100Tokenizer 特性：text_target 用 tgt_lang 决定语言码头）。验证方法：打印 `tok.convert_ids_to_tokens(tok(text_target="中文").input_ids[:3])`，首 token 应为目标语言码。
+
+## #36 seq2seq 的 generate() 返回不含源前缀——不能按源长度切片（2026-09-10）
+
+encoder-decoder 模型 `generate()` **只返回解码器输出 token**（不带 encoder 输入前缀），而 CausalLM 习惯是 `gen[0][input_len:]` 去掉 prompt——照搬到 seq2seq 会把整段译文切掉。本轮实测：nllb 译文全空（ROUGE 0.0095 的假象），修复后 base 实际 0.4867。
+
+**修复**：seq2seq 直接 `tok.decode(gen[0], skip_special_tokens=True)`（语言码头是 special token 会被自动剥掉）。诊断特征：**CE 正常但生成全空** → 优先怀疑切片/解码而不是模型。

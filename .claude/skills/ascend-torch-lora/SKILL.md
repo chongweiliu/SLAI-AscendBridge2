@@ -1,6 +1,6 @@
 ---
 name: ascend-torch-lora
-description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTorch + torch_npu + peft 对任意 HuggingFace CausalLM（含多模态模型的文本头，如 Qwen3/3.5、Qwen2、Llama、GLM、Mistral 等）做 LoRA 监督微调（SFT / instruction tuning）的端到端技能。用户只需给出【模型权重路径】+【对话/指令数据集路径】即可启动：自动探测环境/依赖、数据自动转 chat 格式并对 assistant 轮做 loss 掩掩、自动发现 LoRA 目标模块、**自动选路（route_select：按模型大小+空闲卡自动决策单卡/FSDP2 数据并行/device_map 流水线，超参按模型尺寸/步数自动择优，精度优先性能自动最优）**、bf16 autocast + grad-ckpt + cosine 调度、**MoE 模型训练提速（MOE_IMPL=dense/gmm 数学等价补丁，短序列 -34% 步时 / 长序列 3-8×）**、报"昇腾不支持某算子"前的三步算子发现法（本机 CANN 接口 → gitcode.com/cann → 文档案例）、默认产出 loss 曲线图+公网可访问直链（catbox.moe/0x0.st/uguu.se 顺序尝试，外网全不通则降级表格）、概要总结、base vs LoRA 验证对比（ROUGE-L/字符重叠/生成长度）。只要用户要在昇腾上"LoRA 微调/SFT/指令微调/对话微调"某模型（含 MoE 模型如 Qwen3.6-A3B/DeepSeek 系），或提到 NPU + LoRA + 对话数据 + loss 曲线 + 验证，或 MoE 训练慢要提速，就应使用本技能——即使用户没明说"skill"。本技能基于 PyTorch + torch_npu + peft（不是 CUDA/deepspeed/unsloth）。与 [[ascend-torch-cpt]]（继续预训练，喂原始语料）区分：本技能是 SFT，喂的是 chat/指令对话数据并只对 assistant 回复算 loss。
+description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTorch + torch_npu + peft 对任意 HuggingFace CausalLM（含多模态模型的文本头，如 Qwen3/3.5、Qwen2、Llama、GLM、Mistral 等）做 LoRA 监督微调（SFT / instruction tuning）的端到端技能。用户只需给出【模型权重路径】+【对话/指令数据集路径】即可启动：自动探测环境/依赖、数据自动转 chat 格式并对 assistant 轮做 loss 掩掩、自动发现 LoRA 目标模块、**自动选路（route_select：按模型大小+空闲卡自动决策单卡/FSDP2 数据并行/device_map 流水线，超参按模型尺寸/步数自动择优，精度优先性能自动最优）**、bf16 autocast + grad-ckpt + cosine 调度、**MoE 模型训练提速（MOE_IMPL=dense/gmm 数学等价补丁，短序列 -34% 步时 / 长序列 3-8×）**、报"昇腾不支持某算子"前的三步算子发现法（本机 CANN 接口 → gitcode.com/cann → 文档案例）、默认产出 loss 曲线图+公网可访问直链（catbox.moe/0x0.st/uguu.se 顺序尝试，外网全不通则降级表格）、概要总结、base vs LoRA 验证对比（ROUGE-L/字符重叠/生成长度）。只要用户要在昇腾上"LoRA 微调/SFT/指令微调/对话微调"某模型（含 MoE 模型如 Qwen3.6-A3B/DeepSeek 系），或提到 NPU + LoRA + 对话数据 + loss 曲线 + 验证，或 MoE 训练慢要提速，就应使用本技能——即使用户没明说"skill"。本技能基于 PyTorch + torch_npu + peft（不是 CUDA/deepspeed/unsloth）。非 CausalLM 模型（BERT 类 encoder/双塔嵌入/重排器/seq2seq 翻译/token 分类）的五范式 LoRA 亦支持（embed/seq2seq/rerank/cls/ner，lora_train_task.py.tmpl，见 non-causal-lm-paradigms.md）。与 [[ascend-torch-cpt]]（继续预训练，喂原始语料）区分：本技能是 SFT，喂的是 chat/指令对话数据并只对 assistant 回复算 loss。
 ---
 
 # Ascend NPU LoRA 监督微调（SFT）技能
@@ -126,7 +126,7 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 | 数据格式：messages / dialogue(student-teacher) / Alpaca | ✅ 验证 | prepare_data 三格式自动识别 |
 | chat 模板：ChatML / Llama-3 / Llama-2 / Mistral / DeepSeek | ✅ | 定界符表见 label-masking.md，可 env 覆盖 |
 | QLoRA / 量化基座 | ❌ 不支持 | 后续可扩展（NPU 量化路线另议） |
-| 非 CausalLM（T5 类 encoder-decoder、扩散模型） | ❌ 超范围 | 扩散见 [[ascend-torch-cpt]] |
+| 非 CausalLM 五范式（embed 双塔嵌入 / seq2seq 翻译 / rerank 重排 / cls 分类 / ner 实体识别） | ✅ 实测（2026-09-10 五模型：bge-m3/nllb-200/bge-reranker/distilbert/bert-NER） | `scripts/lora_train_task.py.tmpl` 按 `PARADIGM` 切换，LoRA 目标跨架构自动发现；详见 references/non-causal-lm-paradigms.md（含两类「无提升」的正确结论：数据量不足过拟合 / 完美饱和）；其余非 CausalLM 任务（扩散等）仍超范围（扩散见 [[ascend-torch-cpt]]） |
 
 ## 何时用本技能 vs 其它
 
@@ -140,15 +140,17 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 - `scripts/prepare_data.py.tmpl` — 数据抽样 + 转 chat + loss 掩掩（字符偏移法）
 - `scripts/corpus_to_sft.py.tmpl` — 原始语料（维基/文章/代码/偏好对）任务化切分器：4 种范式 + 无间隙自检 + 30%/held-out 协议（2026-09-10 四数据集实战）
 - `scripts/lora_train.py.tmpl` — LoRA SFT 训练（自动发现目标、NpuFusedAdamW、bf16、loss 记录、无模板模型自动注入 chat template）
+- `scripts/lora_train_task.py.tmpl` — 非 CausalLM 五范式 LoRA 训练器（embed/seq2seq/rerank/cls/ner，PARADIGM 环境变量切换；2026-09-10 五模型实战验证）
 - `scripts/lora_train_fsdp.py.tmpl` — 大模型 FSDP2 数据并行训练（27B 实测 2.18×/样本；含 expandable_segments 禁用与 train() 两个关键修复；MoE 可选 dense/gmm 等价提速补丁 + batch>1 右填充）
 - `scripts/plot_loss.py.tmpl` — loss 曲线 + 公网上传
 - `scripts/validate.py.tmpl` — base vs LoRA teacher-forced 多轮验证（预切分文件全量用/思考块剥离/VAL_EOS_ID/OUT_JSON 可覆盖/无模板注入）
 - `scripts/run_env.sh.tmpl` — 环境变量与 CANN source
-- `references/pitfalls.md` — 踩坑全集（33 条，避免重复浪费时间）
+- `references/pitfalls.md` — 踩坑全集（36 条，避免重复浪费时间）
 - `references/moe-optimization.md` — MoE 训练提速双路线（dense/gmm 补丁代码、选型表、等价性验证协议、已试错清单）
 - `references/npu-op-discovery.md` — 三步算子发现法（本机 CANN 接口盘点 → gitcode.com/cann 搜索 → 文档案例落地；报"不支持"前的强制排查流程）
 - `references/label-masking.md` — loss 掩掩三种方法 + 自检
 - `references/hyperparam-selection.md` — LoRA 超参自动选择规则（LR 按模型尺寸/warmup=10%步数/有效batch≈8/显存估算公式）+ sweep 择优协议与 4 模型实测数据
 - `references/eval-metrics.md` — ROUGE-L/字符重叠/长度 三指标意义与选择
 - `references/raw-corpus-to-sft.md` — 原始语料→SFT 任务化（4 范式表、30%/held-out 切分协议、验证注意）
+- `references/non-causal-lm-paradigms.md` — 非 CausalLM 五范式（embed/seq2seq/rerank/cls/ner：数据格式、loss、LoRA 目标跨架构发现、验证指标、两类「无提升」的正确结论）
 - `references/env-pyproject.md` — uv pyproject 模板（ascend extra）
