@@ -1,11 +1,12 @@
-# 非 CausalLM 五范式 LoRA（encoder / encoder-decoder 模型）
+# 非 CausalLM 七范式 LoRA（encoder / encoder-decoder / 掩码重建 / MAE 视觉）
 
-> 场景：目标是 BERT 类 encoder、双塔嵌入、重排器、seq2seq 翻译或 token 分类模型，而不是 CausalLM。
-> 2026-09-10 台账第 2 大类 5 模型全链路实测（bge-m3 / nllb-200 / bge-reranker-v2-m3 / distilbert-sst2 / bert-base-NER）。
+> 场景：目标是 BERT 类 encoder、双塔嵌入、重排器、seq2seq 翻译、token 分类、MLM 掩码重建或 MAE 视觉模型，而不是 CausalLM。
+> 实测：2026-09-10 台账第 2 大类 5 模型（bge-m3 / nllb-200 / bge-reranker-v2-m3 / distilbert-sst2 / bert-base-NER）；
+> 2026-09-11 第 3 大类 4 模型（ClinicalBERT / ChemBERTa-zinc / esm2_t30_150M / Prithvi-EO-2.0-300M）。
 > 训练器模板：`scripts/lora_train_task.py.tmpl`（范式经 `PARADIGM` 环境变量切换）；完整配套（切分/择优/验证）
-> 实战副本在 `lora-ws/.cat2/`（make_split2.py / sweep2.py / val_loss_task.py / validate_task.py）。
+> 实战副本在 `lora-ws/.cat2/`（五范式）与 `lora-ws/.cat3/`（七范式最新版 + mlm/mim）。
 
-## 五范式速查
+## 七范式速查
 
 | PARADIGM | 模型加载 | 数据格式（jsonl 每行） | loss | 真实 batch | 验证主指标 |
 |---|---|---|---|---|---|
@@ -14,6 +15,8 @@
 | rerank | `AutoModelForSequenceClassification`（num_labels=1） | `{"query","positive","negative"}` | 成对排序 `softplus(-(s_pos−s_neg)).mean()` | 8（正负对成 16 编码） | hit@1 / MRR（1 正+99 采样负） |
 | cls | `AutoModelForSequenceClassification` | `{"text","label"}` | 分类 CE | 16 | 准确率 |
 | ner | `AutoModelForTokenClassification` | `{"tokens","tags"}` | token CE（**首子词对齐**：word_ids，续子词 -100） | 16 | 实体级 F1（BIO 解码 span 精确匹配） |
+| mlm | `AutoModelForMaskedLM` | `{"text"}` | 15% 掩码（80/10/10）标准 MLM CE | 16 | **固定掩码**下的掩码重建准确率 + CE |
+| mim | 自定义 MAE（如 PrithviMAE，timm Block） | `{"path": 影像文件}` | MAE 75% 掩码重建 MSE（norm_pix_loss=False） | 4（视觉大） | **固定掩码**下的重建 MSE |
 
 ## LoRA 目标跨架构自动发现
 
@@ -33,6 +36,12 @@ q_lin,k_lin,v_lin,out_lin,lin1,lin2           # DistilBERT
 - **rerank**：bge-reranker + mmarco-zh，**无提升**（见下）。
 - **cls**：distilbert-sst2 + imdb 30%，val CE 0.257→0.170（-33.9%），准确率 0.80→0.90（SST-2 短文本→IMDB 长影评域迁移被修正）。
 - **ner**：bert-base-NER + conll2003，F1 0.90 持平（见下）。conll txt 的 `B-organisation` 系标签须映射到模型的 `B-ORG` 空间。
+- **mlm**（2026-09-11 第 3 大类）：ClinicalBERT+PubMedQA -12.8%（掩码 acc 0.627→0.641）、ChemBERTa-zinc+SMILES **-57.7%**
+  （0.917→0.933）、esm2+uniref50 -1.5%（同源近饱和）。**验证必须固定掩码**（per-record seed 的 Generator，
+  base/LoRA 同掩码才可比，pitfalls #40③）。PubMedQA context 是 dict 非 str（#37）。
+- **mim**：Prithvi-EO-2.0-300M + hls-burn-scars，双方 MSE 均 1e-5 量级（完美饱和持平，与 CPT 批次同结论）。
+  LoRA 目标为 timm Block 命名 `qkv/proj/fc1/fc2`（encoder+decoder）；peft 对非 HF 模块（get_peft_model/
+  save_pretrained）正常；hls-burn-scars 台账 3233 文件实为 804 影像（#38）。
 
 ## 「无提升」的两类正确结论（避免误判为失败）
 
@@ -48,6 +57,7 @@ q_lin,k_lin,v_lin,out_lin,lin1,lin2           # DistilBERT
 
 - 弱基座/域差距大（embed/seq2seq/cls）→ 选激进组合（lr=2e-4，r=8~32）
 - 强基座/数据少（rerank/ner）→ sweep 自动选保守组合（lr=5e-5, r=8）——即便如此仍无提升空间（见上）
+- mlm 域差距大（ChemBERTa/ClinicalBERT）→ lr=2e-4 r=32；同源近饱和（esm2）→ 1e-4 r=8 即可；mim 饱和时全组合打平
 
 ## 数据切分注意（接 corpus_to_sft / cat1 协议）
 

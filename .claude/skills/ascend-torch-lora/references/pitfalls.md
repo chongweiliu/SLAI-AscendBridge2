@@ -310,3 +310,37 @@ Qwen3 生成时默认进思考模式输出 `<think>...</think>`；`<think>` 是*
 encoder-decoder 模型 `generate()` **只返回解码器输出 token**（不带 encoder 输入前缀），而 CausalLM 习惯是 `gen[0][input_len:]` 去掉 prompt——照搬到 seq2seq 会把整段译文切掉。本轮实测：nllb 译文全空（ROUGE 0.0095 的假象），修复后 base 实际 0.4867。
 
 **修复**：seq2seq 直接 `tok.decode(gen[0], skip_special_tokens=True)`（语言码头是 special token 会被自动剥掉）。诊断特征：**CE 正常但生成全空** → 优先怀疑切片/解码而不是模型。
+
+## #37 PubMedQA 等结构化列是 parquet struct 还原的 dict，不是字符串（2026-09-11）
+
+`pd.read_parquet` 读 PubMedQA 的 `context` 列得到的是 **dict**（`{'contexts': array([...]), 'labels': ...}`），
+不是字符串 repr——对它 `eval()`/`ast.literal_eval` 全失败且静默丢光数据（实测首切分 0 条可用）。
+判别：`type(ctx)` 是 dict 直接 `ctx["contexts"]`；是 str 才需要 `eval(str, {"array": np.array, "dtype": object})`。
+写 loader 时先 print 一条的实际类型再定解析路径。
+
+## #38 hls-burn-scars 类「台账文件数」含水分：AppleDouble + mask 标注（2026-09-11）
+
+台账标 3233 个文件，实际 **6 波段影像仅 804 张**：tar 里另有 ~1608 个 macOS AppleDouble 元数据条目
+（`._*`，GNU tar 报 `LIBARCHIVE.xattr` warning 并跳过，无害）+ 804 张单波段 mask 标注（`*.mask.tif`）。
+切分/加载必须按 `*_merged.tif` 过滤；影像与 mask 在同一目录按后缀区分。pgrep 自匹配会把死掉的 tar 误报成
+「还在解压」（检查用记录 PID 查 /proc，别 pgrep 模式串）。
+
+## #39 timm 安装拖带 torch 升级 → torch_npu 断链（共享 venv 最大风险，2026-09-11）
+
+`uv pip install timm`（默认解析依赖）把 venv 的 torch 2.10.0 拖到 **2.14.0** + torchvision 0.29，
+torch-npu 2.10 立即 `undefined symbol: torch::autograd::deleteNode` 断链——而该 venv 是多个批次共用的。
+**修复**：`uv pip install "torch==2.10.0" "torchvision==0.25.0" --index-url https://download.pytorch.org/whl/cpu`
+显式 pin 回滚（timm 1.0.29 硬依赖 torchvision.ops，必须装 torch 配套版本而非卸载）。
+**纪律：往共享 venv 装任何新包，先确认它不会动 torch/torch-npu（`--no-deps` 或与 torch 一起 pin），
+装完立即 `import torch, torch_npu; torch.npu.is_available()` 回归验证。**
+
+## #40 mim 范式无 tokenizer + NPU/CPU 张量混比（2026-09-11）
+
+① mim（Prithvi MAE 等纯视觉模型）没有 tokenizer——val/validate 脚本若无条件
+`AutoTokenizer.from_pretrained(MODEL_DIR)` 会把模型目录误判成 timm_wrapper 而崩；与训练器一样加
+`tok = None if PARADIGM == "mim" else ...` 守卫（保存 tokenizer 同理）。
+② mlm 验证的 device 坑：`logits[pos]`（NPU）索引结果与 CPU labels 比较报 device mismatch——
+`preds = logits[pos.to(logits.device)].argmax(-1).cpu()` 后再比。
+③ MIM/MAE 的 mask 在 forward 内部随机生成：验证（base vs LoRA 对比）前必须
+`torch.manual_seed(i); torch.npu.manual_seed_all(i)` 固定，否则双方掩码不同不可比。MLM 验证同理用
+**确定性掩码**（per-record seed 的 Generator）。

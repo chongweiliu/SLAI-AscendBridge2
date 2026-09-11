@@ -1,22 +1,23 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""lora_train_task.py.tmpl — 非 CausalLM 五范式 LoRA 训练器（encoder/encoder-decoder，2026-09-10 五模型实战验证）
+"""lora_train_task.py.tmpl — 非 CausalLM 七范式 LoRA 训练器（2026-09-10/11 两批九模型实战验证）
 
-适用：embed(双塔嵌入)/seq2seq(翻译)/rerank(重排)/cls(分类)/ner(实体识别) —— 详见
-  references/non-causal-lm-paradigms.md（数据格式/loss/验证指标/超参模式/两类「无提升」正确结论）。
+适用：embed(双塔嵌入)/seq2seq(翻译)/rerank(重排)/cls(分类)/ner(实体识别)/mlm(掩码重建)/mim(MAE 视觉)
+  —— 详见 references/non-causal-lm-paradigms.md（数据格式/loss/验证指标/超参模式/饱和案例）。
 
 用法（环境变量）:
-  PARADIGM=embed|seq2seq|rerank|cls|ner   # 必填
-  MODEL_DIR=... DATA_FILE=... OUT_DIR=... # 必填
+  PARADIGM=embed|seq2seq|rerank|cls|ner|mlm|mim    # 必填
+  MODEL_DIR=... DATA_FILE=... OUT_DIR=...          # 必填
   NUM_STEPS=200 LR=1e-4 LORA_R=16 LORA_ALPHA=32 WARMUP=20
-  BATCH(默认 embed16/seq2seq8/rerank8/cls16/ner16) MAX_LEN(默认 256/256/512/512/256)
+  BATCH(默认 embed16/seq2seq8/rerank8/cls16/ner16/mlm16/mim4) MAX_LEN(默认 256/256/512/512/256/512/224)
 
 已规避的坑（见 pitfalls）:
   #35 seq2seq 必须 tok.src_lang + tok.tgt_lang 都设（text_target 的语言码头）
   #34 训练器自检打印前 N 条标签分布（暴露 probe 偏斜）
+  #40 mim 无 tokenizer（tok=None 守卫）；mlm 验证确定性掩码在 val/validate 脚本侧
   #5  NpuFusedAdamW zero_grad(set_to_none=False)
   NPU 骨架与 lora_train.py.tmpl 一致（autoload=0 手动 import、bf16 autocast、cosine+warmup）
-配套（实战副本，按需复制到工作区）: lora-ws/.cat2/{make_split2.py, sweep2.py, val_loss_task.py, validate_task.py}
+配套（实战副本，按需复制到工作区）: lora-ws/.cat3/{make_split3.py, sweep3.py, val_loss_task.py, validate_task.py}
 """
 
 import json
@@ -49,15 +50,21 @@ WARMUP = int(os.environ.get("WARMUP", "20"))
 LORA_R = int(os.environ.get("LORA_R", "16"))
 LORA_ALPHA = int(os.environ.get("LORA_ALPHA", "32"))
 LORA_DROPOUT = float(os.environ.get("LORA_DROPOUT", "0.05"))
-DEF_BATCH = {"embed": 16, "seq2seq": 8, "rerank": 8, "cls": 16, "ner": 16}[PARADIGM]
+DEF_BATCH = {"embed": 16, "seq2seq": 8, "rerank": 8, "cls": 16, "ner": 16, "mlm": 16, "mim": 4}[PARADIGM]
 BATCH = int(os.environ.get("BATCH", str(DEF_BATCH)))
-MAX_LEN = int(os.environ.get("MAX_LEN", {"embed": 256, "seq2seq": 256, "rerank": 512, "cls": 512, "ner": 256}[PARADIGM]))
+MAX_LEN = int(os.environ.get("MAX_LEN", {"embed": 256, "seq2seq": 256, "rerank": 512, "cls": 512, "ner": 256, "mlm": 512, "mim": 224}[PARADIGM]))
+# mim (Prithvi MAE) 常量：与 CPT 实现一致
+IMG_SIZE, NUM_FRAMES, IN_CHANS, MASK_RATIO = 224, 4, 6, 0.75
+import numpy as _np  # noqa: E402
+MEAN = _np.array([1087., 1342., 1433., 2734., 1958., 1363.], dtype=_np.float32)
+STD = _np.array([2248., 2179., 2178., 1850., 1242., 1049.], dtype=_np.float32)
 SEED = int(os.environ.get("SEED", "42"))
 DEV = os.environ.get("NPU_DEV", "npu:0")
 
 CANDIDATES = ["q_proj", "k_proj", "v_proj", "out_proj", "fc1", "fc2",
               "query", "key", "value", "dense",
-              "q_lin", "k_lin", "v_lin", "out_lin", "lin1", "lin2"]
+              "q_lin", "k_lin", "v_lin", "out_lin", "lin1", "lin2",
+              "qkv", "proj"]  # qkv/proj: Prithvi(timm Block) 融合注意力
 
 
 def lr_at(step, num_steps, warmup, lr):
@@ -68,12 +75,65 @@ def lr_at(step, num_steps, warmup, lr):
 
 
 def load_model():
+    if PARADIGM == "mim":
+        # Prithvi-EO-2.0 MAE：自定义模型（prithvi_mae.py 在 MODEL_DIR 内），非 AutoModel
+        import sys
+        sys.path.insert(0, MODEL_DIR)
+        from prithvi_mae import PrithviMAE
+        m = PrithviMAE(img_size=IMG_SIZE, patch_size=(1, 16, 16), num_frames=NUM_FRAMES,
+                       in_chans=IN_CHANS, embed_dim=1024, depth=24, num_heads=16,
+                       decoder_embed_dim=512, decoder_depth=8, decoder_num_heads=16,
+                       mask_ratio=MASK_RATIO, norm_pix_loss=False)
+        ckpt = torch.load(os.path.join(MODEL_DIR, "Prithvi_EO_V2_300M.pt"), map_location="cpu", weights_only=False)
+        if "model" in ckpt:
+            ckpt = ckpt["model"]
+        m.load_state_dict(ckpt, strict=False)
+        return m
+    if PARADIGM == "mlm":
+        from transformers import AutoModelForMaskedLM
+        return AutoModelForMaskedLM.from_pretrained(MODEL_DIR, dtype=torch.bfloat16,
+                                                    trust_remote_code=True, attn_implementation="eager")
     from transformers import AutoModel, AutoModelForSeq2SeqLM, AutoModelForSequenceClassification, AutoModelForTokenClassification
     loader = {"embed": AutoModel, "seq2seq": AutoModelForSeq2SeqLM,
               "rerank": AutoModelForSequenceClassification, "cls": AutoModelForSequenceClassification,
               "ner": AutoModelForTokenClassification}[PARADIGM]
     kw = dict(dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="eager")
     return loader.from_pretrained(MODEL_DIR, **kw)
+
+
+def mlm_mask(input_ids, tok):
+    """标准 15% 掩码（80/10/10），跳过特殊 token。返回 (masked_ids, labels)。"""
+    labels = input_ids.clone()
+    special = set(tok.all_special_ids)
+    maskable = torch.ones_like(input_ids, dtype=torch.bool)
+    for sid in special:
+        maskable &= input_ids != sid
+    m = maskable & (torch.rand(input_ids.shape) < 0.15)
+    labels[~m] = -100
+    r = torch.rand(input_ids.shape)
+    input_ids = input_ids.clone()
+    input_ids[m & (r < 0.8)] = tok.mask_token_id
+    rnd = m & (r >= 0.8) & (r < 0.9)
+    if rnd.any():
+        input_ids[rnd] = torch.randint(0, len(tok), (int(rnd.sum()),))
+    return input_ids, labels
+
+
+def load_tif(path):
+    """GeoTIFF → 归一化 → 中心裁 224 → [C,T=4,H,W]（与 CPT 实现一致）。"""
+    import rasterio
+    with rasterio.open(path) as ds:
+        arr = ds.read()
+    if arr.shape[0] != IN_CHANS:
+        raise ValueError(f"{path}: {arr.shape[0]} bands != {IN_CHANS}")
+    arr = arr.astype(_np.float32)
+    arr = (arr - MEAN[:, None, None]) / STD[:, None, None]
+    h, w = arr.shape[1], arr.shape[2]
+    if h < IMG_SIZE or w < IMG_SIZE:
+        raise ValueError(f"{path}: {h}x{w} < {IMG_SIZE}")
+    sh, sw = (h - IMG_SIZE) // 2, (w - IMG_SIZE) // 2
+    arr = arr[:, sh:sh + IMG_SIZE, sw:sw + IMG_SIZE]
+    return torch.from_numpy(arr).unsqueeze(1).repeat(1, NUM_FRAMES, 1, 1)
 
 
 def tok_batch(tok, texts):
@@ -90,7 +150,7 @@ def main():
     torch.npu.set_device(DEV)
     print(f"[env] npu={torch.npu.is_available()} dev={DEV}", flush=True)
 
-    tok = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
+    tok = None if PARADIGM == "mim" else AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
     if PARADIGM == "seq2seq":
         tok.src_lang = "eng_Latn"   # M2M100: 源语言
         tok.tgt_lang = "zho_Hans"   # 目标语言：text_target 编码带 zho_Hans 头（与生成 forced_bos 一致）
@@ -98,7 +158,8 @@ def main():
         print(f"[tok] src=eng_Latn tgt=zho_Hans bos={GLOBAL_ZH_BOS}", flush=True)
 
     model = load_model().to(DEV)
-    model.config.use_cache = False if hasattr(model.config, "use_cache") else False
+    if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+        model.config.use_cache = False  # 非 HF 模型(PrithviMAE)无 config，跳过
     print(f"[model] loaded {time.time()-t0:.1f}s params={sum(p.numel() for p in model.parameters())/1e6:.1f}M", flush=True)
 
     # LoRA 目标自动发现（跨 5 架构）
@@ -138,10 +199,28 @@ def main():
     if PARADIGM == "seq2seq":
         assert all(r.get("en") and r.get("zh") for r in recs[:50]), "seq2seq 平行对缺失"
         print("[check] seq2seq 平行对完整性 ✓", flush=True)
+    if PARADIGM == "mlm":
+        assert all(r.get("text") for r in recs[:50]), "mlm 文本缺失"
+        n_mask = int((tok(recs[0]["text"][:400])["input_ids"].__len__() * 0.15))
+        print(f"[check] mlm 文本完整性 ✓ 首条 {len(recs[0]['text'])} 字符 ≈{n_mask} 掩码位", flush=True)
+    if PARADIGM == "mim":
+        t = load_tif(recs[0]["path"])
+        assert t.shape == (IN_CHANS, NUM_FRAMES, IMG_SIZE, IMG_SIZE), f"tif 形状异常 {t.shape}"
+        print(f"[check] mim tif ✓ shape={tuple(t.shape)} 首条={recs[0]['path'].split('/')[-1]}", flush=True)
 
     # ---- 范式 loss ----
     def forward_loss(batch_recs):
         with torch.autocast("npu", dtype=torch.bfloat16):
+            if PARADIGM == "mlm":
+                enc = tok_batch(tok, [r["text"] for r in batch_recs])
+                masked, labels = mlm_mask(enc["input_ids"], tok)
+                out = model(input_ids=masked.to(DEV), attention_mask=enc["attention_mask"].to(DEV),
+                            labels=labels.to(DEV))
+                return out.loss
+            if PARADIGM == "mim":
+                imgs = torch.stack([load_tif(r["path"]) for r in batch_recs]).to(DEV)
+                loss, _, _ = model(imgs, None, None, MASK_RATIO)
+                return loss
             if PARADIGM == "embed":
                 texts = []
                 for r in batch_recs:
@@ -227,7 +306,8 @@ def main():
     print(f"[probe] s_per_step={steady:.2f} mem_peak_gb={torch.npu.max_memory_allocated()/2**30:.2f} last_loss={log[-1]['loss']}", flush=True)
     print(f"[train] done {NUM_STEPS} steps in {total:.1f}s ({total/NUM_STEPS:.2f}s/step)", flush=True)
     model.save_pretrained(ad_dir)
-    tok.save_pretrained(ad_dir)
+    if tok is not None:
+        tok.save_pretrained(ad_dir)
     with open(os.path.join(OUT_DIR, "loss_raw.json"), "w", encoding="utf-8") as f:
         json.dump({"steps": log, "num_steps": NUM_STEPS, "total_train_s": round(total, 2),
                    "config": {"paradigm": PARADIGM, "model": MODEL_DIR, "lora_r": LORA_R, "lora_alpha": LORA_ALPHA,
