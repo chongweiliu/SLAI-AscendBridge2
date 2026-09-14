@@ -1,0 +1,133 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# prep_speech_codec_data.py.tmpl — TTS talker CPT 语料打包模板 (codec 离线编码 + ref 定长 mel 缓存)
+# 见 references/speech-codec-lm-cpt.md; 占位: --input_jsonl({audio,text,ref_audio}) / --tokenizer_model_path(须指向 speech_tokenizer/ 子目录)
+# coding=utf-8
+"""Prepare aishell3 SFT data for Qwen3-TTS-12Hz LoRA SFT on Ascend NPU.
+
+Adapted from official QwenLM/Qwen3-TTS finetuning/prepare_data.py, plus:
+  - ref_audio: resample to 24kHz, fix length to REF_SECONDS (pad/truncate),
+    save resampled wav; the official TTSDataset asserts sr==24000 and the
+    collate_fn torch.cat's ref mels, so all refs must share one length.
+  - ref_mel: precompute (official mel_spectrogram, 128 mels) into one .npy so
+    training needs no audio loading at all.
+
+Output:
+  data/qwen3tts_sft_1000_prep.jsonl   fields: idx,audio,text,ref_audio_24k,audio_codes,ref_mel_index
+  data/ref_mels.npy                   float32 [N, T', 128]
+  data/roundtrip_check/               decode roundtrip wavs for sanity listen
+"""
+import argparse
+import json
+import os
+
+import librosa
+import numpy as np
+import soundfile as sf
+import torch
+
+from qwen_tts import Qwen3TTSTokenizer
+from qwen_tts.core.models.modeling_qwen3_tts import mel_spectrogram
+
+REF_SECONDS = 3.0
+SR = 24000
+BATCH = 32
+
+
+def resample_fix_length(path: str):
+    wav, sr = librosa.load(path, sr=None, mono=True)
+    if sr != SR:
+        wav = librosa.resample(y=wav, orig_sr=sr, target_sr=SR)
+    n = int(REF_SECONDS * SR)
+    if len(wav) >= n:
+        wav = wav[:n]
+    else:
+        wav = np.pad(wav, (0, n - len(wav)))
+    return wav.astype(np.float32)
+
+
+def extract_mel(wav: np.ndarray) -> np.ndarray:
+    # official TTSDataset.extract_mels (CPU is fine, pure STFT)
+    mels = mel_spectrogram(
+        torch.from_numpy(wav).unsqueeze(0),
+        n_fft=1024, num_mels=128, sampling_rate=SR,
+        hop_size=256, win_size=1024, fmin=0, fmax=12000,
+    ).transpose(1, 2)  # [1, T', 128]
+    return mels[0].numpy()
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--input_jsonl", default="/models/share/bakxss/modelimage/data/aishell3/qwen3tts_sft_1000.jsonl")
+    ap.add_argument("--tokenizer_model_path", default="models/Qwen3-TTS-12Hz-1.7B-Base/speech_tokenizer",
+                    help="12Hz speech tokenizer dir (NOT the main model dir: its config model_type is qwen3_tts_tokenizer_12hz)")
+    ap.add_argument("--ref_out_dir", default="data/aishell3_ref_24k")
+    ap.add_argument("--out_jsonl", default="data/qwen3tts_sft_1000_prep.jsonl")
+    ap.add_argument("--out_mels", default="data/ref_mels.npy")
+    ap.add_argument("--device", default="npu:0")
+    ap.add_argument("--limit", type=int, default=0, help="debug: only first N lines")
+    args = ap.parse_args()
+
+    os.makedirs(args.ref_out_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(args.out_jsonl), exist_ok=True)
+    os.makedirs("data/roundtrip_check", exist_ok=True)
+
+    tok = Qwen3TTSTokenizer.from_pretrained(args.tokenizer_model_path, device_map=args.device)
+
+    lines = [json.loads(l) for l in open(args.input_jsonl, encoding="utf-8")]
+    if args.limit:
+        lines = lines[: args.limit]
+    print(f"total lines: {len(lines)}")
+
+    # 1) encode target audio in batches (tokenizer resamples internally)
+    all_codes = []
+    for s in range(0, len(lines), BATCH):
+        batch = [l["audio"] for l in lines[s : s + BATCH]]
+        enc = tok.encode(batch)
+        codes = [c.cpu() if isinstance(c, torch.Tensor) else torch.tensor(c) for c in enc.audio_codes]
+        all_codes.extend(codes)
+        print(f"encoded {min(s+BATCH, len(lines))}/{len(lines)}", flush=True)
+
+    # 2) ref audio: resample+fix length, save wav, precompute mel
+    ref_wavs, mels = [], []
+    for i, l in enumerate(lines):
+        w = resample_fix_length(l["ref_audio"])
+        out_wav = os.path.join(args.ref_out_dir, f"ref_{i:05d}.wav")
+        sf.write(out_wav, w, SR)
+        ref_wavs.append(out_wav)
+        mels.append(extract_mel(w))
+        if (i + 1) % 200 == 0:
+            print(f"ref mel {i+1}/{len(lines)}", flush=True)
+
+    mel_arr = np.stack(mels).astype(np.float32)
+    np.save(args.out_mels, mel_arr)
+    print("ref_mels:", mel_arr.shape, mel_arr.dtype)
+
+    # 3) write prep jsonl
+    with open(args.out_jsonl, "w", encoding="utf-8") as f:
+        for i, l in enumerate(lines):
+            rec = {
+                "idx": i,
+                "audio": l["audio"],
+                "text": l["text"],
+                "ref_audio_24k": ref_wavs[i],
+                "audio_codes": all_codes[i].tolist(),
+                "ref_mel_index": i,
+            }
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    print(f"wrote {args.out_jsonl}")
+
+    lens = [c.shape[0] for c in all_codes]
+    print(f"audio_codes len: min={min(lens)} max={max(lens)} mean={sum(lens)/len(lens):.1f} (12Hz frames => {sum(lens)/len(lens)/12:.1f}s mean)")
+
+    # 4) roundtrip sanity: decode first 2 samples back to wav
+    dec_inputs = [{"audio_codes": all_codes[i]} for i in range(2)]
+    dec_wavs, sr = tok.decode(dec_inputs)
+    for i in range(2):
+        sf.write(f"data/roundtrip_check/roundtrip_{i}.wav", dec_wavs[i], sr)
+        orig, osr = librosa.load(lines[i]["audio"], sr=None, mono=True)
+        print(f"roundtrip {i}: sr={sr}, dur_dec={len(dec_wavs[i])/sr:.2f}s dur_orig={len(orig)/osr:.2f}s text={lines[i]['text']}")
+
+
+if __name__ == "__main__":
+    main()

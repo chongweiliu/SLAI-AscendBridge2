@@ -71,7 +71,7 @@ def load_model(device):
         # 多模态→文本头重映射：在此填实际文本头类与 strip 前缀逻辑
         # 模板见 references/multimodal-remap.md（已验证 Qwen3.5 路径）
         raise SystemExit("REMAP=1：请按 references/multimodal-remap.md 在 load_model 内填文本头类与键重映射")
-    model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, torch_dtype=torch.float32, trust_remote_code=True)
+    model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, dtype=torch.float32, trust_remote_code=True)
     model=model.to(device); model.train(); model.config.use_cache=False
     try: model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
     except TypeError: model.gradient_checkpointing_enable()
@@ -120,17 +120,19 @@ def main():
     last_save_t=t0
     _last_table_t=0.0   # 用时表上次刷新时间(全程实时汇报, 见核心原则9)
     _save_interval_s=max(CKPT_MIN_INTERVAL_S, NUM_STEPS*EST_STEP_S/CKPT_MAX_SAVES)  # 周期保存间隔（时间基准）
+    _micro=0
     for step in range(start_step,NUM_STEPS):
-        bi=step%nb; bidx=idxs[bi*BATCH_SIZE:(bi+1)*BATCH_SIZE]
-        batch=x[bidx].to(device); attn=torch.ones_like(batch)
-        lr=lr_at(step)
-        for g in optim.param_groups: g['lr']=lr
-        optim.zero_grad(set_to_none=False)   # NpuFusedAdamW 不支持 set_to_none=True
-        with torch.autocast(device_type="npu",dtype=torch.bfloat16):
-            out=model(input_ids=batch,attention_mask=attn,labels=batch); loss=out.loss
-        (loss/GRAD_ACCUM).backward()
-        if (step+1)%GRAD_ACCUM==0 or step==NUM_STEPS-1:   # 累满 GRAD_ACCUM 才 step
-            torch.nn.utils.clip_grad_norm_(model.parameters(),GRAD_CLIP); optim.step()
+        optim.zero_grad(set_to_none=False)   # NpuFusedAdamW 不支持 set_to_none=True；必须在累积窗口开头(#108)——
+        for _ga in range(GRAD_ACCUM):        # 放在 per-micro-batch 循环内会把前一 micro-batch 已累积的梯度清掉，
+            bi=(_micro)%nb; _micro+=1        # GRAD_ACCUM>1 时静默退化为"只用最后一个 micro-batch 的梯度"
+            bidx=idxs[bi*BATCH_SIZE:(bi+1)*BATCH_SIZE]
+            batch=x[bidx].to(device); attn=torch.ones_like(batch)
+            lr=lr_at(step)
+            for g in optim.param_groups: g['lr']=lr
+            with torch.autocast(device_type="npu",dtype=torch.bfloat16):
+                out=model(input_ids=batch,attention_mask=attn,labels=batch); loss=out.loss
+            (loss/GRAD_ACCUM).backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(),GRAD_CLIP); optim.step()
         ls=float(loss.detach().cpu())
         if is_ddp():
             t=torch.tensor([ls],device=device,dtype=torch.float32); dist.all_reduce(t,op=dist.ReduceOp.AVG); ls=float(t.cpu())

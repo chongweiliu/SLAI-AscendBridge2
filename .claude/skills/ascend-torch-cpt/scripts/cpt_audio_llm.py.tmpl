@@ -144,15 +144,15 @@ def main():
     print(f"[model] loading {arch} (bf16)...", flush=True)
     if MODE_FORCE in ("mp2",) or (MODE_FORCE=="auto"):
         # 先单卡 load 算参数量(占 2P), 再决定
-        model=ModelCls.from_pretrained(MODEL, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True).to("npu:0")
+        model=ModelCls.from_pretrained(MODEL, dtype=torch.bfloat16, low_cpu_mem_usage=True).to("npu:0")
     else:
-        model=ModelCls.from_pretrained(MODEL, torch_dtype=torch.bfloat16, low_cpu_mem_usage=True).to("npu:0")
+        model=ModelCls.from_pretrained(MODEL, dtype=torch.bfloat16, low_cpu_mem_usage=True).to("npu:0")
     P_B=sum(p.numel() for p in model.parameters())/1e9
     mode, max_mem = auto_parallel(P_B, n_card, free_GB, MODE_FORCE)
     # 若 mode=mp2 → 重新以 device_map+max_memory load(切分); mode=lora → 后续 wrap LoRA
     if mode=="mp2":
         del model; torch.npu.empty_cache()
-        model=ModelCls.from_pretrained(MODEL, torch_dtype=torch.bfloat16, device_map="auto", max_memory=max_mem, low_cpu_mem_usage=True)
+        model=ModelCls.from_pretrained(MODEL, dtype=torch.bfloat16, device_map="auto", max_memory=max_mem, low_cpu_mem_usage=True)
     model.config.use_cache=False
     # 冻结 audio_tower+projector(按子模块路径, 勿用类名"Audio" #59)
     fr=0; tot=0

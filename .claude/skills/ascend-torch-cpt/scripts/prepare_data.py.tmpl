@@ -14,6 +14,7 @@ RATIO=float(os.environ.get("RATIO","1.0"))      # 取语料比例
 NUM_STEPS=int(os.environ.get("NUM_STEPS","100"))
 BATCH_SIZE=int(os.environ.get("BATCH_SIZE","16"))
 WORLD_SIZE=int(os.environ.get("WORLD_SIZE","1"))
+GRAD_ACCUM=int(os.environ.get("GRAD_ACCUM","1"))
 SEED=int(os.environ.get("SEED","42"))
 CAP_TOKENS=int(os.environ.get("CAP_TOKENS","0"))  # 打包token上限(0=不限制); 只需少量块时避免全量tokenize, #105
 random.seed(SEED); torch.manual_seed(SEED)
@@ -78,7 +79,7 @@ def main():
         if ids: all_ids.extend(ids)
     n_tok=len(all_ids); n_raw=n_tok//SEQ_LEN
     blocks=[all_ids[b*SEQ_LEN:(b+1)*SEQ_LEN] for b in range(n_raw)]
-    need=NUM_STEPS*BATCH_SIZE*WORLD_SIZE
+    need=NUM_STEPS*BATCH_SIZE*WORLD_SIZE*GRAD_ACCUM  # 每步全局消耗 blocks=world*bs*grad_accum
     if len(blocks)<need:
         rng.shuffle(blocks); base=list(blocks)
         while len(blocks)<need: blocks.extend(base)

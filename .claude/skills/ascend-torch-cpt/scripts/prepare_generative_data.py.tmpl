@@ -44,7 +44,7 @@ def is_video(mi):
 def load_vae(mi):
     VaeCls=_dyn_load(mi.get("vae")) or _dyn_load(["diffusers","AutoencoderKLWan"])  # 回退通用 VAE
     print(f"[vae] class={VaeCls.__name__}", flush=True)
-    vae=VaeCls.from_pretrained(f"{MODEL_DIR}/{VAE_DIR}", torch_dtype=torch.bfloat16).to(DEV).eval()
+    vae=VaeCls.from_pretrained(f"{MODEL_DIR}/{VAE_DIR}", dtype=torch.bfloat16).to(DEV).eval()
     for p in vae.parameters(): p.requires_grad=False
     return vae
 
@@ -58,7 +58,7 @@ def load_text_encoder(mi):
         tok=transformers.AutoTokenizer.from_pretrained(f"{MODEL_DIR}/tokenizer")
         TECls=_dyn_load(mi.get("text_encoder"))  # model_index 指定正确 TE 类(避免 T5/UMT5 混用 #53)
         if TECls is None: TECls=transformers.T5EncoderModel  # 回退
-        te=TECls.from_pretrained(f"{MODEL_DIR}/{TE_DIR}", torch_dtype=torch.bfloat16).to(DEV).eval()
+        te=TECls.from_pretrained(f"{MODEL_DIR}/{TE_DIR}", dtype=torch.bfloat16).to(DEV).eval()
         for p in te.parameters(): p.requires_grad=False
         print(f"[text] TE class={TECls.__name__} 已加载", flush=True); return tok,te
     except Exception as e:
