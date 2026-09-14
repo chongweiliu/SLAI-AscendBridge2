@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 # cpt_speech_codec.py.tmpl — speech-codec-token LM (TTS talker) CPT 训练模板 (Ascend NPU)
-# 来源实证: Qwen3-TTS-12Hz-1.7B-Base + aishell3, 见 references/speech-codec-lm-cpt.md
+# 来源实证: Qwen3-TTS-12Hz-1.7B-Base + aishell3, 见 training-ws/18_qwen3-tts-cpt/
 # 依赖: qwen-tts 包 (pin transformers==4.57.3), torch-npu; 数据须先经 prep_speech_codec_data.py 离线编码
 # 占位替换: 无——argparse 默认值即工作区相对路径, 按实际模型/数据改 --model_path/--train_jsonl 即可
 # 注意: talker loss 配对 = 全长 inputs + 全长 own-position labels (勿加 [:, 1:]); sub-talker = 恒等配对 CE
