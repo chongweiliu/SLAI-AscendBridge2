@@ -26,7 +26,7 @@ def load_backbone(state=None):
     mi=read_mi(); BK=bk_dir(mi); BkCls=dyn_load(mi.get(BK))
     if BkCls is None: raise SystemExit("无法识别 backbone 类")
     try:
-        dit=BkCls.from_pretrained(f"{MODEL_DIR}/{BK}", torch_dtype=torch.bfloat16, low_cpu_mem_usage=True).to(DEV)
+        dit=BkCls.from_pretrained(f"{MODEL_DIR}/{BK}", dtype=torch.bfloat16, low_cpu_mem_usage=True).to(DEV)
     except Exception:
         cfg=json.load(open(f"{MODEL_DIR}/{BK}/config.json")); dit=BkCls.from_config(cfg, torch_dtype=torch.bfloat16)
         dit.load_state_dict(_lf(f"{MODEL_DIR}/{BK}/diffusion_pytorch_model.safetensors"), strict=False); dit=dit.to(DEV)
@@ -91,7 +91,7 @@ def main():
     print("\n[gen] CPT 采样生成...",flush=True); t0=time.time()
     try:
         mi=read_mi(); VaeCls=dyn_load(mi.get("vae")) or __import__("diffusers").AutoencoderKLWan
-        vae=VaeCls.from_pretrained(f"{MODEL_DIR}/vae",torch_dtype=torch.bfloat16).to(DEV).eval()
+        vae=VaeCls.from_pretrained(f"{MODEL_DIR}/vae",dtype=torch.bfloat16).to(DEV).eval()
         lat_shape=tuple(latents[0].shape)
         dit=load_backbone(CKPT); vid=gen_sample(dit,vae,latent_norm=latent_norm,lat_shape=lat_shape)
         save_video(vid,f"{OUT}/sample_cpt.{'mp4' if data.get('is_video',True) else 'png'}")

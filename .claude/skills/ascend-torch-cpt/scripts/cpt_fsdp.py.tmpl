@@ -44,7 +44,7 @@ def load_model():
     if REMAP:
         # 多模态→文本头重映射（见 references/multimodal-remap.md）
         raise SystemExit("REMAP=1：按 references/multimodal-remap.md 在 load_model 填文本头类+键重映射")
-    model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, torch_dtype=torch.float32, trust_remote_code=True)
+    model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, dtype=torch.float32, trust_remote_code=True)
     model.train(); model.config.use_cache=False
     try: model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
     except TypeError: model.gradient_checkpointing_enable()
@@ -83,15 +83,17 @@ def main():
     last_save_t=t0
     _last_table_t=0.0   # 用时表上次刷新时间(全程实时汇报, 见核心原则9)
     _save_interval_s=max(CKPT_MIN_INTERVAL_S, NUM_STEPS*EST_STEP_S/CKPT_MAX_SAVES)  # 周期保存间隔（时间基准）
+    _micro=0
     for step in range(start_step,NUM_STEPS):
-        bi=step%nb; bidx=idxs[bi*BATCH_SIZE:(bi+1)*BATCH_SIZE]
-        batch=x[bidx].to(dev); attn=torch.ones_like(batch)
+        optim.zero_grad(set_to_none=False)   # #108: 必须在累积窗口开头——放 micro-batch 循环内会清掉已累积梯度
+        for _ga in range(GRAD_ACCUM):
+            bi=(_micro)%nb; _micro+=1
+            bidx=idxs[bi*BATCH_SIZE:(bi+1)*BATCH_SIZE]
+            batch=x[bidx].to(dev); attn=torch.ones_like(batch)
+            out=model(input_ids=batch,attention_mask=attn,labels=batch); loss=out.loss
+            (loss/GRAD_ACCUM).backward()
         for g in optim.param_groups: g['lr']=lr_at(step)
-        optim.zero_grad(set_to_none=False)
-        out=model(input_ids=batch,attention_mask=attn,labels=batch); loss=out.loss
-        (loss/GRAD_ACCUM).backward()
-        if (step+1)%GRAD_ACCUM==0 or step==NUM_STEPS-1:
-            torch.nn.utils.clip_grad_norm_(model.parameters(),GRAD_CLIP); optim.step()
+        torch.nn.utils.clip_grad_norm_(model.parameters(),GRAD_CLIP); optim.step()
         ls=float(loss.detach().cpu())
         t=torch.tensor([ls],device=dev,dtype=torch.float32); dist.all_reduce(t,op=dist.ReduceOp.AVG); ls=float(t.cpu())
         el=time.time()-t0; sps=el/(step-start_step+1); tps=BATCH_SIZE*w*SEQ_LEN*GRAD_ACCUM/sps if sps>0 else 0

@@ -1,0 +1,19 @@
+{
+  "batch": "8-model CPT on Ascend 910 (2026-09-11), single die, small datasets at /models/share/bakxss/modelimage/data/",
+  "results": {
+    "17_Qwen3-ASR-0.6B":  {"paradigm": "audio transcription CE (#129)", "data": "LibriSpeech dev-clean 342MB", "eval": "WER 19.15%->4.94% (-14.2pp); CE 1.02->0.146", "verdict": "POSITIVE"},
+    "18_qwen3-tts":       {"paradigm": "speech codec-token LM (GGUF unrained->HF src, prev workspace recipe)", "data": "aishell3 (already at data/18_aishell3)", "eval": "codec CE 11.38->1.42, next-token acc 0.9%->59.1%", "verdict": "POSITIVE (base unadapted to codec task)"},
+    "19_wavlm-base-plus": {"paradigm": "masked self-distillation (teacher=base)", "data": "LibriSpeech 300 waveforms", "eval": "masked recon MSE 0.0105->0.0031 (-70.6%)", "verdict": "POSITIVE"},
+    "20_Face_Recognition":{"paradigm": "identity CE (InceptionResnetV1 substitute; dir had no weights)", "data": "LFW 158-id 4324 imgs + vggface2.pt", "eval": "LFW verify 96.95%->92.78% (-4.2pp)", "verdict": "NEGATIVE (catastrophic forgetting)"},
+    "21_sam3":            {"paradigm": "oracle-query focal+dice, person prompt (vision frozen)", "data": "human_parsing shard0 480/120", "eval": "best-query IoU 0.911->0.953 (+4.3pp)", "verdict": "POSITIVE"},
+    "22_Step1X-3D":       {"paradigm": "3D latent flow matching", "data": "mesh assets + TSDF preprocessing pipeline required", "eval": "N/A - out of scope, see 22_Step1X-3D-cpt/README.md", "verdict": "NOT EXECUTED (downgraded)"},
+    "23_GLM-OCR":         {"paradigm": "OCR image->text CE (vision frozen)", "data": "sroie+cord+funsd 662 imgs (already at data/)", "eval": "CER 172%->17.5%; CE 2.19->0.57", "verdict": "POSITIVE"},
+    "24_chronos-2":       {"paradigm": "quantile forecasting (#136)", "data": "m4_hourly 414 series 1.3MB", "eval": "tail median MSE +18.6% (MAE slightly better)", "verdict": "NEGATIVE (overfit 414 series)"}
+  },
+  "cross_cutting": {
+    "negative_pattern": "strong-pretrained backbone + full-param finetune on small data -> forgetting (Face, chronos, and prior bert-NER)",
+    "optimizer_finding": "NpuFusedAdamW EZ1001 fixed-shape broadcast crashes on wavlm + sam3 -> plain AdamW (<100M or non-HF models)",
+    "missing_weights": "20_Face_Recognition had no PyTorch weights; 18_qwen3-tts ships GGUF only",
+    "timing_total_hours": "approx 6.5h incl downloads and debugging"
+  }
+}

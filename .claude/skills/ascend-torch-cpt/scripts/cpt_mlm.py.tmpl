@@ -44,7 +44,7 @@ def setup_dist():
     return r,w,lr
 
 def load_model(device):
-    model=AutoModelForMaskedLM.from_pretrained(MODEL_DIR, torch_dtype=torch.float32, trust_remote_code=True)
+    model=AutoModelForMaskedLM.from_pretrained(MODEL_DIR, dtype=torch.float32, trust_remote_code=True)
     model=model.to(device); model.train(); model.config.use_cache=False
     try: model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
     except TypeError: model.gradient_checkpointing_enable()

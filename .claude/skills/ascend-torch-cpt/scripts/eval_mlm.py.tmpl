@@ -15,7 +15,7 @@ VAL_FILE=os.environ.get("VAL_FILE","")
 TRAIN_RATIO=float(os.environ.get("RATIO","1.0"))
 
 def load_model(src):
-    model=AutoModelForMaskedLM.from_pretrained(MODEL_DIR, torch_dtype=torch.float32, trust_remote_code=True)
+    model=AutoModelForMaskedLM.from_pretrained(MODEL_DIR, dtype=torch.float32, trust_remote_code=True)
     if src=='cpt' and os.path.exists(CKPT):
         sd=torch.load(CKPT,map_location=DEVICE,weights_only=False)
         model.load_state_dict(sd,strict=False)

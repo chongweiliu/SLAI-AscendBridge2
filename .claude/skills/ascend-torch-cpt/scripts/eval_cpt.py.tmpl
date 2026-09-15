@@ -45,12 +45,12 @@ REMAP=os.environ.get("REMAP","0")=="1"
 def load_model(src, device):
     if REMAP: raise SystemExit("REMAP=1：按 references/multimodal-remap.md 填重映射")
     if src=='cpt':
-        model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, torch_dtype=torch.float32, trust_remote_code=True)
+        model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, dtype=torch.float32, trust_remote_code=True)
         # 大 ckpt map_location='cpu' 会叠加 CPU 模型致容器 OOM SIGKILL(137)（pitfalls #44）；改加载到 NPU 再跨设备 copy
         sd=torch.load(CKPT,map_location=device,weights_only=False)  # weights_only=False 见 pitfalls #37
         model.load_state_dict(sd,strict=False)
     else:
-        model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, torch_dtype=torch.float32, trust_remote_code=True)
+        model=AutoModelForCausalLM.from_pretrained(MODEL_DIR, dtype=torch.float32, trust_remote_code=True)
     if hasattr(model.config,'tie_word_embeddings') and model.config.tie_word_embeddings: model.tie_weights()
     model=model.to(device); model.eval(); model.config.use_cache=True
     return model

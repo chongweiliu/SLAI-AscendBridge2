@@ -1,0 +1,368 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# cpt_speech_codec.py.tmpl — speech-codec-token LM (TTS talker) CPT 训练模板 (Ascend NPU)
+# 来源实证: Qwen3-TTS-12Hz-1.7B-Base + aishell3, 见 training-ws/18_qwen3-tts-cpt/
+# 依赖: qwen-tts 包 (pin transformers==4.57.3), torch-npu; 数据须先经 prep_speech_codec_data.py 离线编码
+# 占位替换: 无——argparse 默认值即工作区相对路径, 按实际模型/数据改 --model_path/--train_jsonl 即可
+# 注意: talker loss 配对 = 全长 inputs + 全长 own-position labels (勿加 [:, 1:]); sub-talker = 恒等配对 CE
+# coding=utf-8
+"""CPT (continued pre-training) of Qwen3-TTS-12Hz-1.7B-Base talker on Ascend NPU.
+
+Paradigm: speech-codec-token LM CPT (user-requested CPT, NOT assistant-masked SFT).
+  - dual-track input layout identical to official QwenLM/Qwen3-TTS finetuning
+    (text channel = conditioning only, codec channel = LM token stream)
+  - loss = full-sequence next-token CE over the codec0 stream (control tokens,
+    pad region, codec_bos, audio frames, codec_eos) + 0.3 x sub-talker CE for
+    code groups 1..15 at audio frames (model-native multi-codebook objective)
+  - full-parameter training: talker + code_predictor + embeddings;
+    speaker_encoder output detached (no grads), speech_tokenizer offline-only
+  - fp32 master weights + bf16 autocast; NpuFusedAdamW betas(0.9,0.95)
+
+Usage:
+  python cpt_train_npu.py --probe        # 2-step smoke
+  python cpt_train_npu.py                # full run (3 epochs)
+"""
+import argparse
+import json
+import math
+import os
+import random
+import time
+
+import numpy as np
+import torch
+from torch.utils.data import DataLoader, Dataset
+
+from qwen_tts import Qwen3TTSModel
+
+WS_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+# --------------------------------------------------------------------------- #
+# Dataset (official dual-track collate layout; ref mel from precomputed cache)
+# --------------------------------------------------------------------------- #
+class CodecLMCPTDataset(Dataset):
+    def __init__(self, records, processor, config, ref_mels):
+        self.records = records
+        self.processor = processor
+        self.config = config
+        self.ref_mels = ref_mels
+
+    def __len__(self):
+        return len(self.records)
+
+    def __getitem__(self, idx):
+        rec = self.records[idx]
+        text = f"<|im_start|>assistant\n{rec['text']}<|im_end|>\n<|im_start|>assistant\n"
+        inp = self.processor(text=text, return_tensors="pt", padding=True)
+        text_ids = inp["input_ids"]
+        text_ids = text_ids.unsqueeze(0) if text_ids.dim() == 1 else text_ids
+        audio_codes = torch.tensor(rec["audio_codes"], dtype=torch.long)  # [t,16]
+        mel = torch.from_numpy(np.array(self.ref_mels[rec["ref_mel_index"]]))
+        return {"text_ids": text_ids[:, :-5], "audio_codes": audio_codes, "ref_mel": mel}
+
+    def collate_fn(self, batch):
+        item_length = [b["text_ids"].shape[1] + b["audio_codes"].shape[0] for b in batch]
+        max_length = max(item_length) + 8
+        b, t = len(batch), max_length
+
+        tc = self.config.talker_config
+        input_ids = torch.zeros((b, t, 2), dtype=torch.long)
+        codec_ids = torch.zeros((b, t, 16), dtype=torch.long)
+        text_embedding_mask = torch.zeros((b, t), dtype=torch.bool)
+        codec_embedding_mask = torch.zeros((b, t), dtype=torch.bool)
+        codec_mask = torch.zeros((b, t), dtype=torch.bool)
+        attention_mask = torch.zeros((b, t), dtype=torch.long)
+
+        for i, data in enumerate(batch):
+            text_ids = data["text_ids"]
+            audio_codec_0 = data["audio_codes"][:, 0]
+            audio_codecs = data["audio_codes"]
+            text_ids_len = text_ids.shape[1]
+            codec_ids_len = audio_codec_0.shape[0]
+
+            # text channel
+            input_ids[i, :3, 0] = text_ids[0, :3]
+            input_ids[i, 3:7, 0] = self.config.tts_pad_token_id
+            input_ids[i, 7, 0] = self.config.tts_bos_token_id
+            input_ids[i, 8 : 8 + text_ids_len - 3, 0] = text_ids[0, 3:]
+            input_ids[i, 8 + text_ids_len - 3, 0] = self.config.tts_eos_token_id
+            input_ids[i, 8 + text_ids_len - 2 : 8 + text_ids_len + codec_ids_len, 0] = self.config.tts_pad_token_id
+            text_embedding_mask[i, : 8 + text_ids_len + codec_ids_len] = True
+
+            # codec channel
+            input_ids[i, 3:8, 1] = torch.tensor(
+                [tc.codec_nothink_id, tc.codec_think_bos_id, tc.codec_think_eos_id,
+                 0,  # speaker embedding slot
+                 tc.codec_pad_id]
+            )
+            input_ids[i, 8 : 8 + text_ids_len - 3, 1] = tc.codec_pad_id
+            input_ids[i, 8 + text_ids_len - 3, 1] = tc.codec_pad_id
+            input_ids[i, 8 + text_ids_len - 2, 1] = tc.codec_bos_id
+            input_ids[i, 8 + text_ids_len - 1 : 8 + text_ids_len - 1 + codec_ids_len, 1] = audio_codec_0
+            input_ids[i, 8 + text_ids_len - 1 + codec_ids_len, 1] = tc.codec_eos_token_id
+
+            codec_ids[i, 8 + text_ids_len - 1 : 8 + text_ids_len - 1 + codec_ids_len, :] = audio_codecs
+            codec_embedding_mask[i, 3 : 8 + text_ids_len + codec_ids_len] = True
+            codec_embedding_mask[i, 6] = False  # speaker slot
+            codec_mask[i, 8 + text_ids_len - 1 : 8 + text_ids_len - 1 + codec_ids_len] = True
+            attention_mask[i, : 8 + text_ids_len + codec_ids_len] = True
+
+        ref_mels = torch.stack([b["ref_mel"] for b in batch])
+        return {"input_ids": input_ids, "ref_mels": ref_mels, "attention_mask": attention_mask,
+                "text_embedding_mask": text_embedding_mask.unsqueeze(-1),
+                "codec_embedding_mask": codec_embedding_mask.unsqueeze(-1),
+                "codec_ids": codec_ids, "codec_mask": codec_mask}
+
+
+def build_stream_labels(input_ids, codec_embedding_mask):
+    """CPT: own-position labels over the WHOLE codec stream (control tokens, pad
+    region, codec_bos, audio frames, codec_eos), -100 where the codec channel
+    carries no embedding (leading im_start positions / speaker slot / right pad).
+    Passing these with full-length inputs to the talker makes ForCausalLMLoss's
+    internal shift pair logits[t] <-> stream[t+1]: the standard next-token CE
+    that matches the model's generate() contract (first sampled token comes
+    from the last prefill position's hidden).
+
+    NOTE: official finetuning/sft_12hz.py passes labels[:, 1:] on top of this
+    loss function, which double-shifts to t->t+2; we deliberately do NOT
+    replicate that (verified against generate(): sub-talker logits are built
+    own-position, so identity pairing is the native contract).
+    """
+    codec_stream = input_ids[:, :, 1]
+    valid = codec_embedding_mask[:, :, 0]
+    return torch.where(valid, codec_stream, torch.full_like(codec_stream, -100))
+
+
+def subtalker_loss_identity(raw, codec_ids_audio, talker_hidden):
+    """Sub-talker CE with identity pairing (logits[j] = group j+1 | hidden, c0..c_j),
+    replicating forward_sub_talker_finetune's embedding assembly but WITHOUT the
+    label shift: package method passes labels=codec_ids[:,1:] into ForCausalLMLoss
+    which shifts once more -> misaligned. Generation conditions group j+1 on
+    [hidden, c0..c_j], exactly logits[j] here.
+    codec_ids_audio: [N, 16] own-position codec ids at audio frames
+    talker_hidden:   [N, H]  talker last-layer hidden at the same frames
+    """
+    parts = [talker_hidden.unsqueeze(1)]
+    for i in range(codec_ids_audio.shape[1] - 1):
+        if i == 0:
+            parts.append(raw.talker.get_input_embeddings()(codec_ids_audio[:, :1]))
+        else:
+            parts.append(raw.talker.code_predictor.get_input_embeddings()[i - 1](codec_ids_audio[:, i : i + 1]))
+    sub_in = torch.cat(parts, dim=1)  # [N, 16, H]
+    sub_out = raw.talker.code_predictor.forward_finetune(inputs_embeds=sub_in, labels=None)
+    sub_logits = sub_out.logits.float()  # [N, 15, V]
+    targets = codec_ids_audio[:, 1:].reshape(-1)
+    return torch.nn.functional.cross_entropy(sub_logits.reshape(-1, sub_logits.shape[-1]), targets)
+
+
+def forward_loss(raw, batch, device):
+    input_ids = batch["input_ids"].to(device)
+    codec_ids = batch["codec_ids"].to(device)
+    ref_mels_b = batch["ref_mels"].to(device)
+    text_emb_mask = batch["text_embedding_mask"].to(device)
+    codec_emb_mask = batch["codec_embedding_mask"].to(device)
+    attention_mask = batch["attention_mask"].to(device)
+    codec_mask = batch["codec_mask"].to(device)
+
+    speaker_embedding = raw.speaker_encoder(ref_mels_b).detach()
+
+    input_text_embedding = raw.talker.model.text_embedding(input_ids[:, :, 0]) * text_emb_mask
+    input_codec_embedding = (raw.talker.model.codec_embedding(input_ids[:, :, 1]) * codec_emb_mask).clone()
+    input_codec_embedding[:, 6, :] = speaker_embedding
+
+    input_embeddings = input_text_embedding + input_codec_embedding
+    for i in range(1, 16):
+        emb_i = raw.talker.code_predictor.get_input_embeddings()[i - 1](codec_ids[:, :, i])
+        input_embeddings = input_embeddings + emb_i * codec_mask.unsqueeze(-1)
+
+    labels = build_stream_labels(input_ids, codec_emb_mask)
+
+    outputs = raw.talker(
+        inputs_embeds=input_embeddings,
+        attention_mask=attention_mask,
+        labels=labels,
+        output_hidden_states=True,
+        use_cache=False,
+    )
+    hidden_states = outputs.hidden_states[0][-1]          # [B, T, H]
+    talker_codec_ids = codec_ids[codec_mask]              # [N, 16]
+    talker_hidden_states = hidden_states[codec_mask]      # [N, H]
+    sub_loss = subtalker_loss_identity(raw, talker_codec_ids, talker_hidden_states)
+
+    loss = outputs.loss + 0.3 * sub_loss
+    return loss, outputs.loss, sub_loss
+
+
+def label_selfcheck(model, records, ref_mels, device):
+    """Sanity: CPT labels cover the full stream; no text-vocab ids; audio frames present."""
+    ds = CodecLMCPTDataset(records[:2], model.processor, model.model.config, ref_mels)
+    batch = ds.collate_fn([ds[i] for i in range(len(ds))])
+    labels = build_stream_labels(batch["input_ids"], batch["codec_embedding_mask"])
+    for i in range(labels.shape[0]):
+        n_lab = int((labels[i] != -100).sum())
+        assert n_lab > 10, f"sample {i}: only {n_lab} label tokens"
+        lab_vals = labels[i][labels[i] != -100]
+        assert int(lab_vals.max()) < 4096, "text-vocab id leaked into labels"
+        n_audio = int(batch["codec_mask"][i].sum())
+        print(f"  selfcheck sample {i}: stream_label_tokens={n_lab} audio_frames={n_audio}")
+    print("label selfcheck OK (full-stream CPT labels, identity next-token via loss shift)")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--model_path", default="models/Qwen3-TTS-12Hz-1.7B-Base")
+    ap.add_argument("--train_jsonl", default="data/qwen3tts_sft_1000_prep.jsonl")
+    ap.add_argument("--ref_mels_npy", default="data/ref_mels.npy")
+    ap.add_argument("--val_tail", type=int, default=50, help="last N records = held-out (never trained)")
+    ap.add_argument("--output_dir", default="outputs")
+    ap.add_argument("--batch_size", type=int, default=8)
+    ap.add_argument("--lr", type=float, default=1e-5)
+    ap.add_argument("--num_epochs", type=int, default=3)
+    ap.add_argument("--warmup_ratio", type=float, default=0.1)
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--probe", action="store_true")
+    ap.add_argument("--attn", default="sdpa", choices=["sdpa", "eager"])
+    args = ap.parse_args()
+
+    random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
+    device = "npu:0"
+    os.makedirs(f"{WS_DIR}/logs", exist_ok=True)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # ---------------- model (fp32 master + bf16 autocast) ----------------
+    qwen3tts = Qwen3TTSModel.from_pretrained(
+        args.model_path, dtype=torch.float32, attn_implementation=args.attn, device_map=device
+    )
+    raw = qwen3tts.model
+    config = raw.config
+    n_params = sum(p.numel() for p in raw.parameters()) / 1e9
+    print(f"model loaded fp32: {n_params:.2f}B params, attn={args.attn}")
+
+    if not args.probe:
+        label_selfcheck(qwen3tts, [json.loads(l) for l in open(args.train_jsonl, encoding="utf-8")][:4],
+                        np.load(args.ref_mels_npy, mmap_mode="r"), device)
+
+    # ---------------- data: 950 train / tail held-out ----------------
+    records = [json.loads(l) for l in open(args.train_jsonl, encoding="utf-8")]
+    ref_mels = np.load(args.ref_mels_npy, mmap_mode="r")
+    train_recs, val_recs = records[:-args.val_tail], records[-args.val_tail:]
+    with open("data/held_out_50.jsonl", "w", encoding="utf-8") as f:
+        for r in val_recs:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    ds = CodecLMCPTDataset(train_recs, qwen3tts.processor, config, ref_mels)
+    dl = DataLoader(ds, batch_size=args.batch_size, shuffle=True, collate_fn=ds.collate_fn, num_workers=2)
+    steps_per_epoch = math.ceil(len(ds) / args.batch_size)
+    total_steps = steps_per_epoch * args.num_epochs
+    print(f"train={len(train_recs)} heldout={len(val_recs)} batch={args.batch_size} "
+          f"steps/epoch={steps_per_epoch} total_steps={total_steps}", flush=True)
+
+    # ---------------- optimizer ----------------
+    from torch_npu.optim import NpuFusedAdamW
+    params = [p for p in raw.parameters() if p.requires_grad]
+    opt = NpuFusedAdamW(params, lr=args.lr, betas=(0.9, 0.95), weight_decay=0.01, eps=1e-8)
+    warmup = max(1, int(args.warmup_ratio * total_steps))
+
+    def lr_lambda(step):
+        if step < warmup:
+            return step / warmup
+        p = (step - warmup) / max(1, total_steps - warmup)
+        return 0.5 * (1 + math.cos(math.pi * p))
+
+    sched = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
+
+    # ---------------- train ----------------
+    raw.train()
+    loss_path = f"{WS_DIR}/logs/step_loss.jsonl"
+    if not args.probe:
+        with open(loss_path, "w") as f:
+            f.write(json.dumps({"meta": {**vars(args), "params_B": round(n_params, 3),
+                                         "optimizer": "NpuFusedAdamW(0.9,0.95)",
+                                         "precision": "fp32 master + bf16 autocast",
+                                         "loss": "full-stream codec0 CE + 0.3*subtalker CE"}}) + "\n")
+
+    gstep, t0 = 0, time.time()
+    for epoch in range(args.num_epochs):
+        for step, batch in enumerate(dl):
+            with torch.autocast("npu", dtype=torch.bfloat16):
+                loss, talker_loss, sub_loss = forward_loss(raw, batch, device)
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(params, 1.0)
+            opt.step()
+            sched.step()
+            opt.zero_grad(set_to_none=False)  # fused optimizer requirement
+
+            gstep += 1
+            elapsed = time.time() - t0
+            s_per_step = elapsed / gstep
+            if gstep % 5 == 0 or args.probe or gstep <= 3:
+                mem = torch.npu.memory_allocated() / 2**30
+                eta = s_per_step * (total_steps - gstep)
+                print(f"e{epoch} s{gstep}/{total_steps} loss={loss.item():.4f} "
+                      f"(codec {talker_loss.item():.4f} sub {sub_loss.item():.4f}) "
+                      f"lr={sched.get_last_lr()[0]:.2e} {s_per_step:.2f}s/step "
+                      f"mem={mem:.1f}G ETA={eta/60:.1f}min", flush=True)
+            if not args.probe:
+                with open(loss_path, "a") as f:
+                    f.write(json.dumps({"step": gstep, "epoch": epoch, "loss": loss.item(),
+                                        "codec_ce": talker_loss.item(), "sub_ce": sub_loss.item(),
+                                        "lr": sched.get_last_lr()[0],
+                                        "elapsed_s": round(elapsed, 1)}) + "\n")
+                if gstep % 25 == 0:
+                    os.system(f'cd {WS_DIR} && python3 timing_table.py --doing 7 {int(elapsed)} '
+                              f'"{gstep}/{total_steps}步 loss={loss.item():.3f} ETA {eta/60:.0f}min" '
+                              f'> /dev/null')
+            if args.probe and gstep >= 2:
+                print(f"probe OK: 2 steps, peak mem {torch.npu.max_memory_allocated()/2**30:.2f} GiB")
+                return
+
+    if args.probe:
+        return
+
+    # ---------------- save ----------------
+    train_summary = {
+        "task": "Qwen3-TTS-12Hz-1.7B-Base CPT on aishell3 (speech codec-token LM)",
+        "train_samples": len(train_recs), "held_out": len(val_recs),
+        "epochs": args.num_epochs, "steps": gstep, "batch_size": args.batch_size,
+        "lr": args.lr, "optimizer": "NpuFusedAdamW betas(0.9,0.95) wd0.01 clip1.0",
+        "precision": "fp32 master + bf16 autocast", "attention": args.attn,
+        "loss_definition": "full-stream codec0 next-token CE + 0.3 x sub-talker CE (code groups 1-15)",
+        "final_loss": loss.item(), "wall_clock_s": round(time.time() - t0, 1),
+    }
+
+    # eval state (bf16, no optimizer)
+    state = {k: v.detach().to(torch.bfloat16).cpu() for k, v in raw.state_dict().items()}
+    torch.save(state, os.path.join(args.output_dir, "cpt_model_state.pt"))
+    # resume ckpt (with optimizer)
+    torch.save({"model": raw.state_dict(), "optimizer": opt.state_dict(),
+                "step": gstep, "args": vars(args)},
+               os.path.join(args.output_dir, "ckpt_latest.pt"))
+    # HF-format dir (bf16) directly usable by qwen-tts / vLLM voice-clone mode
+    hf_dir = os.path.join(args.output_dir, "qwen3-tts-1.7b-aishell3-cpt")
+    raw_bf16 = raw.to(torch.bfloat16)
+    raw_bf16.config.tts_model_type = "base"
+    raw_bf16.save_pretrained(hf_dir, safe_serialization=True)
+    qwen3tts.processor.save_pretrained(hf_dir)
+    import shutil
+    src_st = os.path.join(args.model_path, "speech_tokenizer")
+    dst_st = os.path.join(hf_dir, "speech_tokenizer")
+    if not os.path.exists(dst_st):
+        shutil.copytree(src_st, dst_st)
+    for f in ["preprocessor_config.json", "generation_config.json"]:
+        src_f = os.path.join(args.model_path, f)
+        if os.path.exists(src_f) and not os.path.exists(os.path.join(hf_dir, f)):
+            shutil.copy(src_f, hf_dir)
+
+    train_summary["artifacts"] = {
+        "cpt_model_state_pt": os.path.join(args.output_dir, "cpt_model_state.pt"),
+        "ckpt_latest_pt": os.path.join(args.output_dir, "ckpt_latest.pt"),
+        "hf_dir": hf_dir,
+        "held_out": "data/held_out_50.jsonl",
+    }
+    with open(os.path.join(args.output_dir, "train_summary.json"), "w", encoding="utf-8") as f:
+        json.dump(train_summary, f, ensure_ascii=False, indent=2)
+    print("train_summary.json written; done in %.1f min" % ((time.time() - t0) / 60))
+
+
+if __name__ == "__main__":
+    main()

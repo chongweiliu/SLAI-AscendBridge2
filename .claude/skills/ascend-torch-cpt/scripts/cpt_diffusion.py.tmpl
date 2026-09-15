@@ -77,7 +77,7 @@ def main():
     # 先单卡 load 算参数量(估显存), 再按 mode 处理
     print(f"[model] loading {BkCls.__name__} (fp32/bf16)...",flush=True)
     try:
-        dit=BkCls.from_pretrained(f"{MODEL_DIR}/{BK}", torch_dtype=torch.float32, low_cpu_mem_usage=True).to(DEV0)
+        dit=BkCls.from_pretrained(f"{MODEL_DIR}/{BK}", dtype=torch.float32, low_cpu_mem_usage=True).to(DEV0)
     except Exception as e:  # transformers5.x keep_in_fp32_modules 冲突(#54) → from_config+load_state_dict
         print(f"[model] from_pretrained 失败({type(e).__name__})→ from_config+load_state_dict(#54)",flush=True)
         cfg=json.load(open(f"{MODEL_DIR}/{BK}/config.json"))
@@ -89,7 +89,7 @@ def main():
     mode,max_mem=auto_parallel(P_B, n_card, free_GB, MODE_FORCE)
     if mode=="mp2":
         del dit; torch.npu.empty_cache()
-        dit=BkCls.from_pretrained(f"{MODEL_DIR}/{BK}", torch_dtype=torch.bfloat16, device_map="auto", max_memory=max_mem, low_cpu_mem_usage=True)
+        dit=BkCls.from_pretrained(f"{MODEL_DIR}/{BK}", dtype=torch.bfloat16, device_map="auto", max_memory=max_mem, low_cpu_mem_usage=True)
     dit.config.use_cache=False
     try: dit.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant":False})
     except Exception as e: print(f"[gc] {type(e).__name__}: {str(e)[:60]} (该 backbone 无 grad-ckpt, 小 latent 无需)",flush=True)

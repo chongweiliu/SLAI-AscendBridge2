@@ -1064,3 +1064,84 @@ sys.meta_path.insert(0, _StubFinder())
 - **解法**：统一 `from_pretrained(..., dtype=torch.float32)`。本机 transformers 5.14.1 实测 `dtype=` 通过（gemma-4-31B / Qwen2.5-Coder-7B 两轮 CPT）。8 个模板的 from_pretrained 已批量迁移（2026-09-10）。
 - **注意**：`Model.from_config(cfg, torch_dtype=...)` 是另一条路径（diffusion 模板 #54 fallback 用），5.14.1 未验证，保持原样勿盲改。
 - **归档条件**：环境不再出现 transformers <5 时本条可归档。
+
+## 143. transformers 5.x `AutoTokenizer` 对 Llama/SP 模型把空格编成 `<unk>`（版本敏感, 2026-09-10）
+- **症状**：CPT 起始 loss 异常高（Llama-2-7B 在 wikitext 上 NLL 9.4 而非 ~1.8）；pack 后语料 33% token 是 id 0；`decode` 出现大量 `<unk>`。单句短文本可能正常，多句/文章级文本大面积 unk——极具迷惑性，权重加载无任何告警（291 keys 全匹配）。
+- **实证**：tulu-2-dpo-7b（tokenizer_class=LlamaTokenizer, tokenizer.model sha256=9e556afd…为官方原版）在 transformers 5.1.0 + tokenizers 0.22.2 下：`AutoTokenizer`（fast/slow/legacy=False 三路一致）把 " Robert" 编为 `<unk>`+`Ro`+`bert`；sentencepiece `sp.encode` 与显式 `LlamaTokenizerFast.from_pretrained` 输出逐 id 一致且正确（▁Robert=4755）。base NLL 修复前 9.35 → 修复后 1.64（PPL 5.2，锚定文献）。
+- **解法**：Llama/SP 系（Llama/Qwen-base-SP/Tulu 等 tokenizer_class=LlamaTokenizer）一律显式 `from transformers import LlamaTokenizerFast; tok=LlamaTokenizerFast.from_pretrained(MD)`，不用 AutoTokenizer。已修 prepare_data/eval_cpt（本工作区）。
+- **回归检查**：训练/打包后 `assert (ids==unk_id).float().mean() < 1e-3`，或先 `sp.encode` 与 tok 输出对拍 1 条样本；CPT 起始 loss 与 base 探针 NLL 差 >2 即红旗。
+- **归档条件**：transformers 升级后 AutoTokenizer 恢复正确可归档（对拍脚本见 training-ws/tulu-2-dpo-7b-cpt/）。
+
+## 144. H2D 时 ND→NZ 内部格式转换假 OOM（torch_npu 默认 allow_internal_format=True）
+- **症状**：`model.to("npu")` 加载 fp32 大模型，在 torch allocated 仅 ~6.3GB 时报 `NPU out of memory ... 15MiB free`；但 npu-smi 显示该卡仅 ~6GB used、`torch.npu.mem_get_info()` 显示 free ~60GB。预检时逐块 `torch.empty` 分配 30GB 完全正常——"分配没问题、一拷贝就炸"。
+- **根因**：torch_npu 默认 `allow_internal_format=True`，`Module.to` 劫持后在 H2D 时把 4D/5D 权重转 NZ 分形内部格式；fp32 大权重下转换峰值约为目标张量的 ~10×，driver 层申请失败报 OOM（2026-09-11 EVO2 7B 实测：设 False 后 24.47GiB fp32 一次 H2D 成功）。
+- **解法**：`import torch_npu` 之后立即 `torch.npu.config.allow_internal_format = False`（训练/评估脚本统一放加载器入口）。ND 格式 matmul 在 CANN 9.0 已足够优化，代价可忽略。
+- **回归检查**：大模型上卡前打 `mem_get_info` 基线；凡 OOM 消息里 `already allocated ≪ 卡容量且 npu-smi used 也小`，先疑假 OOM 再疑真不足。
+
+## 145. FSDP2 + CPU 构建的正确序列：CPU 上 fully_shard、之后禁止显式 model.to(dev)
+- **症状**：CPU 上 build+load → `fully_shard(...)` → `model.to(dev)` 后训练，unshard 阶段 `aclnnMatmul`/`aclnnLinalgVectorNorm` 报 207001（driver out of memory），torch allocated 仅 ~5.5GB；与 seq_len/优化器/加载方式无关（多轮 smoke 数字完全复现）。
+- **根因**：对 DTensor 参数做显式 `.to()` 会破坏 FSDPParamGroup 内部状态（其期望在 pre_forward 里自行 `_move_states_to_device` 流式搬运 local shard）；显式搬运会绕过该机制。
+- **解法**：`build on CPU(fp32) → for blk in blocks: fully_shard(blk, mesh, mp_policy) → fully_shard(model)`，**到此为止**，直接进训练循环；每 rank 只有 ~3.5GB shard 会经 FSDP2 上卡。优化器用 plain `torch.optim.AdamW`（NpuFusedAdamW 无 DTensor fake-impl，与 FSDP2 不兼容，见 #18）。
+- **回归检查**：FSDP2 训练首步 fwd/bwd/step 三点打 `memory_allocated`；shard 字节数应为 full/8 量级。
+
+## 146. FSDP2 拒绝非连续参数：permute 后直接赋 weight.data
+- **症状**：`NotImplementedError: FSDP does not support non-contiguous parameters yet: param.shape=torch.Size([12288, 4096]) param.stride()=(1, 12288)`，发生在 fully_shard 初始化。
+- **根因**：checkpoint 后处理里 `W = W.permute(1,0)`（如 vortex 的 Wqkv column-split 重排）后直接 `param.data = W`，参数以转置 stride 存储。
+- **解法**：转置赋值处一律 `.contiguous().to(device)`；加载完成后可断言 `all(p.is_contiguous() for p in model.parameters())`。
+- **波及面**：任何"加载后做键重排/重映射"的自定义 checkpoint（多模态 remap、旧命名 remap）都可能踩。
+
+## 147. transformers Adafactor：beta1≠None 会建全量 exp_avg，"factorized 省显存"名存实亡
+- **症状**：单卡 bf16 7B（权重+梯度 24GB）配 `Adafactor(beta1=0.9)`，第 1 步正常、第 2 步起 allocated 冲到 ~57GB OOM；探针显示 optimizer states ~12GB（全量）而非预期 ~0.2GB。
+- **根因**：`_get_options()` 的 `use_first_moment = beta1 is not None`；beta1=0.9 时对每个参数建 `zeros_like(grad)` 全量一阶矩，只有 row/col 是 factored。
+- **解法**：要真 factored 状态（~0.2GB）用 **`beta1=None`**（Adafactor/T5 官方配方，无一阶矩可正常收敛）；需要一阶矩就选 AdamW 并接受 2×param 状态显存。此坑在单卡（非 DTensor）路径无 #138 的 pow_ 冲突，两者互不覆盖。
+- **回归检查**：step1 后 `sum(t.numel()*t.element_size() for st in opt.state.values() for t in st.values())` 与预期对账。
+
+## 148. "改了配置没生效"：重构硬编码覆盖分支 → 训练脚本必须打印 param_bytes 对账
+- **症状**：连续多轮显存优化（换优化器/换 checkpoint 模式/降 seq_len）后 `memory_allocated` 数字纹丝不动，所有优化"看起来都无效"。
+- **根因**：中间某次重构把 `dtype="bfloat16" if args.single_bf16 else "float32"` 硬编码成 `"float32"`，bf16+Adafactor 路径从未生效——后续所有优化都在给 fp32 底座（24GB param + 24GB grad）做无效功（EVO2 2026-09-11 实证，浪费 6 轮 smoke）。
+- **解法**：训练脚本启动后在 fwd/bwd/step 三点打探针：`param_bytes=sum(p.numel()*p.element_size())` + dtype 分布 + `grad_bytes`，与配置预期**对账后再谈调优**；三个探针合计 <10 行，能把"优化无效"类问题从小时级降到分钟级。
+
+## 149. HCCL die 掉线后任意 world_size 建链全挂：npu-smi die 数对不上即降级单卡
+- **症状**：`init_process_group("hccl")` + barrier 在 2/4/8 rank 全部挂起（>300s 无输出、timeout 杀掉），昨日同机同拓扑 FSDP2×8 正常。
+- **判据**：`npu-smi info` 显示的 die 数与基线不符（本机 16 → 14，die 14/15 = 物理卡 7 整卡离线）——拓扑残缺后 HCCL 全互联域建链失败。
+- **解法**：立即降级单 die 训练（bf16+Adafactor+grad-ckpt 的 7B 单卡配方见 #147/#145 注），勿在 HCCL 上反复试错烧时间；多卡脚本保留双路径（`--single-bf16` 开关），硬件恢复后直接切回。选型前先跑 `npu-smi info | grep -c "/ 65536"` 与历史基线核对。
+
+## 150. NpuFusedAdamW EZ1001 固定形状 broadcast 崩 → 非标准 HF 结构一律 plain AdamW
+- **症状**：fused step 报 `AclNN_Parameter_Error(EZ1001): N and M cannot broadcast`，两个数字**跨运行完全不变**（wavlm-base-plus: 87344220/87293532；Sam3Model: 376919840/376868384），与 batch 数据、变长、attention_mask 均无关（逐项排除后仍复现）；单模型 fwd+bwd 正常，一进 fused optimizer.step 即崩。
+- **根因**：fused step 对模型中非常规形状参数（WavLM 的 `gru_rel_pos_linear` 类相对位置参数、SAM3 的 DETR 头）做批量广播时 NPU kernel 尺寸不齐。MINREPRO 二分法：先裸模型 fwd+bwd（通过）→ 换 plain AdamW（通过）→ 即锁定 fused step。
+- **解法**：这类模型直接 `torch.optim.AdamW`。**选型规则扩展**（与 SKILL.md 阶段 5 的"<100M 融合无收益"例外并列）：非标准 HF 序列模型（CNN 前端语音模型、DETR 检测器、自定义包模型）或首次接触的模型，smoke 时若见**数字固定的 EZ1001** 直接换 plain AdamW，不要在 fused 路径上反复试错。fused 收益本就集中在标准 transformer 大模型上。
+- **家族谱系**：#131（DepthPro）为同族首例（EZ1001 数字固定 647141441/646551617）；本条为家族性总结——凡 fused step 报**跨运行不变**的 EZ1001 broadcast，一律归此族。
+- **回归检查**：smoke 第 1 步 fwd+bwd+step 全通过；EZ1001 数字逐字节复现 = fused kernel 问题而非数据问题。
+- （2026-09-11 wavlm-base-plus + Sam3Model 双实证，8 模型批量）
+
+## 151. Qwen3-ASR 四坑补遗：-hf repo 缺 projector 指纹 / 手动 prompt 占位 / 变长 audio batch 必崩 / 采样点域 mask
+- **坑①（checkpoint 缺组件的指纹）**：modelimage 抓的原生 release repo **整个缺失 audio projector**（safetensors 无任何 `multi_modal_projector` 键）。症状链：加载时 `MISSING: newly initialized` 警告 → forward 报 `Audio features and audio tokens do not match, tokens: N, features: N`（**N 相等但 numel 不等**——projector 未把 audio hidden 投到 text hidden）。**必须换官方 `-hf` 后缀 repo**（#129 坑①的强化：不是键错位而是整块缺失，用 grep checkpoint 键名确认）。
+- **坑②（processor 不产占位）**：transformers 5.16 的 `Qwen3ASRProcessor(text, audio)` 输出**纯转写 input_ids**（无 chat 模板、无 audio 占位 token）；audio 占位必须**手动构造 prompt**：`<|im_start|>system\n...<|audio_start|>` + `audio_token × N` + `<|audio_end|>...<|assistant|>\n`，N = 秒数×13（`_get_audio_token_length` 的 n_window=50 公式，rem=0 时 13 token/秒）。`apply_transcription_request` 在 5.16.1 有 chat-template prefill bug（continue_final_message 吞 assistant 段），不可用。
+- **坑③（变长 audio batch 必崩）**：模型 forward 里 `placeholder 数 == 特征 token 数` 做 `torch._check` 严格全等校验——batch 内 pad 到最长帧后 pad 帧也产出 embed，占位与特征数必不等。**解法：统一固定时长**（30s：<30s 补零、>30s 丢弃，占位恒 390），不用变长 collate。
+- **坑④（mask 域陷阱）**：`WhisperFeatureExtractor` 的 `attention_mask` 是**采样点域**（全 1 长 112000），不是模型要的帧域 `input_features_mask`；且默认 padding 到 3000 帧（whisper 30s 窗口）——要传 `padding="longest"`，帧域 mask 自建（整秒补零后全 1）。
+- **labels 口径**：裸 processor 模式下 input_ids 即纯转写 → labels=全量 ids；手动 chat prompt 模式则掩 prompt 段，监督 `language English<asr_text>` + 转写 + eos。
+- （2026-09-11 librispeech CPT 实证，5 次修复全通；WER 19.2%→4.9%）
+
+## 152. 强预训练 backbone + 小数据全参微调 = 灾难性遗忘（三连实证与负结果判定规则）
+- **实证三连**：InceptionResnetV1/VGGFace2 被 LFW 158 类 1e-4×200 步训练 → 分类 acc 0→84% 但 LFW verification **96.95→92.78（-4.2pp）**；chronos-2 在 414 条 m4_hourly 上 200 步 → 训练 loss 4.2→2.35 但尾窗口 median MSE **+18.6%**；dslim/bert-NER 在 CoNLL train（已饱和）混入 WNUT → CoNLL test 持平、WNUT test **-9.1pp**。
+- **判定规则**：**任务头指标涨 + 通用/独立验证指标跌 = 遗忘**（不是训练 bug，是配方错误）。smoke 阶段 loss≈0（任务饱和）或数据 <1K 样本时，全参 1e-4 级别 lr 是危险信号。
+- **解法阶梯**：①冻结 backbone 只训头/adapter；②lr 降 10 倍（1e-5）；③域数据下采样到 ~10% 与原任务数据混合；④强 backbone 的 head 无关指标（如 LFW verification、held-out PPL）必须在评估清单里，只有任务头 acc 的评估发现不了遗忘。
+- （2026-09-11/12 三案例；head 无关评估口径——如 LFW pairs verification——可安全用于替代权重场景）
+
+## 153. modelimage 类模型目录可能是不可训格式（GGUF / ONNX 工具集 / 空目录）→ 先验权重再定范式
+- **症状**：目录里只有 `.gguf`（如 qwen3-tts 的 4 个 Q8_0 文件）、或只有工具描述+空子目录（如 20_Face_Recognition 只有 insightface 的 `face_encoding/` 空目录 + README）、或只有 onnx/ 子目录。GGUF/ONNX **不可用 PyTorch 直接训练**（#47 已提音频 GGUF，此处扩展为通用目录判定）。
+- **解法**：开工前先 `ls` 权重文件形态（safetensors/bin/pt = 可训；gguf/onnx/空 = 不可训），不可训时的替代阶梯：①同源 HF 官方 repo（qwen3-tts → Qwen3-TTS-src PyTorch 源）；②标准社区 checkpoint（insightface 人脸 → facenet-pytorch VGGFace2.pt，github release 直链用 `https://api.github.com/repos/.../releases` 列资产名防 404）；③诚实降级报告（附执行路线）。
+- **波及面**：任何"给定权重路径做 CPT"的批量任务；README/config 只是元数据，唯一可信的是权重文件本身。
+- （2026-09-11 双实证：18_qwen3-tts、20_Face_Recognition）
+
+## 154. 大词表 CE 的 `logits.float()` upcast OOM → bf16 直接算 CE（#103 的第二解法）
+- **症状**：151K vocab × 6K seq × bs 时 `logits.float()` 要求 14.6GB 单次分配（NPU 61GB die 上 55GB 已用即炸）；#103 的"降 bs+梯度累积"不总是可行（bs 已为 1 时）。
+- **解法**：跳过 fp32 upcast，**bf16 logits 直接 `F.cross_entropy`**（NPU CE kernel 内部处理 bf16，精度损失可忽略），自己算 loss 而不用 `model(labels=)` 的内部 loss（其固定做 fp32 upcast）。
+- **回归检查**：`vocab × seq × bs × 4B` 超过 4GB 就该走此路径。
+- （2026-09-11 GLM-OCR 实证：bs=4 OOM → bs=1 + bf16 CE 后 0.34s/step 稳定）
+
+## 155. 非 transformers 生态模型包（chronos/facenet/qwen_tts）的隔离加载模式
+- **症状**：模型类不在 transformers 里（`Chronos2Model` 在 chronos-forecasting 包、`InceptionResnetV1` 在 facenet-pytorch、`Qwen3TTSModel` 在 qwen_tts 源码 repo）；直接 pip install 会拉 CUDA torch 覆盖 torch_npu（#114 同族）；旧 venv 加载新 config 报 `KeyError: 'dtype'`（config 的 `dtype` 键是新版命名，旧版 transformers 只认 `torch_dtype`）。
+- **解法**：①`pip install --target <ws>/pylibs --no-deps <pkg>` + `PYTHONPATH=<ws>/pylibs:...` 前置（不动共享 venv）；依赖缺什么补什么（soundfile/librosa 等）；②共享 venv 里找不到依赖时，**先查工作区有没有自带 .venv**（qwen3-tts 案例：librosa 在 `qwen3-tts-cpt/.venv` 里，直接用它的 python 跑）；③`KeyError: 'dtype'` 递归把 config.json 的 `dtype` 键改名 `torch_dtype`（含嵌套子 config）；④非 HF 模型无 `save_pretrained` → `torch.save(state_dict)`，eval 侧对应 `load_state_dict(strict=False)` 并 drop 旧分类头键。
+- **回归检查**：import 模型类成功 + 一次假数据 forward 通过再谈训练。
+- （2026-09-11 chronos-2 / facenet / qwen_tts 三例）
