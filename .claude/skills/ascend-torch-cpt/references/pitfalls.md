@@ -1041,3 +1041,26 @@ sys.meta_path.insert(0, _StubFinder())
 - **坑①（保存死锁）**：训完逐 tensor `full_tensor()` 聚合全量 ckpt 可能挂死（#127 变体，36B 实测 30min+ 无产出；同脚本另一次却成功——间歇性）。**保险顺序：训练完立即写 train_summary（从 step_loss 日志即可）→ 做 in-process held-out 评估（FSDP 前向直接跑 val）→ 最后才尝试聚合保存**——保存挂死也不丢指标。
 - **坑②（显存残留）**：kill -9 大模型多进程后 NPU 显存不立即回收（npu-smi 仍显示 60GB+），立即重启新任务报 `TsdOpen failed`。**等 1-2 分钟至 `npu-smi` 归零再启**；清理用脚本文件匹配进程（防 pkill 自匹配误杀自身 shell）。
 - （实测：36B 两次保存一成一挂；kill -9 后 90s 内重启必 TsdOpen failed）
+
+## 141. 梯度累积 × zero_grad 位置：zero_grad 放在 per-micro-batch 循环内 → GRAD_ACCUM>1 静默丢梯度（Qwen2.5-Coder-7B CPT 开发自查实证）
+- **症状**：GRAD_ACCUM>1 训练不报错、loss 正常下降、无 NaN——极难察觉。实际每步只用了**最后一个 micro-batch** 的 `(loss/N).backward()` 梯度，等效 batch 从 `bs×world×N` 缩水成 `bs×world`，且梯度被系统性缩为 1/N（Adam 对尺度不敏感，更新方向只来自 1/N 数据 → 噪声更大）。
+- **根因**：`optim.zero_grad()` 写在训练循环体内、每次 forward/backward 前执行；而 `optim.step()` 用 `(step+1)%GRAD_ACCUM==0` 门控。两者节奏不一致 → 累积窗口内第 2..N 个 micro-batch 的 backward 前，前一 micro-batch 已累积的梯度被清零。
+- **判定要点**：审查训练循环——**zero_grad 的调用次数必须 = optimizer.step() 的次数**（即每累积窗口一次），不是 micro-batch 次数。`zero_grad` 与 `step()` 节奏不一致即此坑。
+- **解法**（窗口重构，cpt_train.py.tmpl/cpt_fsdp.py.tmpl 已修）：
+  ```python
+  _micro=0
+  for step in range(start_step,NUM_STEPS):
+      optim.zero_grad(set_to_none=False)      # 窗口开头清零，一次
+      for _ga in range(GRAD_ACCUM):           # 窗口内循环 micro-batch
+          batch=...; loss=model(...).loss
+          (loss/GRAD_ACCUM).backward()
+      clip_grad_norm_(...); optim.step()      # 窗口尾 step，无门控
+  ```
+- **注意**：重构后 `step` 语义从"micro-batch 序号"变为"优化器步序号"，每步消费 GRAD_ACCUM 个 batch（`_micro % nb` 回绕复采样）；旧 RESUME ckpt 的 step 跨语义不兼容。
+- （实测：Qwen2.5-Coder-7B CPT 8×Ascend910，2026-09-10；开发期自查发现，两模板同病）
+
+## 142. transformers ≥5.0 `from_pretrained` 用 `dtype=`，`torch_dtype=` 已 deprecation（版本敏感）
+- **症状**：`from_pretrained(..., torch_dtype=torch.float32)` 在 5.x 功能上仍通（BC shim：`modeling_utils.py` pop torch_dtype 并 `warning_once("`torch_dtype` is deprecated! Use `dtype` instead!")`），但每次加载刷 deprecation 告警；新写法是 `dtype=`。
+- **解法**：统一 `from_pretrained(..., dtype=torch.float32)`。本机 transformers 5.14.1 实测 `dtype=` 通过（gemma-4-31B / Qwen2.5-Coder-7B 两轮 CPT）。8 个模板的 from_pretrained 已批量迁移（2026-09-10）。
+- **注意**：`Model.from_config(cfg, torch_dtype=...)` 是另一条路径（diffusion 模板 #54 fallback 用），5.14.1 未验证，保持原样勿盲改。
+- **归档条件**：环境不再出现 transformers <5 时本条可归档。
