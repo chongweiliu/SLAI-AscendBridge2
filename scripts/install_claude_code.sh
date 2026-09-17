@@ -21,8 +21,8 @@ set -euo pipefail
 # ========================
 #       常量定义
 # ========================
-NODE_MIN_VERSION=18
-NODE_INSTALL_VERSION=22
+NODE_MIN_VERSION=22
+NODE_INSTALL_VERSION="${NODE_INSTALL_VERSION:-22}"
 CLAUDE_PACKAGE="@anthropic-ai/claude-code"
 API_TIMEOUT_MS=3000000
 
@@ -203,51 +203,113 @@ check_nodejs() {
     fi
 
     log_info "Installing Node.js..."
-    ORIG_PWD=$(pwd)
-    # 检测系统类型 + 包管理器（兼容 Debian/openEuler/centos/rhel/fedora/anolis/kylin/suse 等）
-    if [ -f /etc/os-release ]; then
-        . /etc/os-release
-    fi
-    SYS_IDS="${ID:-} ${ID_LIKE:-}"
-    if command -v dnf &>/dev/null; then PM="dnf install -y"
-    elif command -v yum &>/dev/null; then PM="yum install -y"
-    elif command -v apt-get &>/dev/null; then PM="apt-get install -y"
-    else PM=""; fi
 
-    case "$SYS_IDS" in
-        *openEuler*|*centos*|*rhel*|*fedora*|*anolis*|*kylin*|*suse*|*sles*)
-            # 非 Debian 系，从 nodejs.org 装 tar 包（不依赖 nodesource deb setup）
-            ARCH=$(uname -m)
-            case "$ARCH" in
-                aarch64) NODE_ARCH="linux-arm64" ;;
-                x86_64)  NODE_ARCH="linux-x64" ;;
-                *) log_error "Unsupported arch: $ARCH"; exit 1 ;;
-            esac
-            NODE_FULL_VER="v${NODE_INSTALL_VERSION}.14.0"
-            NODE_TAR="node-${NODE_FULL_VER}-${NODE_ARCH}.tar.xz"
-            log_info "Downloading Node.js ${NODE_FULL_VER} (${NODE_ARCH}) from nodejs.org..."
-            curl -fsSL "https://nodejs.org/dist/${NODE_FULL_VER}/${NODE_TAR}" -o "/tmp/${NODE_TAR}" || {
-                log_error "Failed to download Node.js from nodejs.org"; exit 1
-            }
-            # tar 解压 .tar.xz 需要 xz，minimal 系统可能没装
-            command -v xz >/dev/null 2>&1 || { [ -n "$PM" ] && $PM xz 2>/dev/null; }
-            cd /tmp && tar -xf "${NODE_TAR}" && cp -r "node-${NODE_FULL_VER}-${NODE_ARCH}/"* /usr/local/ && rm -rf "node-${NODE_FULL_VER}-${NODE_ARCH}" "${NODE_TAR}"
-            cd "$ORIG_PWD"
-            # 确保 /usr/local/bin 在 PATH（装到 /usr/local/，当前 shell 可能未 reload）
-            export PATH="/usr/local/bin:$PATH"
-            # 持久化到 ~/.bashrc（新 shell 能找到 /usr/local/bin 下的 node/npm/claude）
-            grep -q '/usr/local/bin' ~/.bashrc 2>/dev/null || echo 'export PATH="/usr/local/bin:$PATH"' >> ~/.bashrc
-            ;;
-        *)
-            # Debian 系，用 nodesource
-            curl -fsSL https://deb.nodesource.com/setup_${NODE_INSTALL_VERSION}.x | bash - 2>/dev/null || {
-                curl -fsSL https://mirrors.tuna.tsinghua.edu.cn/nodesource/deb_${NODE_INSTALL_VERSION}.x/setup_${NODE_INSTALL_VERSION}.x | bash - 2>/dev/null
-            }
-            ${PM:-apt-get install -y} nodejs 2>/dev/null
-            ;;
+    local machine_arch node_arch node_full_ver node_tar node_archive checksums_file
+    local dist_base index_data expected_checksum actual_checksum install_prefix version_dir
+    machine_arch=$(uname -m)
+    case "$machine_arch" in
+        aarch64|arm64) node_arch="linux-arm64" ;;
+        x86_64|amd64) node_arch="linux-x64" ;;
+        *) log_error "Unsupported architecture: $machine_arch"; return 1 ;;
     esac
-    log_success "Node.js installed: $(node -v 2>/dev/null || echo '/usr/local/bin/node')"
-    log_success "npm version: $(npm -v 2>/dev/null || echo '/usr/local/bin/npm')"
+
+    # 可用 NODE_VERSION=v22.x.y 锁定版本；未指定时解析 Node 22 的最新补丁版本。
+    if [ -n "${NODE_VERSION:-}" ]; then
+        node_full_ver="$NODE_VERSION"
+        [[ "$node_full_ver" == v* ]] || node_full_ver="v${node_full_ver}"
+    else
+        index_data=""
+        for dist_base in "https://nodejs.org/dist" "https://npmmirror.com/mirrors/node"; do
+            log_info "Resolving latest Node.js ${NODE_INSTALL_VERSION}.x from ${dist_base}..."
+            if index_data=$(curl --fail --show-error --silent --location --retry 3 --connect-timeout 15 "${dist_base}/index.tab"); then
+                node_full_ver=$(printf '%s\n' "$index_data" | awk -v prefix="v${NODE_INSTALL_VERSION}." 'NR > 1 && index($1, prefix) == 1 { print $1; exit }')
+                [ -n "$node_full_ver" ] && break
+            fi
+        done
+        if [ -z "${node_full_ver:-}" ]; then
+            log_error "Unable to resolve the latest Node.js ${NODE_INSTALL_VERSION}.x version. Set NODE_VERSION=v${NODE_INSTALL_VERSION}.x.y and retry."
+            return 1
+        fi
+    fi
+
+    # 使用 gzip 包，避免 minimal 容器缺少 xz 时静默退出。
+    node_tar="node-${node_full_ver}-${node_arch}.tar.gz"
+    node_archive=$(mktemp "/tmp/${node_tar}.XXXXXX")
+    checksums_file=$(mktemp "/tmp/node-shasums.XXXXXX")
+
+    dist_base=""
+    local candidate_base
+    for candidate_base in "https://nodejs.org/dist" "https://npmmirror.com/mirrors/node"; do
+        log_info "Downloading Node.js ${node_full_ver} (${node_arch}) from ${candidate_base}..."
+        if curl --fail --show-error --location --retry 3 --connect-timeout 15 \
+            "${candidate_base}/${node_full_ver}/${node_tar}" -o "$node_archive"; then
+            dist_base="$candidate_base"
+            break
+        fi
+        log_error "Download failed from ${candidate_base}; trying the next mirror."
+    done
+    if [ -z "$dist_base" ]; then
+        rm -f "$node_archive" "$checksums_file"
+        log_error "Failed to download ${node_tar} from all configured mirrors."
+        return 1
+    fi
+
+    log_info "Verifying Node.js archive checksum..."
+    if ! curl --fail --show-error --silent --location --retry 3 --connect-timeout 15 \
+        "${dist_base}/${node_full_ver}/SHASUMS256.txt" -o "$checksums_file"; then
+        rm -f "$node_archive" "$checksums_file"
+        log_error "Failed to download SHASUMS256.txt from ${dist_base}."
+        return 1
+    fi
+    expected_checksum=$(awk -v filename="$node_tar" '$2 == filename { print $1; exit }' "$checksums_file")
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual_checksum=$(sha256sum "$node_archive" | awk '{ print $1 }')
+    elif command -v shasum >/dev/null 2>&1; then
+        actual_checksum=$(shasum -a 256 "$node_archive" | awk '{ print $1 }')
+    else
+        rm -f "$node_archive" "$checksums_file"
+        log_error "Neither sha256sum nor shasum is available; refusing to install an unverified archive."
+        return 1
+    fi
+    if [ -z "$expected_checksum" ] || [ "$actual_checksum" != "$expected_checksum" ]; then
+        rm -f "$node_archive" "$checksums_file"
+        log_error "Checksum verification failed for ${node_tar}."
+        return 1
+    fi
+    rm -f "$checksums_file"
+
+    # root 或 /usr/local 可写时使用系统目录，否则完整安装到当前用户目录。
+    if [ "$(id -u)" -eq 0 ] || [ -w /usr/local ]; then
+        install_prefix="/usr/local"
+        mkdir -p "$install_prefix"
+        log_info "Installing Node.js into ${install_prefix}..."
+        tar -xzf "$node_archive" -C "$install_prefix" --strip-components=1
+        export PATH="/usr/local/bin:$PATH"
+    else
+        install_prefix="$HOME/.local"
+        version_dir="${install_prefix}/lib/nodejs/node-${node_full_ver}-${node_arch}"
+        log_info "/usr/local is not writable; installing Node.js into ${version_dir}..."
+        mkdir -p "$version_dir" "${install_prefix}/bin"
+        tar -xzf "$node_archive" -C "$version_dir" --strip-components=1
+        local executable
+        for executable in node npm npx corepack; do
+            if [ -e "${version_dir}/bin/${executable}" ]; then
+                ln -sfn "${version_dir}/bin/${executable}" "${install_prefix}/bin/${executable}"
+            fi
+        done
+        export PATH="${install_prefix}/bin:$PATH"
+        export NPM_CONFIG_PREFIX="$install_prefix"
+        npm config set prefix "$install_prefix"
+        touch "$HOME/.bashrc"
+        grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || \
+            echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
+    fi
+    rm -f "$node_archive"
+
+    command -v node >/dev/null 2>&1 || { log_error "Node.js installation completed but node is not on PATH."; return 1; }
+    command -v npm >/dev/null 2>&1 || { log_error "Node.js installation completed but npm is not on PATH."; return 1; }
+    log_success "Node.js installed: $(node -v)"
+    log_success "npm version: $(npm -v)"
 }
 
 # ========================
@@ -261,8 +323,10 @@ install_claude_code() {
         log_info "Installing Claude Code..."
     fi
 
-    npm install -g "${CLAUDE_PACKAGE}@latest" 2>/dev/null || \
+    if ! npm install -g "${CLAUDE_PACKAGE}@latest"; then
+        log_error "npm installation from the default registry failed; retrying with npmmirror."
         npm install -g "${CLAUDE_PACKAGE}@latest" --registry=https://registry.npmmirror.com
+    fi
     log_success "Claude Code is ready: $(claude --version 2>/dev/null || echo 'latest version installed')"
 }
 
