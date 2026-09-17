@@ -222,7 +222,9 @@ check_nodejs() {
         for dist_base in "https://nodejs.org/dist" "https://npmmirror.com/mirrors/node"; do
             log_info "Resolving latest Node.js ${NODE_INSTALL_VERSION}.x from ${dist_base}..."
             if index_data=$(curl --fail --show-error --silent --location --retry 3 --connect-timeout 15 "${dist_base}/index.tab"); then
-                node_full_ver=$(printf '%s\n' "$index_data" | awk -v prefix="v${NODE_INSTALL_VERSION}." 'NR > 1 && index($1, prefix) == 1 { print $1; exit }')
+                # 使用 here-string，避免 awk 提前退出时上游 printf 收到 SIGPIPE；
+                # 在 set -euo pipefail 下，该 SIGPIPE 会让脚本以 141 静默退出。
+                node_full_ver=$(awk -v prefix="v${NODE_INSTALL_VERSION}." 'NR > 1 && index($1, prefix) == 1 { print $1; exit }' <<< "$index_data")
                 [ -n "$node_full_ver" ] && break
             fi
         done
