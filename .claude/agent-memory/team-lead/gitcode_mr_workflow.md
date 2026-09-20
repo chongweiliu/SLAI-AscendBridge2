@@ -77,3 +77,52 @@ curl -X POST "https://gitcode.com/api/v5/repos/SLAI/SLAI-AscendBridge2/pulls" \
   -d "{\"head\":\"$BR\",\"base\":\"main\",\"title\":\"<title>\",\"body\":\"<body>\"}"
 unset GITCODE_TOKEN
 ```
+
+## Issue API 补充（2026-09-10 实测）
+- **创建/查询 issue**：`GET/POST /api/v5/repos/{owner}/{repo}/issues`（PRIVATE-TOKEN 头）✓
+- **评论**：`POST /api/v5/repos/{owner}/{repo}/issues/{n}/comments`，body `{"body":"..."}` ✓
+- **关闭 issue（有坑）**：`PATCH /api/v5/repos/{owner}/{repo}/issues/{n}`，body 必须是 **`{"state":"close"}`（值是 "close" 不是 "closed"）**。`{"state":"closed"}` 报 `'state_event': input must in [reopen, close]`（误导性报错）；`{"state_event":"close"}` 单发报"至少一个参数"；须至少带一个内容字段时 PATCH 接受但 state 不变。GET 验证 `state: closed` 才算关。
+
+### !59 (2026-09-10, 24 模型批量 CPT 沉淀 13 类新坑)
+- 分支 `feat/cpt-v2-batch-pitfalls`，commit `cc564af`，MR `!59`，merge commit `03e1511`。5 skill 文件 +99/-8。
+- 内容：pitfalls #128-#140（list caption 死循环/Qwen3-ASR 四坑/SD3.5 双坑/DepthPro 融合优化器崩/NPU CE 越界假 loss/回归头口径/CosyVoice remap/旧命名 config/chronos-2 API/FSDP2 mesh+HCCL 超时/Adafactor-DTensor 不兼容/FP8 scale 键/保存死锁保险）+ SKILL.md 单行引用 + 3 个 references 补实战。
+- 回归验证全过：编号 1-140 连续、引用零悬空零丢失（评审发现并修复 cpt_model_state.pt 表述丢失）、references 纯追加、红线 202 行/18.7K。
+- 评审方法论沉淀：diff 旧行的代码块片段（`[^`]+`）+ #引用做"零丢失"锚点比行首前缀更严——首版用行首 25 字符漏检了一处真实语义丢失。
+
+### !57 (2026-09-09, README v2.3 章节按最新 skill 刷新)
+- 分支 `feat/readme-v23-cpt-refresh`，commit `5310d3e`，MR `!57`，merge commit `373e62c`。README.md 1 文件 +76/-10。
+- 内容：v2.3 功能清单对齐 ascend-torch-cpt 最新实况（踩坑 21→127 条、模板 7→20、references 11 个）+ 新增 10 类训练范式条目 + T1-T6 用时表 / robust_download 6 源探测 / 权重 NaN 扫描 / 按范式评估指标 + 补齐悬空的"示例见下方"引用（新增使用指南第 6 节 CPT：启动方式/多范式示例/9 阶段流程/产出清单）+ 刷新文件头版本摘要。
+- 分支删除注意：`git push <url> origin --delete <br>` 会把 origin 当 ref 名报错；正确写法 `git push <url> :refs/heads/<br>`。
+
+### !39 (2026-08-29, FSDP2×expandable_segments 兼容性修复)
+- 分支 `fix/cpt-fsdp-expandable-segments`，commit `5a98b5f`，MR `!39`，merge commit `b31f58d`。
+- 提交内容：ascend-torch-cpt skill 修复——FSDP2 与 `expandable_segments:True` 不兼容（破坏 all-gather buffer 跨层复用→逐层 buffer 累积≈全模型→假性"fully_shard 未分片"OOM）。cpt_fsdp.py.tmpl 加 import torch 前守卫（检测到即切 max_split_size_mb:256）+ pitfalls #77 + SKILL.md 必设环境变量注明 FSDP2 例外 + parallel-strategy.md 混杂变量警示。4 文件 +20/-1。
+- 背景：27B FSDP2 攻坚实测定位（修复后 8-die 1.45s/样本，device_map 的 4.7×）；同源修复也在 ascend-torch-lora skill（该 skill 及 lora-ws/ 产出尚未入库，后续 PR）。
+
+### !40 (2026-08-29, 新增 ascend-torch-lora 技能全量)
+- 分支 `feat/ascend-torch-lora-skill`，commit `e22d23c`，MR `!40`，merge commit `5a0e942`。
+- 提交内容：ascend-torch-lora skill 全量 13 文件（SKILL.md + 6 模板含 route_select 自动选路器/lora_train_fsdp + 5 参考）。
+- 亮点：自动选路（单卡/FSDP2/device_map 按模型大小+空闲卡决策）、超参自动择优、字符偏移标签掩码、20 条踩坑（含 FSDP2 expandable_segments+model.train() 双根因）。
+- 遗留改进（后续 PR）：MoE 实测、显存公式多尺寸校准、语义级评估、吞吐预估。
+- 注意：lora-ws/ 归档目录与 agent-memory 未入库（本地保留）。
+
+### !41 (2026-08-29, lora probe 模式 + MoE 实测)
+- 分支 `feat/lora-probe-moe`，commit `a77e3dd`，MR `!41`，merge commit `6af88f1`。7 文件 +192/-46。
+- 内容：route_select --probe 自动 2 步试训（兼容/显存校准/ETA 三合一）+ MoE 实测（Qwen3.6-35B-A3B：融合专家挂不上 LoRA，仅注意力+共享专家 21.2M）+ pitfalls #21 + 答案抽取评估 + 3 修复（稳态步时/MoE note/正则）。
+
+### !42 (2026-09-01, lora skill MoE 提速 + 算子发现法)
+- 分支 `feat/lora-moe-optimize-skill`，commit `971761e`，MR `!42`，merge commit `31c5564`。5 文件 +318/-7。
+- 内容：ascend-torch-lora 沉淀 MoE 训练提速双路线（tmpl 的 `MOE_IMPL=eager|dense|gmm`，dense 短序列 -34%、gmm 长序列 3-8×+省显存 30%，三路线数学等价实测）+ 新 reference moe-optimization.md（根因/选型/四层等价性验证协议/试错清单）+ 新 reference npu-op-discovery.md（三步算子发现法：本机 CANN 接口盘点→gitcode.com/cann→文档案例，报"昇腾不支持"前强制流程）+ pitfalls 7→25 条（修正 #22 错误结论"NPU 无 grouped GEMM"）+ SKILL.md 核心原则 10 条。
+- 背景：Qwen3.6-35B-A3B 14 卡 FSDP2 完整探索闭环（分组 GEMM 打通：torch_npu 内置 npu_grouped_matmul + torchtitan-npu 桥接，性能反转结论短序列 dense 胜/长序列 gmm 胜），详见 [[npu-grouped-gemm-moe-ops]] 与 [[npu-lora-sft-pitfalls]]。
+
+### !43 (2026-09-01, ProteinMPNN CPT 通用坑沉淀)
+- 分支 `feat/cpt-proteinmpnn-generic-pitfalls`，commit `7ffcd1d`，MR `!43`，merge commit `877da2a`。5 文件 +57/-0（纯增量零删除，git diff 验证）。
+- 内容：ascend-torch-cpt 沉淀 ProteinMPNN/pdb_2021aug02 CPT 实证的通用经验——pitfalls #78（多区域 checkpoint 反传 vector core 507035）/#79（确定性崩溃定位四步法）/#80（变长 batch 必开 expandable_segments）/#81（weights_only）/#82（CPT 照抄从零调度发散）/#83（per-epoch 重建→一次性 fork 缓存）+ SKILL.md 核心原则 11/阶段 2 并行开发/阶段 8 对比三原则 + 3 个 reference 增量。
+- PR 范围决策：只含 skill 5 文件（主题单一，沿 !39-!42 惯例）；agent-memory 改动与 training-ws/ 工作区不入库。合并后已删源分支、本地 main 已同步。
+- 详见 [[proteinmpnn-npu-cpt-pitfalls]]。
+
+### !62 (2026-09-10, lora skill 4 模型批量实战沉淀)
+- 分支 `feat/lora-v1-batch-pitfalls`，MR `!62`，merge commit `8df2db0`。7 skill 文件 +145/-19。
+- 内容：pitfalls #26-#33（信息间隙/静默抽半/env泄漏/覆盖主结果/无模板注入/eos不一致/think剥离/CE-生成背离）+ 新增 raw-corpus-to-sft.md 与 corpus_to_sft.py.tmpl + validate.py.tmpl 5 处修复 + lora_train.py.tmpl 注入 + hyperparam sweep 协议与 4 模型实测。
+- **凭据坑（重要）**：`~/.git-credentials` 有 3 条（Chris7Ji/Jiyg/oauth2），`git credential fill` 与 `grep oauth2:` 取到的 token（身份 dubai712）**已无推送权（403 CH.00905403）**；当前有效推送凭据是 **Jiyg 条目（身份 gcw_WJCkAUuk）**，用法 `git push "https://gcw_WJCkAUuk:$(grep -oP '^https://Jiyg:\K[^@]*' ~/.git-credentials)@gitcode.com/SLAI/SLAI-AscendBridge2.git" HEAD:<分支>`；API PRIVATE-TOKEN 同用该 token。
+- 详见 [[lora-v1-cat1-batch]]。

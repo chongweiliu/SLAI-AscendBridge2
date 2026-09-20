@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""lora_train_multimodal.py.tmpl — 多模态三范式 LoRA 训练器（vlm/diffusion/video）
+
+  PARADIGM=vlm        视觉语言模型 + 图像描述/视觉指令 SFT（实测 Qwen2.5-VL-3B + flickr30k）
+                      ChatML 渲染 + processor 展开 image token；labels 用 token-id 序列定位
+                      assistant 头（<|im_start|>assistant\n）掩 prompt，caption+<|im_end|> 计 loss
+  PARADIGM=diffusion  文生图 UNet LoRA（实测 SDXL + nouns）：图 → VAE latents（预编码缓存）
+                      → DDPM epsilon MSE（组件直载 variant=fp16；双文本编码器嵌入预计算缓存）
+  PARADIGM=video      视频生成 DiT LoRA（实测 Wan2.1-T2V-1.3B + ucf101 帧级）：帧 → VAE latents
+                      （缓存）→ DDPM noise MSE（DiT/VAE 均 shape-based key remap；文本嵌入=0，
+                      评测口径=「无条件帧去噪」而非完整 T2V，报告须如实记录）
+
+环境变量: PARADIGM MODEL_DIR DATA_FILE OUT_DIR NUM_STEPS LR LORA_R LORA_ALPHA WARMUP
+          BATCH(默认 vlm2/diffusion4/video4) SEED NPU_DEV
+latent 缓存固定在 <WS>/outputs/latent_cache_*.pt（key=md5(DATA_FILE|PARADIGM)，不随 OUT_DIR 变，
+sweep 各组合复用不重复编码——SDXL 1024px VAE+双编码器编码是耗时大头）。
+
+适配新模型的改动点（按范式）:
+  vlm        : ① MODEL_CLS（默认 Qwen2_5_VLForConditionalGeneration，换其它 ConditionalGeneration
+                  类即可）；② ASSISTANT_HDR（assistant 头标记串，按模型 chat template 改）；
+               ③ IMG_SIZE / PROMPT_TEXT（渲染分辨率与指令）；④ pixel_values 必须 concat 非
+                  stack、image_grid_thw 同 cat（pitfalls #43）
+  diffusion  : ① build_diffusion_model() 的组件子目录名（unet/vae/text_encoder/text_encoder_2，
+                  SD1.5/FLUX 等单编码器模型删掉 te2 分支并把 emb 改为单编码器输出）；
+               ② time_ids 分辨率（SDXL micro-conditioning，按训练分辨率改）
+  video      : ① build_video_model() 的 DiT 构造参数照抄模型卡；② VAE 输入维度序
+                  [B,C=3,T=1,H,W]（unsqueeze 顺序错报 expected 3 channels got 1，pitfalls #44）；
+               ③ 加噪公式按模型 schedule（Wan 为线性 beta：alpha_t=1-0.02*(t+1)/1000）
+
+数据格式（jsonl 每行）: vlm {"image":绝对路径,"caption":str}；diffusion {"image","prompt"}；
+  video {"image","label"}。**图像路径必须绝对路径**（pitfalls #41：cwd 变化后相对路径图全打不开，
+  diffusion/video 的 try/except 会静默跳过 → 0 样本缓存）。
+
+2026-09-11 台账第 4 大类三模型实战验证（3/3 改善）：vlm ROUGE-L 0.531→0.593；
+diffusion 固定噪声 MSE -47.6%；video MSE -55.4%。详见 references/multimodal-paradigms.md。
+"""
+import json
+import math
+import os
+import random
+import time
+
+os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+os.environ.setdefault("TASK_QUEUE_ENABLE", "1")
+os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+import torch  # noqa: E402
+import torch_npu  # noqa: E402,F401
+import torch.nn.functional as F  # noqa: E402
+from torch_npu.optim import NpuFusedAdamW  # noqa: E402
+
+PARADIGM = os.environ["PARADIGM"]
+MODEL_DIR = os.environ["MODEL_DIR"]
+WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.environ.get("DATA_FILE", os.path.join(WS, "outputs", "train.jsonl"))
+OUT_DIR = os.environ.get("OUT_DIR", os.path.join(WS, "outputs"))
+NUM_STEPS = int(os.environ.get("NUM_STEPS", "200"))
+LR = float(os.environ.get("LR", "1e-4"))
+WARMUP = int(os.environ.get("WARMUP", "20"))
+LORA_R = int(os.environ.get("LORA_R", "16"))
+LORA_ALPHA = int(os.environ.get("LORA_ALPHA", "32"))
+LORA_DROPOUT = float(os.environ.get("LORA_DROPOUT", "0.05"))
+BATCH = int(os.environ.get("BATCH", {"vlm": 2, "diffusion": 4, "video": 4}[PARADIGM]))
+SEED = int(os.environ.get("SEED", "42"))
+DEV = os.environ.get("NPU_DEV", "npu:0")
+GRAD_CLIP = 1.0
+# ---- 适配点（见文件头）----
+MODEL_CLS = os.environ.get("MODEL_CLS", "Qwen2_5_VLForConditionalGeneration")  # vlm
+ASSISTANT_HDR = os.environ.get("ASSISTANT_HDR", "<|im_start|>assistant\n")      # vlm
+IMG_SIZE = int(os.environ.get("IMG_SIZE", "448"))                               # vlm
+PROMPT_TEXT = os.environ.get("PROMPT_TEXT", "Describe this image in one sentence.")  # vlm
+# 视觉范式 LoRA 目标（peft 后缀匹配：一行覆盖 UNet/DiT 全部 attention）
+DIFF_TARGETS = ["to_q", "to_k", "to_v", "to_out.0"]
+VLM_CANDIDATES = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+
+def lr_at(step, num_steps, warmup, lr):
+    if step < warmup:
+        return lr * (step + 1) / warmup
+    prog = (step - warmup) / max(1, num_steps - warmup)
+    return lr * 0.5 * (1 + math.cos(math.pi * min(1.0, prog)))
+
+
+def remap_load(model, sd):
+    """shape-based key remap（diffusers 版本间命名差异），与 CPT 实现一致。
+
+    按「shape 分桶 + 桶内 sorted 对位」重映射 ckpt 键名后 strict=False 加载；
+    用于 ckpt 命名与本地 diffusers 版本模型不一致的场景（如 Wan2.1 ckpt vs diffusers 0.40）。
+    """
+    from collections import defaultdict
+    m_by_s, c_by_s = defaultdict(list), defaultdict(list)
+    for k, v in model.state_dict().items():
+        m_by_s[tuple(v.shape)].append(k)
+    for k, v in sd.items():
+        c_by_s[tuple(v.shape)].append(k)
+    remapped = {}
+    for s, mks in m_by_s.items():
+        cks = c_by_s.get(s, [])
+        if len(mks) == 1 and len(cks) == 1:
+            remapped[mks[0]] = sd[cks[0]]
+        elif len(mks) == len(cks) and mks:
+            for mk, ck in zip(sorted(mks), sorted(cks)):
+                remapped[mk] = sd[ck]
+    model.load_state_dict(remapped, strict=False)
+    return model
+
+
+# ---------- vlm ----------
+def vlm_build_example(processor, tok, rec):
+    """单样本构建：ChatML 渲染 → processor 展开 image token → token-id 序列定位 assistant 头掩 prompt。
+
+    注意：processor 展开图像 token 后字符偏移与 token 序列不再对齐，**不能用字符偏移法**，
+    改用 ASSISTANT_HDR 的 id 序列在 input_ids 里滑窗找最后一次出现位置。
+    """
+    from PIL import Image
+    img = Image.open(rec["image"]).convert("RGB").resize((IMG_SIZE, IMG_SIZE))
+    cap = rec["caption"]
+    msgs = [{"role": "user", "content": [{"type": "image"}, {"type": "text", "text": PROMPT_TEXT}]},
+            {"role": "assistant", "content": [{"type": "text", "text": cap}]}]
+    rendered = processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False)
+    inputs = processor(text=[rendered], images=[img], return_tensors="pt")
+    ids = inputs.input_ids[0]
+    labels = torch.full_like(ids, -100)
+    hdr = tok(ASSISTANT_HDR, add_special_tokens=False).input_ids
+    hdr_t = torch.tensor(hdr)
+    pos = -1
+    for i in range(len(ids) - len(hdr) + 1):
+        if torch.equal(ids[i:i + len(hdr)], hdr_t):
+            pos = i
+    assert pos > 0, "assistant 头未找到"
+    labels[pos + len(hdr):] = ids[pos + len(hdr):]  # caption + <|im_end|> 计 loss
+    n_label = int((labels != -100).sum())
+    assert n_label > 0
+    return {"input_ids": ids, "labels": labels, "pixel_values": inputs.pixel_values,
+            "image_grid_thw": inputs.image_grid_thw, "n_label": n_label}
+
+
+# ---------- diffusion / video：预编码缓存 ----------
+def build_diffusion_model():
+    from diffusers.models import UNet2DConditionModel
+    return UNet2DConditionModel.from_pretrained(f"{MODEL_DIR}/unet", torch_dtype=torch.float32, variant="fp16")
+
+
+def diffusion_encode_all(recs, device):
+    """SDXL：图 → VAE latents + 双编码器 text embeddings（一次编码全量缓存，sweep 复用）。
+
+    单编码器模型（SD1.5 等）删 te2 分支，emb 直接取 te1 输出、pooled 取 te1 的 pooler_output。
+    """
+    from diffusers.models import AutoencoderKL
+    from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
+    from PIL import Image
+    import numpy as np
+    vae = AutoencoderKL.from_pretrained(f"{MODEL_DIR}/vae", torch_dtype=torch.float32, variant="fp16").to(device).eval()
+    te1 = CLIPTextModel.from_pretrained(f"{MODEL_DIR}/text_encoder", torch_dtype=torch.float32, variant="fp16").to(device).eval()
+    te2 = CLIPTextModelWithProjection.from_pretrained(f"{MODEL_DIR}/text_encoder_2", torch_dtype=torch.float32, variant="fp16").to(device).eval()
+    tok1 = CLIPTokenizer.from_pretrained(f"{MODEL_DIR}/tokenizer")
+    tok2 = CLIPTokenizer.from_pretrained(f"{MODEL_DIR}/tokenizer_2")
+    out = []
+    for i, r in enumerate(recs):
+        try:
+            img = Image.open(r["image"]).convert("RGB").resize((1024, 1024))
+            t = torch.from_numpy(np.array(img)).float().permute(2, 0, 1).unsqueeze(0).to(device) / 127.5 - 1.0
+            prompt = r.get("prompt") or "an image"
+            ids1 = tok1(prompt, return_tensors="pt", padding="max_length", max_length=77, truncation=True).input_ids.to(device)
+            ids2 = tok2(prompt, return_tensors="pt", padding="max_length", max_length=77, truncation=True).input_ids.to(device)
+            with torch.no_grad():
+                lat = vae.encode(t).latent_dist.sample() * vae.config.scaling_factor
+                e1 = te1(ids1).last_hidden_state
+                e2o = te2(ids2, output_hidden_states=True)
+                emb = torch.cat([e1, e2o.hidden_states[-1]], dim=-1)
+            out.append({"lat": lat.squeeze(0).cpu(), "emb": emb.squeeze(0).cpu(),
+                        "pooled": e2o.text_embeds.squeeze(0).cpu(), "prompt": prompt})
+        except Exception as e:
+            print(f"  [skip] {r['image']}: {e}", flush=True)
+        if i % 100 == 0:
+            print(f"  encoded {i}/{len(recs)}", flush=True)
+    assert out, "预编码 0 样本——检查 image 路径是否为绝对路径（pitfalls #41）"
+    return {"time_ids": torch.tensor([1024, 1024, 0, 0, 1024, 1024], dtype=torch.float32)}, out
+
+
+def build_video_model():
+    """Wan DiT：构造参数照抄模型卡；ckpt 键名与 diffusers 版本不一致 → shape-based remap。"""
+    from diffusers.models.transformers import WanTransformer3DModel
+    from safetensors.torch import load_file
+    dit = WanTransformer3DModel(patch_size=(1, 2, 2), num_attention_heads=12, attention_head_dim=128,
+                                 in_channels=16, out_channels=16, num_layers=30, ffn_dim=8960,
+                                 freq_dim=256, text_dim=4096, cross_attn_norm=True,
+                                 qk_norm="rms_norm_across_heads", eps=1e-06)
+    return remap_load(dit, load_file(os.path.join(MODEL_DIR, "diffusion_pytorch_model.safetensors")))
+
+
+def video_encode_all(recs, device):
+    """Wan：帧 → WanVAE latents（shape remap 加载），文本嵌入=0（与 CPT 一致，T5 太大跳过）。
+
+    VAE 输入维度序 [B,C=3,T=1,H,W]：permute(2,0,1).unsqueeze(0).unsqueeze(2)——
+    unsqueeze 顺序错报 "expected 3 channels got 1"（pitfalls #44）。
+    """
+    from diffusers.models import AutoencoderKLWan
+    from PIL import Image
+    import numpy as np
+    vae_ckpt = torch.load(os.path.join(MODEL_DIR, "Wan2.1_VAE.pth"), map_location="cpu", weights_only=False)
+    vae = AutoencoderKLWan(z_dim=16, decoder_base_dim=96, dim_mult=[1, 2, 4, 4], num_res_blocks=2,
+                           in_channels=3, out_channels=3, temperal_downsample=[False, True, True],
+                           scale_factor_temporal=4, scale_factor_spatial=8)
+    vae = remap_load(vae, vae_ckpt).to(device).eval()
+    out = []
+    for i, r in enumerate(recs):
+        try:
+            img = Image.open(r["image"]).convert("RGB").resize((256, 256))
+            arr = np.array(img).astype(np.float32) / 127.5 - 1.0
+            t = torch.from_numpy(arr).permute(2, 0, 1).unsqueeze(0).unsqueeze(2).to(device)  # [B=1,C=3,T=1,H,W]
+            with torch.no_grad():
+                lat = vae.encode(t)
+                lat = lat.latent_dist.sample() if hasattr(lat, "latent_dist") else lat.latents
+            out.append({"lat": lat.squeeze(0).cpu(), "prompt": f"ucf101 label {r.get('label', '?')}"})
+        except Exception as e:
+            print(f"  [skip] {r['image']}: {e}", flush=True)
+        if i % 100 == 0:
+            print(f"  encoded {i}/{len(recs)}", flush=True)
+    assert out, "预编码 0 样本——检查 image 路径是否为绝对路径（pitfalls #41）"
+    return None, out
+
+
+def main():
+    t0 = time.time()
+    torch.manual_seed(SEED); random.seed(SEED)
+    os.makedirs(OUT_DIR, exist_ok=True)
+    ad_dir = os.path.join(OUT_DIR, "lora_adapter")
+    os.makedirs(ad_dir, exist_ok=True)
+    torch.npu.set_device(DEV)
+    print(f"[env] paradigm={PARADIGM} dev={DEV} steps={NUM_STEPS} lr={LR} r={LORA_R}", flush=True)
+
+    recs = [json.loads(l) for l in open(DATA, encoding="utf-8") if l.strip()]
+    print(f"[data] {len(recs)} records", flush=True)
+
+    if PARADIGM == "vlm":
+        import transformers
+        from transformers import AutoProcessor
+        model = getattr(transformers, MODEL_CLS).from_pretrained(
+            MODEL_DIR, dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="eager").to(DEV)
+        processor = AutoProcessor.from_pretrained(MODEL_DIR)
+        tok = processor.tokenizer
+        linear_names = {n.split(".")[-1] for n, m in model.named_modules() if type(m).__name__ == "Linear"}
+        targets = sorted(set(VLM_CANDIDATES) & linear_names)
+        print(f"[lora] target_modules={targets}", flush=True)
+        from peft import LoraConfig, get_peft_model
+        model = get_peft_model(model, LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA,
+                                                 lora_dropout=LORA_DROPOUT, target_modules=targets, bias="none"))
+        model.print_trainable_parameters()
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        model.train()
+        examples = [vlm_build_example(processor, tok, r) for r in recs]
+        n_tok = sum(e["n_label"] for e in examples)
+        print(f"[data] built {len(examples)} examples, total caption tokens={n_tok}", flush=True)
+
+        def forward_loss(batch_recs):
+            exs = batch_recs  # 已是构建好的 examples
+            maxlen = max(len(e["input_ids"]) for e in exs)
+            pad = tok.pad_token_id or tok.eos_token_id
+            ids = torch.full((len(exs), maxlen), pad, dtype=torch.long)
+            attn = torch.zeros((len(exs), maxlen), dtype=torch.long)
+            lbl = torch.full((len(exs), maxlen), -100, dtype=torch.long)
+            for bi, e in enumerate(exs):
+                L = len(e["input_ids"])
+                ids[bi, :L] = e["input_ids"]
+                attn[bi, :L] = 1
+                lbl[bi, :L] = e["labels"]
+            with torch.autocast("npu", dtype=torch.bfloat16):
+                # pixel_values 必须 concat（非 stack，每图 patch 数可不同）+ cat image_grid_thw（#43）
+                out = model(input_ids=ids.to(DEV), attention_mask=attn.to(DEV), labels=lbl.to(DEV),
+                            pixel_values=torch.cat([e["pixel_values"] for e in exs], dim=0).to(DEV),
+                            image_grid_thw=torch.cat([e["image_grid_thw"] for e in exs], dim=0).to(DEV))
+            return out.loss
+        rng = random.Random(SEED)
+        sample_pool = examples
+    else:
+        # 预编码缓存（固定路径 = md5(DATA|PARADIGM)，sweep 各组合复用）
+        import hashlib
+        cache_key = hashlib.md5(f"{DATA}|{PARADIGM}".encode()).hexdigest()[:10]
+        cache_path = os.path.join(WS, "outputs", f"latent_cache_{cache_key}.pt")
+        if os.path.exists(cache_path):
+            print(f"[cache] loading {cache_path}", flush=True)
+            ck = torch.load(cache_path, weights_only=False)
+            meta, sample_pool = ck.get("meta"), ck["samples"]
+        else:
+            print(f"[encode] pre-encoding latents for {len(recs)} records...", flush=True)
+            te = time.time()
+            if PARADIGM == "diffusion":
+                meta, sample_pool = diffusion_encode_all(recs, DEV)
+            else:
+                meta, sample_pool = video_encode_all(recs, DEV)
+            torch.save({"meta": meta, "samples": sample_pool}, cache_path)
+            print(f"[cache] saved {cache_path} ({time.time()-te:.0f}s, {len(sample_pool)} samples)", flush=True)
+            torch.npu.empty_cache()
+        model = build_diffusion_model() if PARADIGM == "diffusion" else build_video_model()
+        from peft import LoraConfig, get_peft_model
+        model = get_peft_model(model, LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA,
+                                                 lora_dropout=LORA_DROPOUT,
+                                                 target_modules=DIFF_TARGETS, bias="none"))
+        model.print_trainable_parameters()
+        trainable = [p for p in model.parameters() if p.requires_grad]
+        model = model.to(DEV)
+        model.train()
+        N = len(sample_pool)
+        print(f"[data] {N} cached latent samples", flush=True)
+
+        if PARADIGM == "diffusion":
+            from diffusers.schedulers import DDPMScheduler
+            sched = DDPMScheduler(num_train_timesteps=1000, beta_schedule="scaled_linear")
+            time_ids = meta["time_ids"]
+
+            def forward_loss(batch_recs):
+                lats = torch.stack([e["lat"] for e in batch_recs]).to(DEV)
+                embs = torch.stack([e["emb"] for e in batch_recs]).to(DEV)
+                pooled = torch.stack([e["pooled"] for e in batch_recs]).to(DEV)
+                noise = torch.randn_like(lats)
+                ts = torch.randint(0, 1000, (len(batch_recs),), device=DEV)
+                noisy = sched.add_noise(lats, noise, ts)
+                with torch.autocast("npu", dtype=torch.bfloat16):
+                    pred = model(noisy, ts, encoder_hidden_states=embs,
+                                 added_cond_kwargs={"text_embeds": pooled,
+                                                    "time_ids": time_ids.unsqueeze(0).expand(len(batch_recs), -1).to(DEV)}).sample
+                return F.mse_loss(pred.float(), noise.float())
+        else:
+            def forward_loss(batch_recs):
+                lats = torch.stack([e["lat"] for e in batch_recs]).to(DEV)
+                noise = torch.randn_like(lats)
+                ts = torch.randint(0, 1000, (len(batch_recs),), device=DEV)
+                # Wan 线性 beta 加噪（换模型按各自 schedule 改，见文件头适配点③）
+                alpha_t = (1.0 - 0.02 * (ts.float() + 1) / 1000).view(-1, 1, 1, 1, 1)
+                noisy = alpha_t.sqrt() * lats + (1 - alpha_t).sqrt() * noise
+                text_emb = torch.zeros(len(batch_recs), 512, 4096, device=DEV, dtype=torch.bfloat16)
+                with torch.autocast("npu", dtype=torch.bfloat16):
+                    out = model(noisy, ts.to(torch.int64), encoder_hidden_states=text_emb)
+                    pred = out.sample if hasattr(out, "sample") else out
+                return F.mse_loss(pred.float(), noise.float())
+        rng = random.Random(SEED)
+
+    opt = NpuFusedAdamW(trainable, lr=LR, betas=(0.9, 0.95), weight_decay=0.01, eps=1e-8)
+    n = len(sample_pool)
+    opt.zero_grad(set_to_none=False)  # NpuFusedAdamW 不支持 set_to_none=True（pitfalls #5）
+    t_tr = time.time()
+    log = []
+    print(f"[train] {NUM_STEPS} steps batch={BATCH} pool={n}", flush=True)
+    for step in range(NUM_STEPS):
+        batch = [sample_pool[rng.randint(0, n - 1)] for _ in range(BATCH)]
+        loss = forward_loss(batch)
+        loss.backward()
+        cur = lr_at(step, NUM_STEPS, WARMUP, LR)
+        for g in opt.param_groups:
+            g["lr"] = cur
+        torch.nn.utils.clip_grad_norm_(trainable, GRAD_CLIP)
+        opt.step()
+        opt.zero_grad(set_to_none=False)
+        rec = {"step": step + 1, "loss": round(loss.item(), 6), "lr": round(cur, 8),
+               "elapsed_s": round(time.time() - t_tr, 2)}
+        log.append(rec)
+        with open(os.path.join(OUT_DIR, "loss.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        if (step + 1) % 10 == 0 or step == 0:
+            print(f"[train] step {step+1}/{NUM_STEPS} loss={rec['loss']:.4f} elapsed={rec['elapsed_s']:.1f}s", flush=True)
+    total = time.time() - t_tr
+    steady = (log[-1]["elapsed_s"] - log[-2]["elapsed_s"]) if len(log) >= 2 else total / NUM_STEPS
+    print(f"[probe] s_per_step={steady:.2f} mem_peak_gb={torch.npu.max_memory_allocated()/2**30:.2f} last_loss={log[-1]['loss']}", flush=True)
+    model.save_pretrained(ad_dir)
+    with open(os.path.join(OUT_DIR, "loss_raw.json"), "w", encoding="utf-8") as f:
+        json.dump({"steps": log, "num_steps": NUM_STEPS, "total_train_s": round(total, 2),
+                   "config": {"paradigm": PARADIGM, "model": MODEL_DIR, "lora_r": LORA_R,
+                              "lora_alpha": LORA_ALPHA, "lr": LR, "batch": BATCH,
+                              "warmup": WARMUP, "n_records": len(recs)}}, f, indent=2, ensure_ascii=False)
+    print(f"[save] adapter -> {ad_dir}; [done] {time.time()-t0:.1f}s", flush=True)
+
+
+if __name__ == "__main__":
+    main()

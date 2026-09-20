@@ -1,0 +1,225 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""validate_speech.py.tmpl — 语音与音频三范式 base vs LoRA held-out 最终验证
+
+  asr       : 贪心生成转写 → CER(主指标,越低越好) + char ROUGE-L + 字符重叠
+  audio_cls : CE + top1 准确率(主指标)
+  tts       : teacher-forced mel MSE(主指标,越低越好) + L1（无 vocoder 归档，口径=mel 域，报告记录）
+
+env: PARADIGM MODEL_DIR VAL_SRC OUT_JSON NPU_DEV
+     BASE_RUN_DIR(audio_cls 必填=head-only run) LORA_RUN_DIR(含 lora_adapter/ [+head.pt])
+
+模板用法（复制到 <ws>/scripts/，与 lora_train_speech.py 同目录；import 名已对应改）。
+BASE_RUN_DIR=head-only 基线（audio_cls 必填）；asr 主指标 CER、audio_cls top1、tts mel MSE。
+2026-09-18 三模型实战验证。
+"""
+import json
+import os
+import re
+import sys
+from collections import Counter
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+os.environ.setdefault("TASK_QUEUE_ENABLE", "1")
+os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+import torch  # noqa: E402
+import torch_npu  # noqa: E402,F401
+
+import lora_train_speech as T  # noqa: E402
+
+PARADIGM = os.environ["PARADIGM"]
+MODEL_DIR = os.environ["MODEL_DIR"]
+WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.environ.get("VAL_SRC", os.path.join(WS, "outputs", "val10.jsonl"))
+OUT_JSON = os.environ.get("OUT_JSON", os.path.join(WS, "outputs", "validation_results.json"))
+BASE_RUN_DIR = os.environ.get("BASE_RUN_DIR", "")
+LORA_RUN_DIR = os.environ.get("LORA_RUN_DIR", "")
+DEV = os.environ.get("NPU_DEV", "npu:0")
+T_MAX = int(os.environ.get("TTS_MAX_FRAMES", "1800"))
+
+
+def norm_en(s):
+    s = s.lower()
+    s = re.sub(r"[^a-z0-9 ]", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def edit_dist(a, b):
+    la, lb = len(a), len(b)
+    if not la or not lb:
+        return max(la, lb)
+    prev = list(range(lb + 1))
+    for i in range(1, la + 1):
+        cur = [i] + [0] * lb
+        for j in range(1, lb + 1):
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] != b[j - 1]))
+        prev = cur
+    return prev[lb]
+
+
+def lcs_len(a, b):
+    la, lb = len(a), len(b)
+    if not la or not lb:
+        return 0
+    dp = [0] * (lb + 1)
+    for i in range(1, la + 1):
+        prev = 0
+        for j in range(1, lb + 1):
+            cur = dp[j]
+            dp[j] = prev + 1 if a[i - 1] == b[j - 1] else max(dp[j - 1], dp[j])
+            prev = cur
+    return dp[lb]
+
+
+def rouge_l_f1(gt, pred):
+    if not gt and not pred:
+        return 1.0
+    if not gt or not pred:
+        return 0.0
+    l = lcs_len(gt, pred)
+    if not l:
+        return 0.0
+    p, r = l / len(pred), l / len(gt)
+    return 2 * p * r / (p + r) if (p + r) else 0.0
+
+
+def char_overlap(gt, pred):
+    cg, cp = Counter(gt), Counter(pred)
+    inter = sum((cg & cp).values())
+    union = sum((cg | cp).values())
+    return inter / union if union else 0.0
+
+
+def build_side(run_dir, with_adapter):
+    model = T.load_model().to(DEV)
+    if PARADIGM == "audio_cls":
+        hp = os.path.join(run_dir, "head.pt")
+        if run_dir and os.path.exists(hp):
+            hs = torch.load(hp, map_location="cpu")
+            model.load_state_dict(hs, strict=False)
+    if with_adapter:
+        ad = os.path.join(run_dir, "lora_adapter")
+        assert os.path.isdir(ad), f"adapter 不存在: {ad}"
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, ad)
+    return model.eval()
+
+
+def evaluate(model, recs):
+    per = []
+    with torch.no_grad():
+        if PARADIGM == "asr":
+            from transformers import WhisperProcessor
+            proc = WhisperProcessor.from_pretrained(MODEL_DIR)
+            fe, tok = proc.feature_extractor, proc.tokenizer
+            try:
+                prompt_ids = proc.get_decoder_prompt_ids(language="en", task="transcribe")
+            except Exception:
+                prompt_ids = None
+            for i, r in enumerate(recs):
+                aud, _ = T.load_audio(r["audio"], target_sr=16000)
+                m = fe(aud, sampling_rate=16000, return_tensors="np").input_features[0][:, :3000]
+                import numpy as _np
+                if m.shape[1] < 3000:
+                    m = _np.pad(m, ((0, 0), (0, 3000 - m.shape[1])))
+                mel = torch.from_numpy(m[None]).to(DEV)
+                kw = {"forced_decoder_ids": prompt_ids} if prompt_ids else {}
+                with torch.autocast("npu", dtype=torch.bfloat16):
+                    gen = model.generate(mel, max_new_tokens=128, do_sample=False, **kw)
+                pred = tok.decode(gen[0], skip_special_tokens=True).strip()
+                gt_n, pred_n = norm_en(r["text"]), norm_en(pred)
+                cer = edit_dist(gt_n, pred_n) / max(1, len(gt_n))
+                per.append({"i": i, "cer": round(cer, 4),
+                            "rouge_l": round(rouge_l_f1(gt_n, pred_n), 4),
+                            "char_overlap": round(char_overlap(gt_n, pred_n), 4),
+                            "gt": gt_n[:80], "pred": pred_n[:80]})
+        elif PARADIGM == "audio_cls":
+            from transformers import ASTFeatureExtractor
+            fe = ASTFeatureExtractor.from_pretrained(MODEL_DIR)
+            for i, r in enumerate(recs):
+                aud, _ = T.load_audio(r["audio"], target_sr=16000)
+                v = fe(aud, sampling_rate=16000, return_tensors="pt").input_values.to(DEV)
+                with torch.autocast("npu", dtype=torch.bfloat16):
+                    out = model(input_values=v, labels=torch.tensor([r["label"]], device=DEV))
+                p = int(out.logits[0].argmax(-1))
+                per.append({"i": i, "label": r["label"], "pred": p, "hit": int(p == r["label"]),
+                            "ce": round(float(out.loss), 4), "category": r.get("category", "")})
+        else:  # tts
+            T.DATA = SRC
+            specs = T.tts_mel_cache(recs)
+            from transformers import SpeechT5Processor
+            tok = SpeechT5Processor.from_pretrained(MODEL_DIR).tokenizer
+            for i, r in enumerate(recs):
+                spec = specs[i][:T_MAX]
+                if spec.shape[0] % 2:
+                    spec = spec[:-1]
+                spec = spec.to(torch.float32)[None].to(DEV)
+                t_ = tok(text=r["text"], return_tensors="pt", truncation=True, max_length=512)
+                with torch.autocast("npu", dtype=torch.bfloat16):
+                    out = model(input_ids=t_.input_ids.to(DEV),
+                                attention_mask=torch.ones_like(t_.input_ids).to(DEV),
+                                speaker_embeddings=torch.zeros(1, 512, device=DEV, dtype=torch.bfloat16),
+                                labels=spec)
+                # teacher-forced 逐步重建谱（decoder_input_values 由 labels 内部 shift）→ MSE + L1
+                mse = float(out.loss)
+                per.append({"i": i, "mse": round(mse, 6), "frames": int(spec.shape[1]),
+                            "text": r["text"][:60]})
+    return per
+
+
+def agg(per):
+    if not per:
+        return {}
+    num = [k for k in per[0] if isinstance(per[0][k], (int, float))]
+    return {k: round(sum(p[k] for p in per) / len(per), 4) for k in num}
+
+
+def main():
+    torch.npu.set_device(DEV)
+    recs = [json.loads(l) for l in open(SRC, encoding="utf-8") if l.strip()]
+    print(f"[data] {len(recs)} val records", flush=True)
+    MAIN = {"asr": "cer", "audio_cls": "hit", "tts": "mse"}[PARADIGM]
+    LOWER = MAIN in ("cer", "mse")
+
+    print("[eval] BASE 侧 ...", flush=True)
+    bm = build_side(BASE_RUN_DIR, with_adapter=False)
+    base_per = evaluate(bm, recs)
+    base_agg = agg(base_per)
+    print(f"[eval] BASE {base_agg}", flush=True)
+    del bm
+    torch.npu.empty_cache()
+
+    print("[eval] LoRA 侧 ...", flush=True)
+    lm = build_side(LORA_RUN_DIR, with_adapter=True)
+    lora_per = evaluate(lm, recs)
+    lora_agg = agg(lora_per)
+    print(f"[eval] LORA {lora_agg}", flush=True)
+
+    delta = {k: round(lora_agg.get(k, 0) - base_agg.get(k, 0), 4) for k in lora_agg}
+    print("\n=== 逐条对比 ===", flush=True)
+    for b, l in zip(base_per, lora_per):
+        extra = ""
+        if PARADIGM == "asr":
+            extra = f" | gt: {l['gt'][:40]}… | pred: {l['pred'][:40]}…"
+        elif PARADIGM == "audio_cls":
+            extra = f" ({l.get('category','')})"
+        print(f"  [{b['i']}] {MAIN}: {b[MAIN]}→{l[MAIN]}{extra}", flush=True)
+    summary = {"paradigm": PARADIGM, "model": MODEL_DIR, "main_metric": MAIN,
+               "main_lower_better": LOWER,
+               "base": {"agg": base_agg, "per": base_per}, "lora": {"agg": lora_agg, "per": lora_per},
+               "delta": delta, "n_records": len(recs)}
+    if PARADIGM == "tts":
+        summary["口径说明"] = "teacher-forced mel 域 MSE（归档无 vocoder，未做波形合成）；speaker=零向量（单说话人 LJSpeech）"
+    with open(OUT_JSON, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+    d = delta.get(MAIN, 0)
+    better = (d < 0) if LOWER else (d > 0)
+    print(f"\n[save] {OUT_JSON}\n=== 主指标 {MAIN}: base={base_agg.get(MAIN)} lora={lora_agg.get(MAIN)} "
+          f"Δ={d:+.4f} {'✅改善' if better else ('⚠️持平' if abs(d) < 1e-9 else '⚠️退化')}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

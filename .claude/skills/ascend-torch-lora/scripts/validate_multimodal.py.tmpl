@@ -1,0 +1,192 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""validate_multimodal.py.tmpl — 多模态三范式 base vs LoRA held-out 最终验证
+
+  vlm        : 逐图贪心生成描述 → 与全部 GT captions 取 max ROUGE-L/字符重叠（一图多参考标准做法）
+  diffusion  : 固定噪声/时间步（per-sample seed Generator，base/LoRA 严格可比）→ 逐样本 epsilon MSE
+  video      : 同 diffusion（固定噪声 MSE；零文本嵌入口径=「无条件帧去噪」，报告须如实记录）
+
+env: PARADIGM MODEL_DIR ADAPTER_DIR VAL_SRC OUT_JSON OUT_MD NPU_DEV
+     MODEL_CLS ASSISTANT_HDR IMG_SIZE PROMPT_TEXT（vlm 适配点，与 lora_train_multimodal.py.tmpl 对齐）
+
+注意:
+  - OUT_JSON 可覆盖：对照实验必须指独立文件，否则覆盖主结果（pitfalls #29）
+  - 预切分验证文件全量使用；diffusion/video 的 val 档 latent 也走预编码缓存（key=md5(VAL_SRC|PARADIGM)）
+  - 验证随机性必须固定：per-sample `Generator().manual_seed(BASE_SEED+i)` 生成同一份噪声/时间步
+    喂给 base 与 LoRA（与 mlm 固定掩码/mim 固定内部掩码同一原则，pitfalls #40③）
+
+2026-09-11 台账第 4 大类三模型实战验证。详见 references/multimodal-paradigms.md。
+"""
+import json
+import os
+import sys
+from collections import Counter
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+os.environ.setdefault("TASK_QUEUE_ENABLE", "1")
+os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+
+import torch  # noqa: E402
+import torch_npu  # noqa: E402,F401
+import torch.nn.functional as F  # noqa: E402
+
+PARADIGM = os.environ["PARADIGM"]
+MODEL_DIR = os.environ["MODEL_DIR"]
+ADAPTER_DIR = os.environ.get("ADAPTER_DIR", "")
+WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.environ.get("VAL_SRC", os.path.join(WS, "outputs", "val10.jsonl"))
+OUT_JSON = os.environ.get("OUT_JSON", os.path.join(WS, "outputs", "validation_results.json"))
+DEV = os.environ.get("NPU_DEV", "npu:0")
+# ---- vlm 适配点（与训练模板一致）----
+MODEL_CLS = os.environ.get("MODEL_CLS", "Qwen2_5_VLForConditionalGeneration")
+IMG_SIZE = int(os.environ.get("IMG_SIZE", "448"))
+PROMPT_TEXT = os.environ.get("PROMPT_TEXT", "Describe this image in one sentence.")
+BASE_SEED = int(os.environ.get("BASE_SEED", "9500"))  # 固定噪声种子基（per-sample = BASE_SEED+i）
+
+
+def lcs_len(a, b):
+    la, lb = len(a), len(b)
+    if not la or not lb:
+        return 0
+    dp = [0] * (lb + 1)
+    for i in range(1, la + 1):
+        prev = 0
+        for j in range(1, lb + 1):
+            cur = dp[j]
+            dp[j] = prev + 1 if a[i - 1] == b[j - 1] else max(dp[j - 1], dp[j])
+            prev = cur
+    return dp[lb]
+
+
+def rouge_l_f1(gt, pred):
+    gt, pred = gt or "", pred or ""
+    if not gt and not pred:
+        return 1.0
+    if not gt or not pred:
+        return 0.0
+    l = lcs_len(gt, pred)
+    if not l:
+        return 0.0
+    p, r = l / len(pred), l / len(gt)
+    return 2 * p * r / (p + r) if (p + r) else 0.0
+
+
+def char_overlap(gt, pred):
+    cg, cp = Counter(gt or ""), Counter(pred or "")
+    inter = sum((cg & cp).values())
+    union = sum((cg | cp).values())
+    return inter / union if union else 0.0
+
+
+def load_base_model():
+    if PARADIGM == "vlm":
+        import transformers
+        return getattr(transformers, MODEL_CLS).from_pretrained(
+            MODEL_DIR, dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="eager").to(DEV).eval()
+    import lora_train_multimodal as T  # 复用训练模板的组件构建/remap（副本同目录或 sys.path 内）
+    return (T.build_diffusion_model() if PARADIGM == "diffusion" else T.build_video_model()).to(DEV).eval()
+
+
+def evaluate(model):
+    recs = [json.loads(l) for l in open(SRC, encoding="utf-8") if l.strip()]
+    out = []
+    with torch.no_grad():
+        if PARADIGM == "vlm":
+            from transformers import AutoProcessor
+            from PIL import Image
+            processor = AutoProcessor.from_pretrained(MODEL_DIR)
+            for i, r in enumerate(recs):
+                img = Image.open(r["image"]).convert("RGB").resize((IMG_SIZE, IMG_SIZE))
+                msgs = [{"role": "user", "content": [{"type": "image"},
+                                                     {"type": "text", "text": PROMPT_TEXT}]}]
+                text = processor.apply_chat_template(msgs, tokenize=False, add_generation_prompt=True)
+                inputs = processor(text=[text], images=[img], return_tensors="pt").to(DEV)
+                with torch.autocast("npu", dtype=torch.bfloat16):
+                    gen = model.generate(**inputs, max_new_tokens=64, do_sample=False,
+                                         pad_token_id=processor.tokenizer.pad_token_id)
+                new = gen[0][inputs.input_ids.shape[1]:]
+                pred = processor.tokenizer.decode(new, skip_special_tokens=True).strip()
+                gts = r.get("captions") or [r.get("caption", "")]
+                rl = max(rouge_l_f1(g, pred) for g in gts)      # 一图多参考取 max
+                co = max(char_overlap(g, pred) for g in gts)
+                out.append({"image": r["image"].split("/")[-1], "gt": gts[0][:120], "pred": pred[:160],
+                            "rouge_l": round(rl, 4), "char_overlap": round(co, 4),
+                            "pred_len": len(pred)})
+        else:
+            import lora_train_multimodal as T
+            import hashlib
+            cache_key = hashlib.md5(f"{SRC}|{PARADIGM}".encode()).hexdigest()[:10]
+            cache_path = os.path.join(WS, "outputs", f"latent_cache_{cache_key}.pt")
+            if os.path.exists(cache_path):
+                samples = torch.load(cache_path, weights_only=False)["samples"]
+            else:
+                meta, samples = (T.diffusion_encode_all if PARADIGM == "diffusion" else T.video_encode_all)(recs, DEV)
+                torch.save({"meta": meta, "samples": samples}, cache_path)
+                torch.npu.empty_cache()
+            assert samples, "验证集预编码 0 样本——检查 image 绝对路径（pitfalls #41）"
+            for i, s in enumerate(samples):
+                lats = s["lat"].unsqueeze(0).to(DEV)
+                # 固定随机性：per-sample seed，base/LoRA 同一份噪声与时间步（严格可比）
+                g = torch.Generator().manual_seed(BASE_SEED + i)
+                noise = torch.randn(lats.shape, generator=g).to(DEV)
+                ts = torch.randint(0, 1000, (1,), generator=g).to(DEV)
+                if PARADIGM == "diffusion":
+                    from diffusers.schedulers import DDPMScheduler
+                    sched = DDPMScheduler(num_train_timesteps=1000, beta_schedule="scaled_linear")
+                    noisy = sched.add_noise(lats, noise, ts)
+                    tid = torch.tensor([1024, 1024, 0, 0, 1024, 1024], device=DEV).unsqueeze(0)
+                    with torch.autocast("npu", dtype=torch.bfloat16):
+                        pred = model(noisy, ts, encoder_hidden_states=s["emb"].unsqueeze(0).to(DEV),
+                                     added_cond_kwargs={"text_embeds": s["pooled"].unsqueeze(0).to(DEV),
+                                                        "time_ids": tid}).sample
+                else:
+                    alpha_t = (1.0 - 0.02 * (ts.float() + 1) / 1000).view(-1, 1, 1, 1, 1)
+                    noisy = alpha_t.sqrt() * lats + (1 - alpha_t).sqrt() * noise
+                    text_emb = torch.zeros(1, 512, 4096, device=DEV, dtype=torch.bfloat16)
+                    with torch.autocast("npu", dtype=torch.bfloat16):
+                        o = model(noisy, ts.to(torch.int64), encoder_hidden_states=text_emb)
+                        pred = o.sample if hasattr(o, "sample") else o
+                mse = float(F.mse_loss(pred.float(), noise.float()))
+                out.append({"sample": s.get("prompt", f"sample{i}")[:80],
+                            "mse": round(mse, 6), "neg_mse": round(-mse, 6)})
+    return out
+
+
+def agg(per):
+    if not per:
+        return {}
+    num = [k for k in per[0] if isinstance(per[0][k], (int, float))]
+    return {k: round(sum(p[k] for p in per) / len(per), 4) for k in num}
+
+
+def main():
+    torch.npu.set_device(DEV)
+    base = load_base_model()
+    print("[eval] BASE ...", flush=True)
+    base_per = evaluate(base)
+    base_agg = agg(base_per)
+    print(f"[eval] BASE {base_agg}", flush=True)
+    from peft import PeftModel
+    lora = PeftModel.from_pretrained(base, ADAPTER_DIR).eval()
+    print("[eval] LORA ...", flush=True)
+    lora_per = evaluate(lora)
+    lora_agg = agg(lora_per)
+    print(f"[eval] LORA {lora_agg}", flush=True)
+    MAIN = {"vlm": "rouge_l", "diffusion": "neg_mse", "video": "neg_mse"}[PARADIGM]
+    delta = round(lora_agg[MAIN] - base_agg[MAIN], 4)
+    summary = {"paradigm": PARADIGM, "model": MODEL_DIR, "adapter": ADAPTER_DIR, "main_metric": MAIN,
+               "base": {"agg": base_agg, "per": base_per}, "lora": {"agg": lora_agg, "per": lora_per},
+               "delta_main": delta, "n_records": len(base_per)}
+    with open(OUT_JSON, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+    # 逐条打印（重复退化/塌缩会直接暴露在样本级，均值会掩盖，pitfalls #33）
+    for i, (b, l) in enumerate(zip(base_per, lora_per)):
+        bm = b.get(MAIN if MAIN in b else ("rouge_l" if PARADIGM == "vlm" else "neg_mse"))
+        lm = l.get(MAIN if MAIN in l else ("rouge_l" if PARADIGM == "vlm" else "neg_mse"))
+        print(f"  [{i+1}] base={bm} lora={lm}", flush=True)
+    print(f"[save] {OUT_JSON}\n=== 主指标 {MAIN}: base={base_agg[MAIN]} lora={lora_agg[MAIN]} Δ={delta:+.4f}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

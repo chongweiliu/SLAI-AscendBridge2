@@ -1,0 +1,364 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""lora_train_vision_ts.py — 台账第5大类 5 范式 LoRA 训练器（视觉与时序，2026-09-18）
+
+  PARADIGM=img_cls     dinov2-base + tiny-imagenet：冻结骨干(+LoRA) + 新 200 类线性头，CE
+  PARADIGM=det         rtdetr_r50vd + cppe-5：5 类头重初始化(ignore_mismatched)，内置 DETR loss
+                       （新头 class_embed/enc_score_head/denoising_class_embed 全程可训）
+  PARADIGM=layout_ner  layoutlmv3-base + funsd：TokenClassification 新 classifier 头，
+                       tokenizer 直接吃 words+boxes+word_labels（自动首子词对齐）
+  PARADIGM=depth       Depth-Anything-V2-Small + nyu：预测视差 vs GT 深度(米)→1/d，
+                       闭式 scale+shift 最小二乘对齐后 MSE（仿射不变视差空间）
+  PARADIGM=forecast    timesfm-2.0-500m + chronos：context 512 → horizon 128，
+                       per-series |mean| 归一化后走模型内置 future_values MSE
+
+  LORA_DISABLE=1 → 基线模式：只训新头（head-only linear probe，与 LoRA run 同 seed 同头初始化，
+                   用于 base vs LoRA 公平对比）；depth/forecast 无新头，不适用。
+  FP32=1           → 关闭 bf16 autocast（det 的匈牙利匹配数值稳定性用）
+  HEAD_SEED=42     → 新头初始化种子（base/LoRA 两 run 必须一致才可比）
+
+环境变量: PARADIGM MODEL_DIR DATA_FILE OUT_DIR NUM_STEPS LR LORA_R LORA_ALPHA WARMUP
+          BATCH(默认 img_cls16/det2/layout_ner8/depth4/forecast8) SEED NPU_DEV [LORA_EXTRA_TARGETS]
+
+模板用法（复制到 <ws>/scripts/ 后按 env 驱动运行；配套切分/sweep/val_loss 实战副本见 lora-ws/.cat5/）。
+适配新模型的改动点：img_cls=N_CLASSES/HEAD 维度；det=类别表+id2label+标注键；layout_ner=N_CLASSES；
+depth=GT 格式(.npy 米制)；forecast=CTX_LEN/horizon。详见 references/vision-ts-paradigms.md。
+2026-09-18 台账第5大类五模型实战验证（5/5 改善，含 head-only 基线协议与 peft 冻头/bf16 优化器修复）。
+"""
+import json
+import math
+import os
+import random
+import time
+
+os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+os.environ.setdefault("TASK_QUEUE_ENABLE", "1")
+os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+import torch_npu  # noqa: E402,F401
+import torch.nn.functional as F  # noqa: E402
+from torch_npu.optim import NpuFusedAdamW  # noqa: E402
+import transformers  # noqa: E402
+from peft import LoraConfig, get_peft_model  # noqa: E402
+
+PARADIGM = os.environ["PARADIGM"]
+MODEL_DIR = os.environ["MODEL_DIR"]
+WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.environ.get("DATA_FILE", os.path.join(WS, "outputs", "train.jsonl"))
+OUT_DIR = os.environ.get("OUT_DIR", os.path.join(WS, "outputs"))
+NUM_STEPS = int(os.environ.get("NUM_STEPS", "200"))
+LR = float(os.environ.get("LR", "1e-4"))
+WARMUP = int(os.environ.get("WARMUP", "20"))
+LORA_R = int(os.environ.get("LORA_R", "16"))
+LORA_ALPHA = int(os.environ.get("LORA_ALPHA", "32"))
+LORA_DROPOUT = float(os.environ.get("LORA_DROPOUT", "0.05"))
+DEF_BATCH = {"img_cls": 16, "det": 2, "layout_ner": 8, "depth": 4, "forecast": 8}
+BATCH = int(os.environ.get("BATCH", str(DEF_BATCH[PARADIGM])))
+SEED = int(os.environ.get("SEED", "42"))
+HEAD_SEED = int(os.environ.get("HEAD_SEED", "42"))
+DEV = os.environ.get("NPU_DEV", "npu:0")
+LORA_DISABLE = os.environ.get("LORA_DISABLE", "0") == "1"
+FP32 = os.environ.get("FP32", "0") == "1"
+N_CLASSES = int(os.environ.get("N_CLASSES", {"img_cls": 200, "layout_ner": 7}.get(PARADIGM, "0")))
+CTX_LEN = int(os.environ.get("CTX_LEN", "512"))
+
+CANDIDATES = ["q_proj", "k_proj", "v_proj", "o_proj", "out_proj", "fc1", "fc2",
+              "query", "key", "value", "dense", "output_proj", "value_proj",
+              "q_lin", "k_lin", "v_lin", "out_lin", "lin1", "lin2", "qkv", "proj"]
+EXTRA = [t for t in os.environ.get("LORA_EXTRA_TARGETS", "").split(",") if t]
+CANDIDATES += EXTRA
+# det 的 '0'-'5'(class_embed)/enc_score_head/sampling_offsets/attention_weights 不进 LoRA
+DET_HEAD_PATTERNS = ("class_embed", "enc_score_head", "denoising_class_embed")
+
+
+def lr_at(step, num_steps, warmup, lr):
+    if step < warmup:
+        return lr * (step + 1) / warmup
+    prog = (step - warmup) / max(1, num_steps - warmup)
+    return lr * 0.5 * (1 + math.cos(math.pi * min(1.0, prog)))
+
+
+def load_model():
+    kw = dict(dtype=torch.float32 if FP32 else torch.bfloat16, attn_implementation="eager")
+    if PARADIGM == "img_cls":
+        from transformers import Dinov2Model
+        return Dinov2Model.from_pretrained(MODEL_DIR, **kw), None
+    if PARADIGM == "det":
+        from transformers import RTDetrConfig, RTDetrForObjectDetection
+        cfg = RTDetrConfig.from_pretrained(MODEL_DIR, num_labels=5,
+                                           id2label={0: "mask", 1: "person", 2: "safe-cone",
+                                                     3: "face-shield", 4: "gloves"})
+        m = RTDetrForObjectDetection.from_pretrained(MODEL_DIR, config=cfg,
+                                                     ignore_mismatched_sizes=True, **kw)
+        return m, None
+    if PARADIGM == "layout_ner":
+        from transformers import LayoutLMv3ForTokenClassification
+        m = LayoutLMv3ForTokenClassification.from_pretrained(
+            MODEL_DIR, num_labels=N_CLASSES, ignore_mismatched_sizes=True, **kw)
+        m.classifier.float()  # 头保 fp32：NpuFusedAdamW 拒收纯 bf16 参数组（head-only 实测崩）
+        return m, None
+    if PARADIGM == "depth":
+        from transformers import DepthAnythingForDepthEstimation
+        return DepthAnythingForDepthEstimation.from_pretrained(MODEL_DIR, **kw), None
+    if PARADIGM == "forecast":
+        from transformers import TimesFmModelForPrediction
+        return TimesFmModelForPrediction.from_pretrained(MODEL_DIR, dtype=torch.float32), None
+    raise ValueError(PARADIGM)
+
+
+def build_head(hidden):
+    """img_cls 外置线性头：HEAD_SEED 决定初始化（base/LoRA 两 run 一致才可比）。"""
+    g = torch.Generator().manual_seed(HEAD_SEED)
+    head = torch.nn.Linear(hidden, N_CLASSES)
+    with torch.no_grad():
+        head.weight.copy_(torch.randn(head.weight.shape, generator=g) * (hidden ** -0.5))
+        head.bias.zero_()
+    return head
+
+
+def main():
+    t0 = time.time()
+    torch.manual_seed(SEED); random.seed(SEED)
+    os.makedirs(OUT_DIR, exist_ok=True)
+    ad_dir = os.path.join(OUT_DIR, "lora_adapter")
+    os.makedirs(ad_dir, exist_ok=True)
+    torch.npu.set_device(DEV)
+    print(f"[env] paradigm={PARADIGM} dev={DEV} steps={NUM_STEPS} lr={LR} r={LORA_R} "
+          f"lora_disable={LORA_DISABLE} fp32={FP32}", flush=True)
+
+    model, _ = load_model()
+    model = model.to(DEV)
+    if hasattr(model, "config") and hasattr(model.config, "use_cache"):
+        model.config.use_cache = False
+    print(f"[model] loaded {time.time()-t0:.1f}s params={sum(p.numel() for p in model.parameters())/1e6:.1f}M", flush=True)
+
+    # ---- 头与 LoRA ----
+    head = None
+    head_params, lora_named = [], []
+    if PARADIGM == "img_cls":
+        hidden = model.config.hidden_size
+        head = build_head(hidden).to(DEV)
+        head_params = list(head.parameters())
+    if PARADIGM == "det":
+        for n, p in model.named_parameters():
+            if any(pat in n for pat in DET_HEAD_PATTERNS):
+                p.requires_grad = True
+                head_params.append(p)
+            else:
+                p.requires_grad = False
+    if PARADIGM == "layout_ner":
+        for n, p in model.named_parameters():
+            if n.startswith("classifier"):
+                p.requires_grad = True
+                head_params.append(p)
+            else:
+                p.requires_grad = False
+
+    if LORA_DISABLE:
+        assert head_params, "LORA_DISABLE=1 仅适用于有新头的范式(img_cls/det/layout_ner)"
+        head_ids = {id(p) for p in head_params}
+        for p in model.parameters():
+            if id(p) not in head_ids:
+                p.requires_grad = False
+        print("[lora] DISABLED — head-only 基线模式", flush=True)
+    else:
+        linear_names = {n.split(".")[-1] for n, m in model.named_modules() if type(m).__name__ == "Linear"}
+        targets = sorted(set(CANDIDATES) & linear_names)
+        print(f"[lora] linear 末名: {sorted(linear_names)}", flush=True)
+        print(f"[lora] target_modules={targets}", flush=True)
+        assert targets, "未发现 LoRA 目标模块"
+        model = get_peft_model(model, LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA,
+                                                 lora_dropout=LORA_DROPOUT,
+                                                 target_modules=targets, bias="none"))
+        model.print_trainable_parameters()
+    # peft 会冻结所有非 LoRA 参数——模型内新头必须重新放开；trainable 按 id 去重（head-only 模式曾重复）
+    for p in head_params:
+        p.requires_grad = True
+    _seen = set()
+    trainable = []
+    for p in [q for q in model.parameters() if q.requires_grad] + head_params:
+        if id(p) not in _seen:
+            _seen.add(id(p))
+            trainable.append(p)
+    model.train()
+    if head is not None:
+        head.train()
+
+    # ---- 处理器 ----
+    proc = None
+    if PARADIGM == "img_cls":
+        from transformers import AutoImageProcessor
+        proc = AutoImageProcessor.from_pretrained(MODEL_DIR)
+    elif PARADIGM == "det":
+        from transformers import RTDetrImageProcessor
+        proc = RTDetrImageProcessor.from_pretrained(MODEL_DIR)
+    elif PARADIGM == "layout_ner":
+        from transformers import AutoTokenizer
+        proc = AutoTokenizer.from_pretrained(MODEL_DIR)
+    elif PARADIGM == "depth":
+        from transformers import AutoImageProcessor
+        proc = AutoImageProcessor.from_pretrained(MODEL_DIR)
+
+    # ---- 数据 ----
+    recs = [json.loads(l) for l in open(DATA, encoding="utf-8") if l.strip()]
+    print(f"[data] {len(recs)} records from {DATA}", flush=True)
+    # 精度门①: 范式自检
+    if PARADIGM == "img_cls":
+        labs = [r["label"] for r in recs[:300]]
+        print(f"[check] img_cls probe前300 标签 distinct={len(set(labs))}", flush=True)
+        assert 0 <= min(r["label"] for r in recs) and max(r["label"] for r in recs) < N_CLASSES
+    if PARADIGM == "det":
+        nb = [len(r["objects"]["bbox"]) for r in recs]
+        assert min(nb) >= 0 and max(c for r in recs[:1] for c in r["objects"]["category"]) < 5
+        print(f"[check] det 均框数={np.mean(nb):.1f}", flush=True)
+    if PARADIGM == "layout_ner":
+        tags = {t for r in recs[:50] for t in r["ner_tags"]}
+        assert tags <= set(range(N_CLASSES)), f"标签越界 {tags}"
+        print(f"[check] layout_ner 标签集={sorted(tags)}", flush=True)
+    if PARADIGM == "depth":
+        d0 = np.load(recs[0]["depth"])
+        assert d0.dtype == np.float32 and float((d0 > 1e-3).mean()) > 0.5
+        print(f"[check] depth 首条 {d0.shape} 有效率={float((d0>1e-3).mean()):.3f}", flush=True)
+    if PARADIGM == "forecast":
+        c0 = np.array(recs[0]["context"]); h0 = np.array(recs[0]["horizon"])
+        assert len(c0) == CTX_LEN and len(h0) == 128 and np.isfinite(c0).all()
+        print(f"[check] forecast ctx={len(c0)} hor={len(h0)} scale0={np.abs(c0).mean():.3f}", flush=True)
+
+    from PIL import Image
+    DT = torch.float32 if FP32 else torch.bfloat16
+
+    def img_batch(paths, size=None):
+        imgs = [Image.open(p).convert("RGB") for p in paths]
+        return proc(images=imgs, return_tensors="pt")["pixel_values"].to(DEV)
+
+    # ---- 范式 loss ----
+    def forward_loss(batch_recs):
+        ctx = torch.autocast("npu", dtype=torch.bfloat16) if not FP32 else _nullctx()
+        with ctx:
+            if PARADIGM == "img_cls":
+                pv = img_batch([r["image"] for r in batch_recs])
+                out = model(pixel_values=pv)
+                cls = out.last_hidden_state[:, 0].float()
+                logits = head(cls)
+                lab = torch.tensor([r["label"] for r in batch_recs], device=DEV)
+                return F.cross_entropy(logits, lab)
+            if PARADIGM == "det":
+                imgs = [Image.open(r["image"]).convert("RGB") for r in batch_recs]
+                anns = []
+                for bi, r in enumerate(batch_recs):
+                    o = r["objects"]
+                    anns.append({"image_id": bi, "annotations": [
+                        {"image_id": bi, "bbox": b, "category_id": c,
+                         "area": b[2] * b[3], "iscrowd": 0}
+                        for b, c in zip(o["bbox"], o["category"])]})
+                enc = proc(images=imgs, annotations=anns, return_tensors="pt")
+                out = model(pixel_values=enc["pixel_values"].to(DEV),
+                            labels=[{k: (v.to(DEV) if torch.is_tensor(v) else v) for k, v in lb.items()}
+                                    for lb in enc["labels"]])
+                return out.loss
+            if PARADIGM == "layout_ner":
+                enc = proc(text=[r["tokens"] for r in batch_recs],
+                           boxes=[r["bboxes"] for r in batch_recs],
+                           word_labels=[r["ner_tags"] for r in batch_recs],
+                           padding=True, truncation=True, max_length=512, return_tensors="pt")
+                out = model(input_ids=enc["input_ids"].to(DEV), bbox=enc["bbox"].to(DEV),
+                            attention_mask=enc["attention_mask"].to(DEV), labels=enc["labels"].to(DEV))
+                return out.loss
+            if PARADIGM == "depth":
+                pv = img_batch([r["image"] for r in batch_recs])
+                out = model(pixel_values=pv)
+                pred = out.predicted_depth  # [B,Hp,Wp] 相对视差
+                tot = 0.0
+                for bi, r in enumerate(batch_recs):
+                    gt = torch.from_numpy(np.load(r["depth"])).to(DEV)          # [H,W] 米
+                    valid = gt > 1e-3
+                    p = F.interpolate(pred[bi][None, None].float(), size=gt.shape,
+                                      mode="bilinear", align_corners=False)[0, 0]
+                    g = 1.0 / gt  # 视差空间
+                    pv_, gv_ = p[valid], g[valid]
+                    pm, gm = pv_.mean(), gv_.mean()
+                    cov = ((pv_ - pm) * (gv_ - gm)).mean()
+                    var = ((pv_ - pm) ** 2).mean() + 1e-8
+                    s = cov / var
+                    t = gm - s * pm
+                    tot = tot + ((s * pv_ + t - gv_) ** 2).mean()
+                return tot / len(batch_recs)
+            if PARADIGM == "forecast":
+                ctxs, futs = [], []
+                for r in batch_recs:
+                    c = torch.tensor(r["context"], dtype=torch.float32)
+                    h = torch.tensor(r["horizon"], dtype=torch.float32)
+                    sc = c.abs().mean().clamp(min=1e-6)
+                    ctxs.append(c / sc); futs.append(h / sc)
+                out = model(past_values=[c.to(DEV) for c in ctxs],
+                            freq=torch.zeros(len(ctxs), dtype=torch.long, device=DEV),
+                            future_values=torch.stack(futs).to(DEV))
+                return out.loss
+        raise ValueError(PARADIGM)
+
+    opt = NpuFusedAdamW(trainable, lr=LR, betas=(0.9, 0.95), weight_decay=0.01, eps=1e-8)
+    rng = random.Random(SEED)
+    n = len(recs)
+    opt.zero_grad(set_to_none=False)
+    print(f"[train] {NUM_STEPS} steps batch={BATCH} lr={LR} r={LORA_R} trainable={sum(p.numel() for p in trainable)/1e6:.2f}M", flush=True)
+    t_tr = time.time()
+    log = []
+    for step in range(NUM_STEPS):
+        batch = [recs[rng.randint(0, n - 1)] for _ in range(BATCH)]
+        loss = forward_loss(batch)
+        loss.backward()
+        cur = lr_at(step, NUM_STEPS, WARMUP, LR)
+        for g in opt.param_groups:
+            g["lr"] = cur
+        torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+        opt.step()
+        opt.zero_grad(set_to_none=False)
+        rec = {"step": step + 1, "loss": round(float(loss.item()), 6), "lr": round(cur, 8),
+               "elapsed_s": round(time.time() - t_tr, 2)}
+        log.append(rec)
+        with open(os.path.join(OUT_DIR, "loss.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        if (step + 1) % 10 == 0 or step == 0:
+            print(f"[train] step {step+1}/{NUM_STEPS} loss={rec['loss']:.4f} elapsed={rec['elapsed_s']:.1f}s", flush=True)
+
+    total = time.time() - t_tr
+    steady = (log[-1]["elapsed_s"] - log[-2]["elapsed_s"]) if len(log) >= 2 else total / NUM_STEPS
+    print(f"[probe] s_per_step={steady:.2f} mem_peak_gb={torch.npu.max_memory_allocated()/2**30:.2f} last_loss={log[-1]['loss']}", flush=True)
+    if not LORA_DISABLE:
+        model.save_pretrained(ad_dir)
+    # 头保存（img_cls 外置头 / layout_ner classifier / det 检测头）→ validate 加载
+    if head is not None:
+        torch.save(head.state_dict(), os.path.join(OUT_DIR, "head.pt"))
+    if PARADIGM in ("det", "layout_ner"):
+        base_m = model.base_model.model if not LORA_DISABLE and hasattr(model, "base_model") else model
+        hs = {}
+        for n_, p_ in base_m.named_parameters():
+            if PARADIGM == "det" and any(pat in n_ for pat in DET_HEAD_PATTERNS):
+                hs[n_] = p_.detach().cpu()
+            if PARADIGM == "layout_ner" and n_.startswith("classifier"):
+                hs[n_] = p_.detach().cpu()
+        torch.save(hs, os.path.join(OUT_DIR, "head.pt"))
+        print(f"[save] head tensors={len(hs)}", flush=True)
+    with open(os.path.join(OUT_DIR, "loss_raw.json"), "w", encoding="utf-8") as f:
+        json.dump({"steps": log, "num_steps": NUM_STEPS, "total_train_s": round(total, 2),
+                   "config": {"paradigm": PARADIGM, "model": MODEL_DIR, "lora_r": LORA_R,
+                              "lora_alpha": LORA_ALPHA, "lr": LR, "batch": BATCH, "warmup": WARMUP,
+                              "lora_disable": LORA_DISABLE, "fp32": FP32, "head_seed": HEAD_SEED,
+                              "n_records": n}}, f, indent=2, ensure_ascii=False)
+    print(f"[save] done {time.time()-t0:.1f}s -> {OUT_DIR}", flush=True)
+
+
+class _nullctx:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *a):
+        return False
+
+
+if __name__ == "__main__":
+    main()

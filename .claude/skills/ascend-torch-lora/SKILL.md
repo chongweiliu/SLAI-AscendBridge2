@@ -1,6 +1,6 @@
 ---
 name: ascend-torch-lora
-description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTorch + torch_npu + peft 对任意 HuggingFace CausalLM（含多模态模型的文本头，如 Qwen3/3.5、Qwen2、Llama、GLM、Mistral 等）做 LoRA 监督微调（SFT / instruction tuning）的端到端技能。用户只需给出【模型权重路径】+【对话/指令数据集路径】即可启动：自动探测环境/依赖、数据自动转 chat 格式并对 assistant 轮做 loss 掩掩、自动发现 LoRA 目标模块、**自动选路（route_select：按模型大小+空闲卡自动决策单卡/FSDP2 数据并行/device_map 流水线，超参按模型尺寸/步数自动择优，精度优先性能自动最优）**、bf16 autocast + grad-ckpt + cosine 调度、**MoE 模型训练提速（MOE_IMPL=dense/gmm 数学等价补丁，短序列 -34% 步时 / 长序列 3-8×）**、报"昇腾不支持某算子"前的三步算子发现法（本机 CANN 接口 → gitcode.com/cann → 文档案例）、默认产出 loss 曲线图+公网可访问直链（catbox.moe/0x0.st/uguu.se 顺序尝试，外网全不通则降级表格）、概要总结、base vs LoRA 验证对比（ROUGE-L/字符重叠/生成长度）。只要用户要在昇腾上"LoRA 微调/SFT/指令微调/对话微调"某模型（含 MoE 模型如 Qwen3.6-A3B/DeepSeek 系），或提到 NPU + LoRA + 对话数据 + loss 曲线 + 验证，或 MoE 训练慢要提速，就应使用本技能——即使用户没明说"skill"。本技能基于 PyTorch + torch_npu + peft（不是 CUDA/deepspeed/unsloth）。非 CausalLM 模型（BERT 类 encoder/双塔嵌入/重排器/seq2seq 翻译/token 分类/MLM 掩码重建/MAE 视觉）的七范式 LoRA 亦支持（embed/seq2seq/rerank/cls/ner/mlm/mim，lora_train_task.py.tmpl，见 non-causal-lm-paradigms.md）。与 [[ascend-torch-cpt]]（继续预训练，喂原始语料）区分：本技能是 SFT，喂的是 chat/指令对话数据并只对 assistant 回复算 loss。
+description: 在华为昇腾 NPU（Ascend 910/910B/910C/950 等）上，用 PyTorch + torch_npu + peft 对任意 HuggingFace CausalLM（含多模态模型的文本头，如 Qwen3/3.5、Qwen2、Llama、GLM、Mistral 等）做 LoRA 监督微调（SFT / instruction tuning）的端到端技能。用户只需给出【模型权重路径】+【对话/指令数据集路径】即可启动：自动探测环境/依赖、数据自动转 chat 格式并对 assistant 轮做 loss 掩掩、自动发现 LoRA 目标模块、**自动选路（route_select：按模型大小+空闲卡自动决策单卡/FSDP2 数据并行/device_map 流水线，超参按模型尺寸/步数自动择优，精度优先性能自动最优）**、bf16 autocast + grad-ckpt + cosine 调度、**MoE 模型训练提速（MOE_IMPL=dense/gmm 数学等价补丁，短序列 -34% 步时 / 长序列 3-8×）**、报"昇腾不支持某算子"前的三步算子发现法（本机 CANN 接口 → gitcode.com/cann → 文档案例）、默认产出 loss 曲线图+公网可访问直链（catbox.moe/0x0.st/uguu.se 顺序尝试，外网全不通则降级表格）、概要总结、base vs LoRA 验证对比（ROUGE-L/字符重叠/生成长度）。只要用户要在昇腾上"LoRA 微调/SFT/指令微调/对话微调"某模型（含 MoE 模型如 Qwen3.6-A3B/DeepSeek 系），或提到 NPU + LoRA + 对话数据 + loss 曲线 + 验证，或 MoE 训练慢要提速，就应使用本技能——即使用户没明说"skill"。本技能基于 PyTorch + torch_npu + peft（不是 CUDA/deepspeed/unsloth）。非 CausalLM 模型（BERT 类 encoder/双塔嵌入/重排器/seq2seq 翻译/token 分类/MLM 掩码重建/MAE 视觉）的七范式 LoRA 亦支持（embed/seq2seq/rerank/cls/ner/mlm/mim，lora_train_task.py.tmpl，见 non-causal-lm-paradigms.md）。多模态与生成式模型（VLM 图像描述/视觉指令 SFT、文生图扩散模型 UNet LoRA、视频生成 DiT LoRA）的三范式亦支持（vlm/diffusion/video，lora_train_multimodal.py.tmpl，见 multimodal-paradigms.md）。视觉时序与语音音频模型（图像分类/目标检测 DETR/文档版面 NER/单目深度估计/时序预测/ASR 语音识别/音频分类/TTS 语音合成）的八范式亦支持（img_cls/det/layout_ner/depth/forecast/asr/audio_cls/tts，lora_train_vision_ts.py.tmpl 与 lora_train_speech.py.tmpl，见 vision-ts-paradigms.md 与 speech-audio-paradigms.md，含 head-only 基线协议）。与 [[ascend-torch-cpt]]（继续预训练，喂原始语料）区分：本技能是 SFT，喂的是 chat/指令对话数据并只对 assistant 回复算 loss。
 ---
 
 # Ascend NPU LoRA 监督微调（SFT）技能
@@ -112,6 +112,8 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 10. **改动训练数值路径后必须做等价性验证**（三层）：微观 dx/dw 对照 → 同种子 step1 loss 近逐位 → 多步轨迹在噪声带内重合。注意 LoRA A 随机初始化导致 step2+ 天然有 ~0.5-2% 重跑偏差，勿误判（pitfalls #25）。
 11. **「前缀→续写」类任务化切分必须无信息间隙。** 切点受 prefix_cap 约束 + 前缀不做事后截断（所见即所续），切分器内置 `prefix ≤ cap×1.15` 自检（pitfalls #26：间隙曾致 codeparrot 83.7% 样本不可学、模型跳段生成、ROUGE -0.21，修复后转正）。
 12. **验证与批处理防三坑**：预切分验证文件全量使用（#27）；多工作区顺序批处理用子 shell 隔离 env（#28）；对照实验 OUT_JSON 指独立文件（#29）。生成验证口径：base 模板/eos 不一致用 VAL_EOS_ID（#31）、思考块剥离（#32）、无模板模型一致注入（#30）；CE 择优与生成质量可能背离，开放式任务双证据（#33）。
+13. **多模态范式四纪律**（vlm/diffusion/video，见 references/multimodal-paradigms.md）：① 切分/提取产物一律**绝对路径**，且 try/except 批处理循环结尾 assert 产出数>0（#41：生成式范式会静默 0 样本）；② 就地改文件必须**临时文件+os.replace 原子替换**（#42：截断事故清空过 train.jsonl）；③ 生成式验证必须**固定随机性**（per-sample seed 的噪声/时间步，base/LoRA 严格可比，同 mlm/mim 固定掩码原则）；④ 重编码成本高的模态（VAE latents/文本嵌入/mel 谱）用**预编码缓存**（key=数据文件哈希、路径不随 OUT_DIR 变），sweep 各组合复用。评测口径有限制时（如 Wan 零文本嵌入=「无条件去噪」非完整 T2V、tts 无 vocoder=mel 域非波形）报告必须如实记录，不得夸大结论。
+14. **新头范式五纪律**（img_cls/det/layout_ner/audio_cls，见 references/vision-ts-paradigms.md）：① 任务头新初始化时 base 侧=**head-only 基线**（冻结骨干只训头，与 LoRA run 同 HEAD_SEED/步数/lr），对比回答"LoRA 是否优于线性探针"；② `get_peft_model` 会冻结模型内新头——包装后**重新 requires_grad=True + trainable 按 id 去重**，且模型内头 **`.float()`**（NpuFusedAdamW 拒纯 bf16 参数组）（#45）；③ 头重初始化**只动 Linear 绝不动 LayerNorm**（清零 layernorm 会特征湮灭→CE 恒 ln(类别数)）（#46）；④ LoRA 候选名防**撞任务头**（'dense' vs classifier.dense→head.pt 键名 base_layer.*→strict=False 静默不加载假退化），strict=False 加载后必须校验命中数>0（#47）；⑤ 进 sweep 前先跑**单批过拟合测试**（1 批×20-30 步@lr1e-3 loss 应显著下降）；sweep 判据被实现 bug 污染时确认复验或作废重跑（#50）。
 
 ## 通用性矩阵（适用范围）
 
@@ -127,6 +129,9 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 | chat 模板：ChatML / Llama-3 / Llama-2 / Mistral / DeepSeek | ✅ | 定界符表见 label-masking.md，可 env 覆盖 |
 | QLoRA / 量化基座 | ❌ 不支持 | 后续可扩展（NPU 量化路线另议） |
 | 非 CausalLM 七范式（embed 双塔嵌入 / seq2seq 翻译 / rerank 重排 / cls 分类 / ner 实体识别 / mlm 掩码重建 / mim MAE 视觉） | ✅ 实测（2026-09-10/11 两批九模型：bge-m3/nllb-200/bge-reranker/distilbert/bert-NER/ClinicalBERT/ChemBERTa/esm2/Prithvi） | `scripts/lora_train_task.py.tmpl` 按 `PARADIGM` 切换，LoRA 目标跨架构自动发现（含 timm Block 的 qkv/proj）；详见 references/non-causal-lm-paradigms.md（含两类「无提升」的正确结论：数据量不足过拟合 / 完美饱和）；其余非 CausalLM 任务仍超范围 |
+| 多模态三范式：vlm 视觉语言 SFT（Qwen2-VL/2.5-VL 系）/ diffusion 文生图（SDXL/UNet 系）/ video 视频生成（Wan DiT 系） | ✅ 实测（2026-09-11 台账第 4 大类三模型，3/3 改善：Qwen2.5-VL-3B ROUGE-L 0.531→0.593、SDXL 固定噪声 MSE -47.6%、Wan2.1 MSE -55.4%；2026-09-18 以 skill 模板全量重跑复现，SDXL/Wan 逐位一致） | `scripts/lora_train_multimodal.py.tmpl` + `scripts/validate_multimodal.py.tmpl` 按 `PARADIGM` 切换；预编码缓存（sweep 复用）+ peft 后缀匹配 attention + 固定噪声验证；详见 references/multimodal-paradigms.md（含 Wan 零文本嵌入口径限制、pixel_values concat 等 #41-#44） |
+| 视觉时序五范式：img_cls 图像分类（ViT/DINO 系）/ det 目标检测（RT-DETR 系）/ layout_ner 版面 token 分类（LayoutLMv3 系）/ depth 单目深度（Depth-Anything 系）/ forecast 时序预测（TimesFm 系） | ✅ 实测（2026-09-18 台账第 5 大类五模型，5/5 改善：layoutlmv3 F1 0.52→0.85、DAv2 AbsRel -44%、dinov2 CE -40%、rtdetr 预算内改善、timesfm 近同源小幅） | `scripts/lora_train_vision_ts.py.tmpl` + `scripts/validate_vision_ts.py.tmpl` 按 `PARADIGM` 切换；**head-only 基线协议**（新头范式 base 侧=冻骨干只训头）+ 对齐式回归 loss + MASE；详见 references/vision-ts-paradigms.md（含 peft 冻头/bf16 优化器/头重初始化三坑 #45-#47） |
+| 语音音频三范式：asr 语音识别（Whisper 系）/ audio_cls 音频分类（AST 系）/ tts 语音合成（SpeechT5 系） | ✅ 实测（2026-09-18 台账第 6 大类三模型，3/3 改善：whisper CER -51%、AST top1 7/10→10/10 CE -91.5%、speecht5 mel MSE -37%） | `scripts/lora_train_speech.py.tmpl` + `scripts/validate_speech.py.tmpl` 按 `PARADIGM` 切换；mel 预编码缓存 + batch1×grad_accum（变长谱）+ CER 双侧规范化；详见 references/speech-audio-paradigms.md（含 transformers 5.x 语音栈五坑 #48-#49） |
 
 ## 何时用本技能 vs 其它
 
@@ -141,11 +146,17 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 - `scripts/corpus_to_sft.py.tmpl` — 原始语料（维基/文章/代码/偏好对）任务化切分器：4 种范式 + 无间隙自检 + 30%/held-out 协议（2026-09-10 四数据集实战）
 - `scripts/lora_train.py.tmpl` — LoRA SFT 训练（自动发现目标、NpuFusedAdamW、bf16、loss 记录、无模板模型自动注入 chat template）
 - `scripts/lora_train_task.py.tmpl` — 非 CausalLM 七范式 LoRA 训练器（embed/seq2seq/rerank/cls/ner/mlm/mim，PARADIGM 环境变量切换；两批九模型实战验证）
+- `scripts/lora_train_multimodal.py.tmpl` — 多模态三范式 LoRA 训练器（vlm/diffusion/video，PARADIGM 环境变量切换；预编码缓存 + shape-remap 加载 + 文件头适配点注释；台账第 4 大类三模型实战验证）
+- `scripts/validate_multimodal.py.tmpl` — 多模态三范式 base vs LoRA 验证（vlm 贪心生成 vs 多参考取 max ROUGE-L / diffusion、video 固定噪声 MSE；OUT_JSON 可覆盖）
+- `scripts/lora_train_vision_ts.py.tmpl` — 视觉时序五范式 LoRA 训练器（img_cls/det/layout_ner/depth/forecast，PARADIGM 切换；LORA_DISABLE=1 head-only 基线模式 + FP32 开关 + HEAD_SEED；台账第 5 大类五模型实战验证）
+- `scripts/validate_vision_ts.py.tmpl` — 视觉时序五范式 base vs LoRA 验证（top1+CE / F1@IoU0.5 / 实体F1 / AbsRel+δ1+RMSE / MASE+MAE；BASE_RUN_DIR/LORA_RUN_DIR 双侧头加载）
+- `scripts/lora_train_speech.py.tmpl` — 语音音频三范式 LoRA 训练器（asr/audio_cls/tts，PARADIGM 切换；mel 预编码缓存 + batch1×GRAD_ACCUM + transformers 5.x 语音栈修复内置；台账第 6 大类三模型实战验证）
+- `scripts/validate_speech.py.tmpl` — 语音音频三范式 base vs LoRA 验证（CER+ROUGE-L / top1+CE / teacher-forced mel MSE）
 - `scripts/lora_train_fsdp.py.tmpl` — 大模型 FSDP2 数据并行训练（27B 实测 2.18×/样本；含 expandable_segments 禁用与 train() 两个关键修复；MoE 可选 dense/gmm 等价提速补丁 + batch>1 右填充）
 - `scripts/plot_loss.py.tmpl` — loss 曲线 + 公网上传
 - `scripts/validate.py.tmpl` — base vs LoRA teacher-forced 多轮验证（预切分文件全量用/思考块剥离/VAL_EOS_ID/OUT_JSON 可覆盖/无模板注入）
 - `scripts/run_env.sh.tmpl` — 环境变量与 CANN source
-- `references/pitfalls.md` — 踩坑全集（40 条，避免重复浪费时间）
+- `references/pitfalls.md` — 踩坑全集（51 条，避免重复浪费时间）
 - `references/moe-optimization.md` — MoE 训练提速双路线（dense/gmm 补丁代码、选型表、等价性验证协议、已试错清单）
 - `references/npu-op-discovery.md` — 三步算子发现法（本机 CANN 接口盘点 → gitcode.com/cann 搜索 → 文档案例落地；报"不支持"前的强制排查流程）
 - `references/label-masking.md` — loss 掩掩三种方法 + 自检
@@ -153,4 +164,7 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 - `references/eval-metrics.md` — ROUGE-L/字符重叠/长度 三指标意义与选择
 - `references/raw-corpus-to-sft.md` — 原始语料→SFT 任务化（4 范式表、30%/held-out 切分协议、验证注意）
 - `references/non-causal-lm-paradigms.md` — 非 CausalLM 七范式（embed/seq2seq/rerank/cls/ner/mlm/mim：数据格式、loss、LoRA 目标跨架构发现、验证指标、固定掩码协议、两类「无提升」的正确结论）
+- `references/multimodal-paradigms.md` — 多模态三范式（vlm/diffusion/video：数据格式、LoRA 目标两打法、预编码缓存、固定噪声验证、按图切分防泄漏、实测结果与口径限制如 Wan 零文本嵌入）
+- `references/vision-ts-paradigms.md` — 视觉时序五范式（img_cls/det/layout_ner/depth/forecast：head-only 基线协议、模型内新头×peft×融合优化器三件套、对齐式回归 loss、MASE、FP32 精度选择、det 预算内改善的诚实结论范式）
+- `references/speech-audio-paradigms.md` — 语音音频三范式（asr/audio_cls/tts：transformers 5.x 语音栈五坑、mel 预编码缓存、batch1×grad_accum、CER 双侧规范化、speaker 零向量与 mel 域口径）
 - `references/env-pyproject.md` — uv pyproject 模板（ascend extra）
