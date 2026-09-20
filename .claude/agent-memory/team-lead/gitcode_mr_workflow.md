@@ -126,3 +126,9 @@ unset GITCODE_TOKEN
 - 内容：pitfalls #26-#33（信息间隙/静默抽半/env泄漏/覆盖主结果/无模板注入/eos不一致/think剥离/CE-生成背离）+ 新增 raw-corpus-to-sft.md 与 corpus_to_sft.py.tmpl + validate.py.tmpl 5 处修复 + lora_train.py.tmpl 注入 + hyperparam sweep 协议与 4 模型实测。
 - **凭据坑（重要）**：`~/.git-credentials` 有 3 条（Chris7Ji/Jiyg/oauth2），`git credential fill` 与 `grep oauth2:` 取到的 token（身份 dubai712）**已无推送权（403 CH.00905403）**；当前有效推送凭据是 **Jiyg 条目（身份 gcw_WJCkAUuk）**，用法 `git push "https://gcw_WJCkAUuk:$(grep -oP '^https://Jiyg:\K[^@]*' ~/.git-credentials)@gitcode.com/SLAI/SLAI-AscendBridge2.git" HEAD:<分支>`；API PRIVATE-TOKEN 同用该 token。
 - 详见 [[lora-v1-cat1-batch]]。
+
+### !69 (2026-09-20, lora skill 多模态/视觉时序/语音音频 11 范式沉淀 + 批次记忆入库)
+- 分支 `feat/lora-skill-vision-speech`，commit `f570875`(+记忆补记)，MR `!69`。39 文件 +3197/-386。
+- 内容：ascend-torch-lora 三批范式沉淀（cat4 multimodal 9-18 未提交部分 + cat5 vision-ts + cat6 speech，6 模板 + 3 参考 + pitfalls #41-51 + SKILL.md/eval-metrics/hyperparam 追加）+ agent-memory 跨会话累积记忆入库（lora_v1~v6 等 22 文件）+ .gitignore 加 lora-ws/(41GB)。
+- 评审 10 项全过，含端到端复现实测（layoutlmv3 skill 模板 = 实战批次逐位一致）。
+- **跨会话 /root 清理三连**：uv python 解释器（[[venv-interpreter-loss-recovery]]）、git 全局身份（user.name/email 按本文件重设即恢复）、`~/.git-credentials`（丢失→需用户重新提供令牌，本次经对话提供**已视为泄露须轮换**）。开工前先查这三样。
