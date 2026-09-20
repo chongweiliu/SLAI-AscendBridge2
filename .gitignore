@@ -105,3 +105,6 @@ training-ws/*/
 training-ws/*/.venv/
 training-ws/*/__pycache__/
 !training-ws/.gitkeep
+
+# ascend-torch-lora 微调工作区（含 venv/adapter/图像音频提取物，41GB 级，不入库）
+lora-ws/

@@ -1,0 +1,261 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""validate_vision_ts.py.tmpl — 视觉与时序五范式 base vs LoRA held-out 最终验证
+
+  img_cls    : CE + top1 准确率
+  det        : DETR loss + F1@IoU0.5（score_thr=0.3，贪心匹配）
+  layout_ner : token CE + 实体级 F1（BIO span 精确匹配，同 cat2 ner 口径）
+  depth      : AbsRel + δ1(<1.25) + RMSE（闭式对齐后，深度空间）
+  forecast   : 归一化 MSE + 原始尺度 MAE + MASE（MAE / mean|Δcontext|）
+
+env: PARADIGM MODEL_DIR VAL_SRC OUT_JSON
+     BASE_RUN_DIR(head-only 基线 run 目录，新头范式必填) LORA_RUN_DIR(LoRA run 目录，含 lora_adapter/ head.pt)
+     depth/forecast 无新头: LORA_RUN_DIR 提供 adapter 即可，BASE_RUN_DIR 可省
+输出: OUT_JSON + 终端逐条表
+
+模板用法（复制到 <ws>/scripts/，与 lora_train_vision_ts.py 同目录；import 名已对应改）。
+BASE_RUN_DIR=head-only 基线 run 目录（新头范式 img_cls/det/layout_ner 必填）；
+LORA_RUN_DIR=LoRA run 目录（含 lora_adapter/ [+head.pt]）。2026-09-18 五模型实战验证。
+"""
+import json
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+os.environ.setdefault("TASK_QUEUE_ENABLE", "1")
+os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+import torch_npu  # noqa: E402,F401
+import torch.nn.functional as F  # noqa: E402
+
+import lora_train_vision_ts as T  # noqa: E402
+
+PARADIGM = os.environ["PARADIGM"]
+MODEL_DIR = os.environ["MODEL_DIR"]
+WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.environ.get("VAL_SRC", os.path.join(WS, "outputs", "val10.jsonl"))
+OUT_JSON = os.environ.get("OUT_JSON", os.path.join(WS, "outputs", "validation_results.json"))
+BASE_RUN_DIR = os.environ.get("BASE_RUN_DIR", "")
+LORA_RUN_DIR = os.environ.get("LORA_RUN_DIR", "")
+DEV = os.environ.get("NPU_DEV", "npu:0")
+BATCH = max(1, T.BATCH // 2)
+
+
+def build_side(run_dir, with_adapter):
+    model, _ = T.load_model()
+    model = model.to(DEV)
+    head = None
+    if PARADIGM == "img_cls":
+        head = T.build_head(model.config.hidden_size).to(DEV)
+        hp = os.path.join(run_dir, "head.pt")
+        if run_dir and os.path.exists(hp):
+            head.load_state_dict(torch.load(hp, map_location=DEV))
+        head.eval()
+    elif PARADIGM in ("det", "layout_ner"):
+        hp = os.path.join(run_dir, "head.pt")
+        if run_dir and os.path.exists(hp):
+            hs = torch.load(hp, map_location="cpu")
+            model.load_state_dict(hs, strict=False)
+    if with_adapter:
+        ad = os.path.join(run_dir, "lora_adapter")
+        assert os.path.isdir(ad), f"adapter 不存在: {ad}"
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(model, ad)
+    return model.eval(), head
+
+
+def iou_xyxy(a, b):
+    x1, y1 = max(a[0], b[0]), max(a[1], b[1])
+    x2, y2 = min(a[2], b[2]), min(a[3], b[3])
+    inter = max(0, x2 - x1) * max(0, y2 - y1)
+    ua = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / ua if ua > 0 else 0.0
+
+
+def det_f1(model, proc, rec):
+    """单图 F1@IoU0.5：贪心按分数匹配，score_thr=0.3。"""
+    from PIL import Image
+    img = Image.open(rec["image"]).convert("RGB")
+    enc = proc(images=img, return_tensors="pt")
+    with torch.no_grad(), T._nullctx():
+        out = model(pixel_values=enc["pixel_values"].to(DEV))
+    res = proc.post_process_object_detection(out, threshold=0.3,
+                                             target_sizes=[(rec["height"], rec["width"])])[0]
+    pred = sorted(zip(res["scores"].tolist(), res["labels"].tolist(), res["boxes"].tolist()),
+                  key=lambda x: -x[0])
+    gt = []
+    for (x, y, w, h), c in zip(rec["objects"]["bbox"], rec["objects"]["category"]):
+        gt.append((c, [x, y, x + w, y + h]))
+    used = [False] * len(gt)
+    tp = 0
+    for s, c, b in pred:
+        best, bi = 0.0, -1
+        for gi, (gc, gb) in enumerate(gt):
+            if used[gi] or gc != int(c):
+                continue
+            v = iou_xyxy(list(b), gb)
+            if v > best:
+                best, bi = v, gi
+        if bi >= 0 and best >= 0.5:
+            used[bi] = True; tp += 1
+    prec = tp / len(pred) if pred else (1.0 if not gt else 0.0)
+    rec_ = tp / len(gt) if gt else 1.0
+    f1 = 2 * prec * rec_ / (prec + rec_) if (prec + rec_) > 0 else 0.0
+    return {"n_pred": len(pred), "n_gt": len(gt), "tp": tp,
+            "precision": round(prec, 4), "recall": round(rec_, 4), "f1": round(f1, 4)}
+
+
+def bio_spans(tags, offset=0):
+    spans, cur = [], None
+    for i, t in enumerate(tags):
+        if t == 0:
+            if cur: spans.append(tuple(cur)); cur = None
+        elif t % 2 == 1:  # B-*
+            if cur: spans.append(tuple(cur))
+            cur = (t, i)
+        else:  # I-*
+            if cur and cur[0] == t - 1:
+                cur = (t, cur[1])
+            else:
+                if cur: spans.append(tuple(cur))
+                cur = (t, i)
+    if cur: spans.append(tuple(cur))
+    return set(spans)
+
+
+def evaluate(model, head, recs):
+    from PIL import Image
+    proc = None
+    if PARADIGM in ("img_cls", "depth"):
+        from transformers import AutoImageProcessor
+        proc = AutoImageProcessor.from_pretrained(MODEL_DIR)
+    elif PARADIGM == "det":
+        from transformers import RTDetrImageProcessor
+        proc = RTDetrImageProcessor.from_pretrained(MODEL_DIR)
+    elif PARADIGM == "layout_ner":
+        from transformers import AutoTokenizer
+        proc = AutoTokenizer.from_pretrained(MODEL_DIR)
+    per = []
+    FP32 = T.FP32 or PARADIGM in ("det", "forecast")
+    ctxmgr = (lambda: torch.autocast("npu", dtype=torch.bfloat16)) if not FP32 else (lambda: T._nullctx())
+    with torch.no_grad():
+        for i, r in enumerate(recs):
+            with ctxmgr():
+                if PARADIGM == "img_cls":
+                    pv = proc(images=Image.open(r["image"]).convert("RGB"), return_tensors="pt")["pixel_values"].to(DEV)
+                    out = model(pixel_values=pv)
+                    logits = head(out.last_hidden_state[:, 0].float())
+                    ce = float(F.cross_entropy(logits, torch.tensor([r["label"]], device=DEV)))
+                    p = int(logits.argmax(-1))
+                    per.append({"i": i, "label": r["label"], "pred": p, "hit": int(p == r["label"]), "ce": round(ce, 4)})
+                elif PARADIGM == "det":
+                    m = det_f1(model, proc, r)
+                    m["i"] = i
+                    per.append(m)
+                elif PARADIGM == "layout_ner":
+                    enc = proc(text=[r["tokens"]], boxes=[r["bboxes"]], word_labels=[r["ner_tags"]],
+                               padding=True, truncation=True, max_length=512, return_tensors="pt")
+                    out = model(input_ids=enc["input_ids"].to(DEV), bbox=enc["bbox"].to(DEV),
+                                attention_mask=enc["attention_mask"].to(DEV), labels=enc["labels"].to(DEV))
+                    logits = out.logits[0].argmax(-1).tolist()
+                    wids = enc.word_ids(0)
+                    pred_w = {}
+                    for ti, w in enumerate(wids):
+                        if w is not None and w not in pred_w:
+                            pred_w[w] = logits[ti]
+                    pred_tags = [pred_w.get(k, 0) for k in range(len(r["tokens"]))]
+                    gs, ps = bio_spans(r["ner_tags"]), bio_spans(pred_tags)
+                    tp = len(gs & ps)
+                    prec = tp / len(ps) if ps else (1.0 if not gs else 0.0)
+                    rec_ = tp / len(gs) if gs else 1.0
+                    f1 = 2 * prec * rec_ / (prec + rec_) if (prec + rec_) > 0 else 0.0
+                    per.append({"i": i, "n_ent_gt": len(gs), "tp": tp, "ce": round(float(out.loss), 4),
+                                "f1": round(f1, 4)})
+                elif PARADIGM == "depth":
+                    pv = proc(images=Image.open(r["image"]).convert("RGB"), return_tensors="pt")["pixel_values"].to(DEV)
+                    pred = model(pixel_values=pv).predicted_depth[0].float()
+                    gt = torch.from_numpy(np.load(r["depth"])).to(DEV)
+                    valid = gt > 1e-3
+                    p = F.interpolate(pred[None, None], size=gt.shape, mode="bilinear", align_corners=False)[0, 0]
+                    g_disp = 1.0 / gt
+                    pv_, gv_ = p[valid], g_disp[valid]
+                    pm, gm = pv_.mean(), gv_.mean()
+                    s = ((pv_ - pm) * (gv_ - gm)).mean() / (((pv_ - pm) ** 2).mean() + 1e-8)
+                    t_ = gm - s * pm
+                    d_hat = 1.0 / (s * pv_ + t_).clamp(min=1e-4)
+                    d = gt[valid]
+                    dh = d_hat[valid] if d_hat.shape == gt.shape else d_hat
+                    ratio = torch.maximum(dh / d, d / dh)
+                    per.append({"i": i,
+                                "absrel": round(float((dh - d).abs().div(d).mean()), 4),
+                                "delta1": round(float((ratio < 1.25).float().mean()), 4),
+                                "rmse": round(float(((dh - d) ** 2).mean().sqrt()), 4)})
+                else:  # forecast
+                    c = torch.tensor(r["context"], dtype=torch.float32)
+                    h = torch.tensor(r["horizon"], dtype=torch.float32)
+                    sc = float(c.abs().mean().clamp(min=1e-6))
+                    out = model(past_values=[(c / sc).to(DEV)],
+                                freq=torch.zeros(1, dtype=torch.long, device=DEV))
+                    fc = out.mean_predictions[0].float().cpu()[:128] if out.mean_predictions is not None else out.full_predictions[0, 0].float().cpu()[:128]
+                    pred_orig = fc * sc
+                    mse_n = float(((fc - h / sc) ** 2).mean())
+                    mae = float((pred_orig - h).abs().mean())
+                    mase_den = float(c.diff().abs().mean().clamp(min=1e-6))
+                    per.append({"i": i, "id": str(r.get("id", i))[:20], "mse_norm": round(mse_n, 6),
+                                "mae": round(mae, 4), "mase": round(mae / mase_den, 4)})
+    return per
+
+
+def agg(per):
+    if not per:
+        return {}
+    num = [k for k in per[0] if isinstance(per[0][k], (int, float))]
+    return {k: round(sum(p[k] for p in per) / len(per), 4) for k in num}
+
+
+def main():
+    torch.npu.set_device(DEV)
+    recs = [json.loads(l) for l in open(SRC, encoding="utf-8") if l.strip()]
+    print(f"[data] {len(recs)} val records", flush=True)
+    MAIN = {"img_cls": "hit", "det": "f1", "layout_ner": "f1", "depth": "delta1", "forecast": "mase"}[PARADIGM]
+    LOWER_BETTER = {"forecast": {"mase", "mae", "mse_norm"}, "depth": {"absrel", "rmse"},
+                    "img_cls": {"ce"}, "layout_ner": {"ce"}, "det": set()}[PARADIGM]
+
+    print("[eval] BASE 侧 ...", flush=True)
+    bm, bh = build_side(BASE_RUN_DIR, with_adapter=False)
+    base_per = evaluate(bm, bh, recs)
+    base_agg = agg(base_per)
+    print(f"[eval] BASE {base_agg}", flush=True)
+    del bm, bh
+    torch.npu.empty_cache()
+
+    print("[eval] LoRA 侧 ...", flush=True)
+    lm, lh = build_side(LORA_RUN_DIR, with_adapter=True)
+    lora_per = evaluate(lm, lh, recs)
+    lora_agg = agg(lora_per)
+    print(f"[eval] LORA {lora_agg}", flush=True)
+
+    delta = {k: round(lora_agg.get(k, 0) - base_agg.get(k, 0), 4) for k in lora_agg}
+    print("\n=== 逐条对比 ===", flush=True)
+    for b, l in zip(base_per, lora_per):
+        keys = [MAIN] + [k for k in l if k not in ("i", "id") and isinstance(l[k], (int, float))][:4]
+        bs = " ".join(f"{k}: {b.get(k)}→{l.get(k)}" for k in keys)
+        print(f"  [{b.get('i')}] {bs}", flush=True)
+    summary = {"paradigm": PARADIGM, "model": MODEL_DIR, "main_metric": MAIN,
+               "lower_better": sorted(LOWER_BETTER),
+               "base": {"agg": base_agg, "per": base_per}, "lora": {"agg": lora_agg, "per": lora_per},
+               "delta": delta, "n_records": len(recs)}
+    with open(OUT_JSON, "w", encoding="utf-8") as f:
+        json.dump(summary, f, indent=2, ensure_ascii=False)
+    d_main = delta.get(MAIN, 0)
+    better = (d_main < 0) if MAIN in LOWER_BETTER else (d_main > 0)
+    print(f"\n[save] {OUT_JSON}\n=== 主指标 {MAIN}: base={base_agg.get(MAIN)} lora={lora_agg.get(MAIN)} "
+          f"Δ={d_main:+.4f} {'✅改善' if better else ('⚠️持平/退化' if abs(d_main) < 1e-9 else '⚠️退化')}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

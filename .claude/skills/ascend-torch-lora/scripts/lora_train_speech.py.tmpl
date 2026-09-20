@@ -1,0 +1,340 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""lora_train_speech.py — 台账第6大类 3 范式 LoRA 训练器（语音与音频，2026-09-18）
+
+  PARADIGM=asr        whisper-large-v3-turbo + librispeech：log-mel(30s pad) → 转写 token CE
+                      LoRA 挂 encoder+decoder attention+FFN；特征逐 batch 现算(numpy 快)
+  PARADIGM=audio_cls  ast-finetuned-audioset + esc50：50 类 classifier 头重初始化，
+                      ASTFeatureExtractor(16kHz→1024×128 谱)；新头全程可训；支持 LORA_DISABLE=1 head-only 基线
+  PARADIGM=tts        speecht5_tts + ljspeech：文本 token → mel 谱重建（labels=完整谱，内部自动 shift）
+                      · 5.x 必须 config.use_guided_attention_loss=False（attention_mask=None 时崩，实测）
+                      · mel 预编码缓存（重采样 22.05k→16k + FE，sweep 复用）
+                      · BATCH=1 + GRAD_ACCUM=8（谱长可变，padding 会污染 loss → 单样本+累积）
+                      · speaker_embeddings=zeros(512)（归档无 xvector；单说话人 LJSpeech 惯例，口径记录）
+
+环境变量: PARADIGM MODEL_DIR DATA_FILE OUT_DIR NUM_STEPS LR LORA_R LORA_ALPHA WARMUP
+          BATCH(默认 asr4/audio_cls16/tts1) GRAD_ACCUM(默认 tts8/其余1) SEED NPU_DEV
+          [LORA_DISABLE LORA_EXTRA_TARGETS HEAD_SEED]
+
+模板用法（复制到 <ws>/scripts/ 后按 env 驱动运行；配套切分/sweep/val_loss 实战副本见 lora-ws/.cat6/）。
+适配新模型改动点：asr=语言/任务 prompt 与 mel pad 长度；audio_cls=N_CLASSES/特征提取器；
+tts=采样率/mel 参数/speaker 向量。详见 references/speech-audio-paradigms.md（含 transformers 5.x 语音栈五坑）。
+2026-09-18 台账第6大类三模型实战验证（3/3 改善）。
+"""
+import hashlib
+import json
+import math
+import os
+import random
+import time
+
+os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+os.environ.setdefault("TASK_QUEUE_ENABLE", "1")
+os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+import numpy as np  # noqa: E402
+import torch  # noqa: E402
+import torch_npu  # noqa: E402,F401
+import torch.nn.functional as F  # noqa: E402
+from torch_npu.optim import NpuFusedAdamW  # noqa: E402
+from peft import LoraConfig, get_peft_model  # noqa: E402
+
+PARADIGM = os.environ["PARADIGM"]
+MODEL_DIR = os.environ["MODEL_DIR"]
+WS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA = os.environ.get("DATA_FILE", os.path.join(WS, "outputs", "train.jsonl"))
+OUT_DIR = os.environ.get("OUT_DIR", os.path.join(WS, "outputs"))
+NUM_STEPS = int(os.environ.get("NUM_STEPS", "200"))
+LR = float(os.environ.get("LR", "1e-4"))
+WARMUP = int(os.environ.get("WARMUP", "20"))
+LORA_R = int(os.environ.get("LORA_R", "16"))
+LORA_ALPHA = int(os.environ.get("LORA_ALPHA", "32"))
+LORA_DROPOUT = float(os.environ.get("LORA_DROPOUT", "0.05"))
+DEF_BATCH = {"asr": 4, "audio_cls": 16, "tts": 1}
+BATCH = int(os.environ.get("BATCH", str(DEF_BATCH[PARADIGM])))
+GRAD_ACCUM = int(os.environ.get("GRAD_ACCUM", "8" if PARADIGM == "tts" else "1"))
+SEED = int(os.environ.get("SEED", "42"))
+HEAD_SEED = int(os.environ.get("HEAD_SEED", "42"))
+DEV = os.environ.get("NPU_DEV", "npu:0")
+LORA_DISABLE = os.environ.get("LORA_DISABLE", "0") == "1"
+N_CLASSES = int(os.environ.get("N_CLASSES", "50"))
+
+CANDIDATES = ["q_proj", "k_proj", "v_proj", "o_proj", "out_proj", "fc1", "fc2",
+              "query", "key", "value", "dense"]
+CANDIDATES += [t for t in os.environ.get("LORA_EXTRA_TARGETS", "").split(",") if t]
+HEAD_PATTERNS = ("classifier",)
+
+
+def lr_at(step, num_steps, warmup, lr):
+    if step < warmup:
+        return lr * (step + 1) / warmup
+    prog = (step - warmup) / max(1, num_steps - warmup)
+    return lr * 0.5 * (1 + math.cos(math.pi * min(1.0, prog)))
+
+
+def load_model():
+    kw = dict(dtype=torch.bfloat16, attn_implementation="eager")
+    if PARADIGM == "asr":
+        from transformers import WhisperForConditionalGeneration
+        return WhisperForConditionalGeneration.from_pretrained(MODEL_DIR, **kw)
+    if PARADIGM == "audio_cls":
+        from transformers import ASTForAudioClassification
+        m = ASTForAudioClassification.from_pretrained(
+            MODEL_DIR, num_labels=N_CLASSES, ignore_mismatched_sizes=True, **kw)
+        m.classifier.float()  # 头保 fp32：NpuFusedAdamW 拒收纯 bf16 参数组（实测崩）
+        return m
+    if PARADIGM == "tts":
+        from transformers import SpeechT5ForTextToSpeech
+        m = SpeechT5ForTextToSpeech.from_pretrained(MODEL_DIR, **kw)
+        m.config.use_guided_attention_loss = False  # 5.x bug 规避（探测实测）
+        # 5.x bug②: SpectrogramLoss 在 forward 内现建，BCE pos_weight 停留 CPU → NPU device mismatch
+        from transformers.models.speecht5 import modeling_speecht5 as _MS
+        if not getattr(_MS.SpeechT5SpectrogramLoss, "_dev_patched", False):
+            _orig = _MS.SpeechT5SpectrogramLoss.forward
+
+            def _patched(self, attention_mask, obp, oap, logits, labels, cross_attentions=None):
+                pw = getattr(self.bce_criterion, "pos_weight", None)
+                if pw is not None:
+                    self.bce_criterion.pos_weight = pw.to(logits.device)
+                return _orig(self, attention_mask, obp, oap, logits, labels, cross_attentions)
+
+            _MS.SpeechT5SpectrogramLoss.forward = _patched
+            _MS.SpeechT5SpectrogramLoss._dev_patched = True
+        return m
+    raise ValueError(PARADIGM)
+
+
+def load_audio(path, target_sr=None):
+    import soundfile as sf
+    aud, sr = sf.read(path, dtype="float32")
+    if aud.ndim > 1:
+        aud = aud.mean(axis=1)
+    if target_sr and sr != target_sr:
+        from scipy.signal import resample_poly
+        from math import gcd
+        g = gcd(int(target_sr), int(sr))
+        aud = resample_poly(aud, target_sr // g, sr // g).astype(np.float32)
+        sr = target_sr
+    return aud, sr
+
+
+# ---------- tts mel 预编码缓存 ----------
+def tts_mel_cache(recs):
+    cache_path = os.path.join(WS, "outputs",
+                              f"mel_cache_{hashlib.md5(f'{DATA}|tts'.encode()).hexdigest()[:10]}.pt")
+    if os.path.exists(cache_path):
+        print(f"[cache] loading {cache_path}", flush=True)
+        return torch.load(cache_path, weights_only=False)
+    from transformers import SpeechT5FeatureExtractor
+    fe = SpeechT5FeatureExtractor.from_pretrained(MODEL_DIR)
+    specs = {}
+    t0 = time.time()
+    for i, r in enumerate(recs):
+        aud, _ = load_audio(r["audio"], target_sr=16000)
+        s = fe(audio_target=aud, sampling_rate=16000, return_tensors="pt")["input_values"][0]
+        specs[i] = s.to(torch.float16)
+        if (i + 1) % 200 == 0:
+            print(f"  mel {i+1}/{len(recs)} ({time.time()-t0:.0f}s)", flush=True)
+    assert specs, "mel 缓存 0 样本——检查 audio 绝对路径（pitfalls #41）"
+    torch.save(specs, cache_path)
+    print(f"[cache] saved {cache_path} ({time.time()-t0:.0f}s, {len(specs)} clips)", flush=True)
+    return specs
+
+
+def main():
+    t0 = time.time()
+    torch.manual_seed(SEED); random.seed(SEED)
+    os.makedirs(OUT_DIR, exist_ok=True)
+    ad_dir = os.path.join(OUT_DIR, "lora_adapter")
+    os.makedirs(ad_dir, exist_ok=True)
+    torch.npu.set_device(DEV)
+    print(f"[env] paradigm={PARADIGM} dev={DEV} steps={NUM_STEPS} lr={LR} r={LORA_R} "
+          f"batch={BATCH} accum={GRAD_ACCUM} lora_disable={LORA_DISABLE}", flush=True)
+
+    recs = [json.loads(l) for l in open(DATA, encoding="utf-8") if l.strip()]
+    print(f"[data] {len(recs)} records from {DATA}", flush=True)
+
+    model = load_model().to(DEV)
+    model.config.use_cache = False
+    print(f"[model] loaded {time.time()-t0:.1f}s params={sum(p.numel() for p in model.parameters())/1e6:.1f}M", flush=True)
+
+    # ---- 头(audio_cls 新 classifier) 与 LoRA ----
+    head_params = []
+    if PARADIGM == "audio_cls":
+        g = torch.Generator().manual_seed(HEAD_SEED)
+        for n, p in model.named_parameters():
+            if any(pat in n for pat in HEAD_PATTERNS):
+                # 只重初始化分类 Linear(dense)；layernorm 等保持预训练权重（AST 实测:
+                # 把 layernorm.weight 归零会湮灭特征 → logits 恒 0 → CE 恒机会水平）
+                if n.endswith("dense.weight"):
+                    with torch.no_grad():
+                        p.copy_(torch.randn(p.shape, generator=g) * (p.shape[1] ** -0.5))
+                elif n.endswith("dense.bias"):
+                    with torch.no_grad():
+                        p.zero_()
+                p.requires_grad = True
+                head_params.append(p)
+            else:
+                p.requires_grad = False
+        assert head_params, "audio_cls 未找到 classifier 头"
+        # 头初始化后必须重新 to(DEV)（randn 在 CPU 生成后 copy_ 到 bf16 设备张量）
+    if LORA_DISABLE:
+        assert head_params, "LORA_DISABLE=1 仅适用于有新头的范式(audio_cls)"
+        head_ids = {id(p) for p in head_params}
+        for p in model.parameters():
+            if id(p) not in head_ids:
+                p.requires_grad = False
+        print("[lora] DISABLED — head-only 基线模式", flush=True)
+    else:
+        linear_names = {n.split(".")[-1] for n, m in model.named_modules() if type(m).__name__ == "Linear"}
+        # audio_cls 的 classifier.dense 是任务头本体：'dense' 候选会撞名把它 LoRA 包裹，
+        # 导致 head.pt 键名变 base_layer.* → validate 静默加载失败（随机头评估）。头直训即可，排除。
+        cands = [c for c in CANDIDATES if not (PARADIGM == "audio_cls" and c == "dense")]
+        targets = sorted(set(cands) & linear_names)
+        print(f"[lora] linear 末名: {sorted(linear_names)}", flush=True)
+        print(f"[lora] target_modules={targets}", flush=True)
+        assert targets, "未发现 LoRA 目标模块"
+        model = get_peft_model(model, LoraConfig(r=LORA_R, lora_alpha=LORA_ALPHA,
+                                                 lora_dropout=LORA_DROPOUT,
+                                                 target_modules=targets, bias="none"))
+        model.print_trainable_parameters()
+    # peft 会冻结所有非 LoRA 参数——模型内新头必须重新放开；trainable 按 id 去重
+    for p in head_params:
+        p.requires_grad = True
+    _seen = set()
+    trainable = []
+    for p in [q for q in model.parameters() if q.requires_grad] + head_params:
+        if id(p) not in _seen:
+            _seen.add(id(p))
+            trainable.append(p)
+    model.train()
+
+    # ---- 处理器与预缓存 ----
+    mel_specs = None
+    if PARADIGM == "asr":
+        from transformers import WhisperProcessor
+        proc = WhisperProcessor.from_pretrained(MODEL_DIR)
+        fe, tok = proc.feature_extractor, proc.tokenizer
+        tok.padding_side = "right"
+
+        def asr_batch(batch_recs):
+            # 5.x FE 的 max_length 是采样点语义 → 手动把 mel pad/截到 3000 帧(30s)
+            auds = [load_audio(r["audio"], target_sr=16000)[0] for r in batch_recs]
+            mels = []
+            for a in auds:
+                m = fe(a, sampling_rate=16000, return_tensors="np").input_features[0]  # (128,T)
+                m = m[:, :3000]
+                if m.shape[1] < 3000:
+                    m = np.pad(m, ((0, 0), (0, 3000 - m.shape[1])))
+                mels.append(m)
+            mel = torch.from_numpy(np.stack(mels)).to(DEV)
+            lab = tok([r["text"] for r in batch_recs], return_tensors="pt", padding=True,
+                      truncation=True, max_length=224).input_ids
+            lab[lab == tok.pad_token_id] = -100
+            return mel, lab.to(DEV)
+    elif PARADIGM == "audio_cls":
+        from transformers import ASTFeatureExtractor
+        fe = ASTFeatureExtractor.from_pretrained(MODEL_DIR)
+
+        def ast_batch(batch_recs):
+            auds = [load_audio(r["audio"], target_sr=16000)[0] for r in batch_recs]
+            v = fe(auds, sampling_rate=16000, return_tensors="pt").input_values.to(DEV)
+            lab = torch.tensor([r["label"] for r in batch_recs], device=DEV)
+            return v, lab
+        labs = [r["label"] for r in recs[:300]]
+        print(f"[check] audio_cls probe前300 标签 distinct={len(set(labs))} max={max(r['label'] for r in recs)}", flush=True)
+    else:  # tts
+        from transformers import SpeechT5Processor
+        tok = SpeechT5Processor.from_pretrained(MODEL_DIR).tokenizer
+        mel_specs = tts_mel_cache(recs)
+        recs = [dict(r, _i=i) for i, r in enumerate(recs)]
+        T_MAX = int(os.environ.get("TTS_MAX_FRAMES", "1800"))  # ~29s@16k，超长截断
+        print(f"[check] tts mel 缓存 {len(mel_specs)} 条，帧长 max={max(s.shape[0] for s in mel_specs.values())}", flush=True)
+
+    # ---- 范式 loss ----
+    def forward_loss(batch_recs):
+        with torch.autocast("npu", dtype=torch.bfloat16):
+            if PARADIGM == "asr":
+                mel, lab = asr_batch(batch_recs)
+                out = model(input_features=mel, labels=lab)
+                return out.loss
+            if PARADIGM == "audio_cls":
+                v, lab = ast_batch(batch_recs)
+                out = model(input_values=v, labels=lab)
+                return out.loss
+            # tts: batch=1（谱长可变，padding 污染 loss）
+            r = batch_recs[0]
+            spec = mel_specs[r["_i"]][:T_MAX]
+            if spec.shape[0] % 2:
+                spec = spec[:-1]  # reduction_factor=2 要求偶数帧
+            spec = spec.to(torch.float32)[None].to(DEV)
+            t_ = tok(text=r["text"], return_tensors="pt", truncation=True, max_length=512)
+            attn = torch.ones_like(t_.input_ids)
+            out = model(input_ids=t_.input_ids.to(DEV), attention_mask=attn.to(DEV),
+                        speaker_embeddings=torch.zeros(1, 512, device=DEV, dtype=torch.bfloat16),
+                        labels=spec)
+            return out.loss
+
+    opt = NpuFusedAdamW(trainable, lr=LR, betas=(0.9, 0.95), weight_decay=0.01, eps=1e-8)
+    rng = random.Random(SEED)
+    n = len(recs)
+    opt.zero_grad(set_to_none=False)
+    print(f"[train] {NUM_STEPS} steps batch={BATCH} accum={GRAD_ACCUM} lr={LR} r={LORA_R} "
+          f"trainable={sum(p.numel() for p in trainable)/1e6:.2f}M", flush=True)
+    t_tr = time.time()
+    log = []
+    for step in range(NUM_STEPS):
+        accum_loss = 0.0
+        for _ in range(GRAD_ACCUM):
+            batch = [recs[rng.randint(0, n - 1)] for _ in range(BATCH)]
+            loss = forward_loss(batch) / GRAD_ACCUM
+            loss.backward()
+            accum_loss += float(loss.item())
+        cur = lr_at(step, NUM_STEPS, WARMUP, LR)
+        for g_ in opt.param_groups:
+            g_["lr"] = cur
+        torch.nn.utils.clip_grad_norm_(trainable, 1.0)
+        opt.step()
+        opt.zero_grad(set_to_none=False)
+        rec = {"step": step + 1, "loss": round(accum_loss, 6), "lr": round(cur, 8),
+               "elapsed_s": round(time.time() - t_tr, 2)}
+        log.append(rec)
+        with open(os.path.join(OUT_DIR, "loss.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        if (step + 1) % 10 == 0 or step == 0:
+            print(f"[train] step {step+1}/{NUM_STEPS} loss={rec['loss']:.4f} elapsed={rec['elapsed_s']:.1f}s", flush=True)
+
+    total = time.time() - t_tr
+    steady = (log[-1]["elapsed_s"] - log[-2]["elapsed_s"]) if len(log) >= 2 else total / NUM_STEPS
+    print(f"[probe] s_per_step={steady:.2f} mem_peak_gb={torch.npu.max_memory_allocated()/2**30:.2f} last_loss={log[-1]['loss']}", flush=True)
+    if not LORA_DISABLE:
+        model.save_pretrained(ad_dir)
+    if PARADIGM == "audio_cls":
+        base_m = model.base_model.model if not LORA_DISABLE and hasattr(model, "base_model") else model
+        hs = {n_.replace(".base_layer.", "."): p_.detach().cpu()
+              for n_, p_ in base_m.named_parameters()
+              if any(pat in n_ for pat in HEAD_PATTERNS) and "lora_" not in n_}
+        torch.save(hs, os.path.join(OUT_DIR, "head.pt"))
+        print(f"[save] head tensors={len(hs)}", flush=True)
+    with open(os.path.join(OUT_DIR, "loss_raw.json"), "w", encoding="utf-8") as f:
+        json.dump({"steps": log, "num_steps": NUM_STEPS, "total_train_s": round(total, 2),
+                   "config": {"paradigm": PARADIGM, "model": MODEL_DIR, "lora_r": LORA_R,
+                              "lora_alpha": LORA_ALPHA, "lr": LR, "batch": BATCH,
+                              "grad_accum": GRAD_ACCUM, "warmup": WARMUP,
+                              "lora_disable": LORA_DISABLE, "head_seed": HEAD_SEED,
+                              "n_records": n}}, f, indent=2, ensure_ascii=False)
+    print(f"[save] done {time.time()-t0:.1f}s -> {OUT_DIR}", flush=True)
+
+
+class _nullctx:
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *a):
+        return False
+
+
+if __name__ == "__main__":
+    main()

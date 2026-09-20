@@ -344,3 +344,124 @@ torch-npu 2.10 立即 `undefined symbol: torch::autograd::deleteNode` 断链—�
 ③ MIM/MAE 的 mask 在 forward 内部随机生成：验证（base vs LoRA 对比）前必须
 `torch.manual_seed(i); torch.npu.manual_seed_all(i)` 固定，否则双方掩码不同不可比。MLM 验证同理用
 **确定性掩码**（per-record seed 的 Generator）。
+
+## #41 切分器写相对路径：cwd 变化后图像全打不开，生成式范式还**静默 0 样本**（2026-09-11，多模态批次）
+
+切分器（make_split 类）往 jsonl 写图像路径时若用相对路径，而训练器/验证器 `cd` 到工作区目录后运行，
+图像全部打不开。**三种范式的失败形态完全不同**：
+- vlm：`Image.open` 直接 FileNotFoundError（显性，好排查）；
+- diffusion/video：预编码循环里 `try/except` 跳过坏样本 → **0 样本缓存静默生成**，训练在空池上跑或
+  缓存文件里 `samples=[]`，无任何报错（隐性，最危险——曾整轮 sweep 白跑）。
+
+**修复**：切分产物一律 `os.path.abspath()` 写绝对路径；预编码函数结尾加
+`assert out, "预编码 0 样本——检查 image 路径"`（两个模板已内置）。
+**通用教训**：任何「try/except 跳过坏样本」的批处理循环，结尾必须 assert 产出数 > 0（或 ≥ 预期比例），
+否则静默清空比崩溃更贵。
+
+## #42 就地改文件必须「临时文件 + os.replace 原子替换」——open(f,'w') 先截断（2026-09-11，数据截断事故）
+
+修 bug 的脚本用 `lines = open(f).read(); open(f, 'w')` 就地改写：`open(f,'w')` **先截断文件**再执行后续
+处理，后续代码抛 NameError 崩溃 → **flickr train.jsonl 被清空**（数据事故，靠重切恢复）。
+
+**修复（纪律）**：
+1. 就地改文件必须「写临时文件 → `os.replace(tmp, f)` 原子替换」——中途崩溃原文件完好；
+2. 修复脚本崩溃后**第一件事是核对目标文件是否已损坏**（`wc -l` / 首行内容），不要直接重跑修复逻辑；
+3. 重要切分产物（train.jsonl 等）生成后顺手备份或落 split_meta.json 索引（可无损重建）。
+
+## #43 Qwen2.5-VL 类多模态批处理三坑：pixel_values concat / [0] 切片 / 字符偏移法失效（2026-09-11）
+
+① **pixel_values 必须 `torch.cat(dim=0)` 不是 `torch.stack`**：processor 返回的 pixel_values 是
+`[patch数, 1176]`（每图 patch 数可不同），stack 要求同形会直接报错；`image_grid_thw` 同样 cat。
+② **per-example `pixel_values[0]` 切片错**：取到的是**首行 patch**（`[1176]`）不是整图（`[256,1176]`）→
+视觉塔报 `shape '[0,4,-1]' is invalid`。**诊断特征：视觉 token 数异常小**（只剩 2 个）。
+③ **字符偏移掩码法对 processor 渲染失效**：processor 会把 `<|image_pad|>` 按 grid 展开成成百上千个
+token，渲染字符串的字符 offset 与最终 input_ids 不再对齐——labels 改用 **token-id 序列定位**：
+把 `<|fim_suffix|><|im_end|>` 为止（训练目标含收尾符，生成才停得住）。
+
+## #44 多模态数据格式两坑：字符串化列表列 / 视频 VAE 维度序（2026-09-11）
+
+① **CSV 的 caption 列可能是字符串化列表**（flickr30k 的 raw 列 = `'["caption", ...]'`）：
+须 `json.loads` 后取首元素；只 `strip('"')` 洗不干净——残留的 `["` 会进训练文本，污染 loss 与
+sweep 判据（本轮 vlm 首轮 sweep 即因此失真，修复解析后重新确认复验）。写 loader 先 print 一条
+原始值再定解析路径（同 #37 的 dict 列教训：**先看类型再解析**）。
+② **Wan 视频 VAE 输入维度序 `[B,C=3,T=1,H,W]`**：单帧当 T=1 视频编码，
+`permute(2,0,1).unsqueeze(0).unsqueeze(2)`——unsqueeze 顺序错（先 2 后 0）会把 T 维塞错位置，报
+`expected 3 channels got 1`。视频类 VAE 都有显式时间维，喂图前先核对维度约定。
+
+## #45 模型内新头 × peft × 融合优化器三件套（2026-09-18，cat5/cat6 六模型新头范式实测）
+
+任务头需新初始化的模型（类别数不匹配重初始化 classifier/class_embed、或外置 Linear 头）+ LoRA 时：
+① **`get_peft_model` 冻结所有非 LoRA 参数**——之前设好 `requires_grad=True` 的模型内新头被静默冻结
+（LoRA run 实际在训"骨干适配随机头"；layoutlmv3 曾以此拿到 F1 0.83——机制成立但非设计意图）。
+② head-only 基线模式（LORA_DISABLE=1）下 `trainable = [requires_grad 参数] + head_params` 会**重复**
+包含头参数（同一 Parameter 进优化器两次，更新动力学异常）。
+③ **NpuFusedAdamW 拒收纯 bf16 参数组**：head-only run 的 trainable 只剩 bf16 头 →
+`TypeError: Fused optimizer's parameters must be either float32 or float16` **首步 opt.step() 即崩**
+（layoutlmv3 head-only 因此静默失败，validate 的 base 侧退化成未训随机头）。
+**修复三件套（模板已内置）**：peft 包装后对 head_params **重新 `requires_grad=True`**；trainable
+**按 id 去重**；模型内头统一 **`.float()`**（autocast 下 fp32 头正常参与 bf16 前向，梯度落 fp32 主权重）。
+外置头（不在 model.parameters() 里的 nn.Linear）天然免疫 ①③。
+
+## #46 新头重初始化只动 Linear，绝不动 LayerNorm——特征湮灭致 CE 恒机会水平（2026-09-18，AST 事故）
+
+`ASTMLPHead = LayerNorm → Dropout → dense(Linear)`。按「`classifier` 名字匹配 + dim==2 randn / dim==1
+zero_」的通用重初始化把 **layernorm.weight（dim==1）清零** → 头输入恒 0 → logits 恒等于 dense.bias=0 →
+**CE 恒 ln(50)=3.91 且 dense.weight 梯度恒 0**（∂L/∂W = grad_out ⊗ input，input=0）。
+**诊断特征**：loss 钉死在 ln(类别数) 小数点后不动、各超参组合 val loss 全同。**修复**：按名字后缀精确
+重初始化（只动 `dense.weight`/`dense.bias`），layernorm 等保持预训练权重仅放开 requires_grad。
+**纪律（入场券）**：新头范式必须先跑**单批过拟合测试**（1 批 × 20-30 步 @ lr=1e-3，loss 应显著下降；
+AST 修复后 3.95→1.12/20步）再进 sweep——本坑曾浪费两轮完整 sweep。loss 恒 ln(类别数) 的排查三选一：
+头被冻结（#45）/ 头梯度为 0（本条）/ 特征湮灭（本条）。
+
+## #47 LoRA 候选名撞任务头 + strict=False 静默加载失败（2026-09-18，AST 假退化）
+
+LoRA 目标候选并集里的 **`dense` 撞上 `classifier.dense`**（任务头本体）→ 头被 peft 包裹成
+lora.Linear → 保存 head.pt 时键名变 `classifier.dense.base_layer.weight` → validate 用
+`load_state_dict(hs, strict=False)` **静默跳过全部键** → LoRA 侧用"新随机头+adapter"评估 →
+**假退化**（hit 0.7→0.0、CE 高于机会水平，看似 LoRA 训坏了）。
+**修复三件**：① 有新头的范式从 LoRA 候选**排除撞名项**（audio_cls 排除 `dense`；头本来就该直训）；
+② 头保存键名规范化（`.base_layer.`→`.`）并过滤 `lora_` 键；③ **`strict=False` 加载后必须校验
+命中数>0**（missing/unexpected 打印或计数断言）——本坑两轮 sweep+一轮 validate 全部被污染才发现。
+
+## #48 transformers 5.x WhisperFeatureExtractor 的 max_length 是采样点语义（2026-09-18）
+
+`fe(auds, padding="max_length", max_length=3000)` 在 5.x **不再**把 mel pad 到 3000 帧，而是把音频
+当 3000 **采样点**处理（→18 mel 帧）→ Whisper 报 `expects the mel input features to be of length
+3000, but found 18`。**修复（版本无关）**：逐条提 mel（不传 max_length），手动
+`m[:, :3000]` + `np.pad(m, ((0,0),(0,3000-T)))` 到 3000 帧再 stack。给 FE/processor 传"看起来对"的
+参数前先小样本打印输出 shape——5.x 对 4.x 的参数语义有多处静默变化。
+
+## #49 SpeechT5 5.x 四连坑（2026-09-18，tts 范式）
+
+① **reduction_factor=2 要求偶数帧**：奇数帧 labels（603）报 `size of tensor a (603) must match b (602)`
+——谱截偶（`spec[:-1] if T%2`）。② **`use_guided_attention_loss` 默认开且 attention_mask=None 崩**
+（`'bool' object has no attribute 'sum'`）——config 关掉 + 显式传全 1 attention_mask。
+③ **SpectrogramLoss 的 BCE pos_weight 停留 CPU**：criterion 在 forward 内现建、buffer 不随模型上 NPU →
+device mismatch——monkey-patch 把 `bce_criterion.pos_weight` 搬到 `logits.device`（模板内置）。
+④ **提 mel 用 `audio_target=` 而非 `audio=`**：`fe(audio=...)` 返回归一化波形、`fe(audio_target=...)`
+返回 log-mel 谱，**两者键名都叫 `input_values`**——拿错在 decoder prenet 报
+`mat1 and mat2 shapes cannot be multiplied (0x154481 and 80x256)`。另：labels-only 调用
+（decoder_input_values=None 时 5.x 自动 shift），手传 decoder_input_values 反而帧数错。
+
+## #50 sweep 判据被实现 bug 污染：确认复验与作废重跑（2026-09-18）
+
+sweep 的意义是「**在最终训练配置下**比较超参」——训练器实现有 bug 时（#45 冻头、#46 特征湮灭、
+#47 假退化），sweep 的 val loss 排序反映的是 bug 动力学，择优无效。两种处置：
+① **确认复验**（bug 不影响排序方向时）：rtdetr/layoutlmv3 首轮冻头 sweep 与修复后复验选出**同一组合**
+（2e-4/r32），且复验 val 大幅下移（165.6→97.9）→ 正式 run 用修复版配置有效（沿 cat4-vlm 数据修复
+先例）。② **作废重跑**（判据完全失真时）：AST 两轮 sweep（恒 3.9062=ln50 / val 高于机会水平）全作废，
+修复后第三轮正常学习（1.42-3.77）才用于择优——**不要用可疑 sweep 的排序将就**。
+附带教训：validate 脚本的范式→指标映射字典（LOWER_BETTER 类）新增范式时**漏键会 KeyError 崩在
+验证阶段**（训练全白等）——写完新分支先对全部 PARADIGM 值做键完整性自检。
+
+## #51 venv 解释器与 site-packages 生命周期分离：uv python 目录跨会话丢失（2026-09-18）
+
+uv 建的 venv，`bin/python` 是指向 `~/.local/share/uv/python/cpython-3.12-*/bin/python3.12` 的符号链接；
+venv 本体在 /mnt（共享盘）、解释器在 /root（本地盘）——**/root 被清理后所有 venv 同时断链**
+（`No such file or directory`），而 site-packages 完好。**修复（零依赖重装，勿重建 venv）**：
+`pip install uv -i <镜像>` + `UV_PYTHON_INSTALL_MIRROR=https://gh-proxy.com/https://github.com/astral-sh/python-build-standalone/releases/download uv python install 3.12`
+装回**原路径**，符号链接自动复原，torch/torch_npu 全套已验证依赖原样恢复（比重建快两个数量级、
+无 #39 拖 torch 升级风险）。恢复后必跑：版本核对 + NPU matmul 健康检查。诊断入口：
+`ls -la .venv/bin/python`（看悬空指向）+ `cat .venv/pyvenv.cfg`（home 字段）。
+
+
