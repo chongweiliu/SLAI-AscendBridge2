@@ -1,0 +1,3204 @@
+{
+  "schema_version": 1,
+  "evidence_type": "official_api_response",
+  "source_url": "https://www.hiascend.com/cann/download",
+  "api_root": "https://www.hiascend.com/ascendgateway/ascendservice",
+  "retrieved_at": "2026-10-09T15:34:08.923557+00:00",
+  "language": "zh",
+  "versions": [
+    {
+      "versionId": 793,
+      "versionName": "9.2.0-beta.2",
+      "publishTime": "2026/09/01"
+    },
+    {
+      "versionId": 795,
+      "versionName": "9.1.1",
+      "publishTime": "2026/09/01"
+    },
+    {
+      "versionId": 779,
+      "versionName": "9.2.0-beta.1",
+      "publishTime": "2026/08/11"
+    },
+    {
+      "versionId": 796,
+      "versionName": "9.1.0",
+      "publishTime": "2026/07/31"
+    },
+    {
+      "versionId": 800,
+      "versionName": "preview",
+      "publishTime": "2026/09/30"
+    },
+    {
+      "versionId": 751,
+      "versionName": "9.1.0-beta.3",
+      "publishTime": "2026/07/13"
+    },
+    {
+      "versionId": 745,
+      "versionName": "9.0.1",
+      "publishTime": "2026/07/02"
+    },
+    {
+      "versionId": 750,
+      "versionName": "9.1.0-beta.1",
+      "publishTime": "2026/05/15"
+    },
+    {
+      "versionId": 734,
+      "versionName": "9.0.0",
+      "publishTime": "2026/04/30"
+    },
+    {
+      "versionId": 684,
+      "versionName": "9.0.0-beta.2",
+      "publishTime": "2026/03/30"
+    },
+    {
+      "versionId": 682,
+      "versionName": "9.0.0-beta.1",
+      "publishTime": "2026/03/02"
+    },
+    {
+      "versionId": 747,
+      "versionName": "8.5.1",
+      "publishTime": "2026/02/24"
+    },
+    {
+      "versionId": 748,
+      "versionName": "8.5.0-一站式",
+      "publishTime": "2026/01/16"
+    },
+    {
+      "versionId": 630,
+      "versionName": "8.5.0.alpha002",
+      "publishTime": "2025/12/12"
+    }
+  ],
+  "selected_version_id": "793",
+  "download_tree": [
+    {
+      "id": "d806",
+      "name": "950PR/DT 系列产品",
+      "type": "hardware",
+      "children": [
+        {
+          "id": "h0501",
+          "name": "AArch64",
+          "type": "cpuArchitecture",
+          "children": [
+            {
+              "id": "h0601",
+              "name": "openEuler",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "h0502",
+          "name": "X86_64",
+          "type": "cpuArchitecture",
+          "children": [
+            {
+              "id": "h0614",
+              "name": "veLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0609",
+              "name": "AliOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0612",
+              "name": "Tlinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d802",
+      "name": "A2 系列产品",
+      "type": "hardware",
+      "children": [
+        {
+          "id": "h0501",
+          "name": "AArch64",
+          "type": "cpuArchitecture",
+          "children": [
+            {
+              "id": "h0613",
+              "name": "MTOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0602",
+              "name": "Ubuntu",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0603",
+              "name": "CentOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0614",
+              "name": "veLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0604",
+              "name": "Debian",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0605",
+              "name": "Kylin",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0606",
+              "name": "BCLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0607",
+              "name": "UOSV20",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0608",
+              "name": "AntOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0609",
+              "name": "AliOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0610",
+              "name": "CTyunOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0611",
+              "name": "CULinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0612",
+              "name": "Tlinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0601",
+              "name": "openEuler",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "h0502",
+          "name": "X86_64",
+          "type": "cpuArchitecture",
+          "children": [
+            {
+              "id": "h0613",
+              "name": "MTOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0602",
+              "name": "Ubuntu",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0603",
+              "name": "CentOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0614",
+              "name": "veLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0604",
+              "name": "Debian",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0605",
+              "name": "Kylin",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0606",
+              "name": "BCLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0607",
+              "name": "UOSV20",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0608",
+              "name": "AntOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0609",
+              "name": "AliOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0610",
+              "name": "CTyunOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0611",
+              "name": "CULinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0612",
+              "name": "Tlinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0601",
+              "name": "openEuler",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d803",
+      "name": "A3 系列产品",
+      "type": "hardware",
+      "children": [
+        {
+          "id": "h0501",
+          "name": "AArch64",
+          "type": "cpuArchitecture",
+          "children": [
+            {
+              "id": "h0613",
+              "name": "MTOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0602",
+              "name": "Ubuntu",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0603",
+              "name": "CentOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0614",
+              "name": "veLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0604",
+              "name": "Debian",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0605",
+              "name": "Kylin",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0606",
+              "name": "BCLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0607",
+              "name": "UOSV20",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0608",
+              "name": "AntOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0609",
+              "name": "AliOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0610",
+              "name": "CTyunOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0611",
+              "name": "CULinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0612",
+              "name": "Tlinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0601",
+              "name": "openEuler",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "h0502",
+          "name": "X86_64",
+          "type": "cpuArchitecture",
+          "children": [
+            {
+              "id": "h0613",
+              "name": "MTOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0602",
+              "name": "Ubuntu",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0603",
+              "name": "CentOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0614",
+              "name": "veLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0604",
+              "name": "Debian",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0605",
+              "name": "Kylin",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0606",
+              "name": "BCLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0607",
+              "name": "UOSV20",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0608",
+              "name": "AntOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0609",
+              "name": "AliOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0610",
+              "name": "CTyunOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0611",
+              "name": "CULinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0612",
+              "name": "Tlinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0601",
+              "name": "openEuler",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d801",
+      "name": "910 系列产品",
+      "type": "hardware",
+      "children": [
+        {
+          "id": "h0501",
+          "name": "AArch64",
+          "type": "cpuArchitecture",
+          "children": [
+            {
+              "id": "h0613",
+              "name": "MTOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0602",
+              "name": "Ubuntu",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0603",
+              "name": "CentOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0614",
+              "name": "veLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0604",
+              "name": "Debian",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0605",
+              "name": "Kylin",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0606",
+              "name": "BCLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0607",
+              "name": "UOSV20",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0608",
+              "name": "AntOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0609",
+              "name": "AliOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0610",
+              "name": "CTyunOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0611",
+              "name": "CULinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0612",
+              "name": "Tlinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0601",
+              "name": "openEuler",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "h0502",
+          "name": "X86_64",
+          "type": "cpuArchitecture",
+          "children": [
+            {
+              "id": "h0613",
+              "name": "MTOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0602",
+              "name": "Ubuntu",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0603",
+              "name": "CentOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0614",
+              "name": "veLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0604",
+              "name": "Debian",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0605",
+              "name": "Kylin",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0606",
+              "name": "BCLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0607",
+              "name": "UOSV20",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0608",
+              "name": "AntOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0609",
+              "name": "AliOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0610",
+              "name": "CTyunOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0611",
+              "name": "CULinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0612",
+              "name": "Tlinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0601",
+              "name": "openEuler",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d105",
+      "name": "310B 系列产品",
+      "type": "hardware",
+      "children": [
+        {
+          "id": "h0501",
+          "name": "AArch64",
+          "type": "cpuArchitecture",
+          "children": [
+            {
+              "id": "h0602",
+              "name": "Ubuntu",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0601",
+              "name": "openEuler",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "h0502",
+          "name": "X86_64",
+          "type": "cpuArchitecture",
+          "children": [
+            {
+              "id": "h0602",
+              "name": "Ubuntu",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0601",
+              "name": "openEuler",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "d500",
+      "name": "310P 系列产品",
+      "type": "hardware",
+      "children": [
+        {
+          "id": "h0501",
+          "name": "AArch64",
+          "type": "cpuArchitecture",
+          "children": [
+            {
+              "id": "h0613",
+              "name": "MTOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0602",
+              "name": "Ubuntu",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0603",
+              "name": "CentOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0614",
+              "name": "veLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0604",
+              "name": "Debian",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0605",
+              "name": "Kylin",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0606",
+              "name": "BCLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0607",
+              "name": "UOSV20",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0608",
+              "name": "AntOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0609",
+              "name": "AliOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0610",
+              "name": "CTyunOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0611",
+              "name": "CULinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0612",
+              "name": "Tlinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0601",
+              "name": "openEuler",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "h0502",
+          "name": "X86_64",
+          "type": "cpuArchitecture",
+          "children": [
+            {
+              "id": "h0613",
+              "name": "MTOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0602",
+              "name": "Ubuntu",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0603",
+              "name": "CentOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0614",
+              "name": "veLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0604",
+              "name": "Debian",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0704",
+                  "name": "在线安装 (apt-get)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0605",
+              "name": "Kylin",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0606",
+              "name": "BCLinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0607",
+              "name": "UOSV20",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0608",
+              "name": "AntOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0609",
+              "name": "AliOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0610",
+              "name": "CTyunOS",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0611",
+              "name": "CULinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0612",
+              "name": "Tlinux",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            },
+            {
+              "id": "h0601",
+              "name": "openEuler",
+              "type": "operateSystem",
+              "children": [
+                {
+                  "id": "h0701",
+                  "name": "在线安装 (Conda)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0702",
+                  "name": "在线安装 (Yum)",
+                  "type": "installMethod",
+                  "children": []
+                },
+                {
+                  "id": "h0703",
+                  "name": "离线安装 (Runfile)",
+                  "type": "installMethod",
+                  "children": []
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "selected_ids": [
+    "d806",
+    "h0501",
+    "h0601",
+    "h0702"
+  ],
+  "download_command": "<h1>配置用户属组</h1><pre><code class=\"language-bash\">sudo groupadd HwHiAiUser\nsudo useradd -g HwHiAiUser -d /home/HwHiAiUser -m HwHiAiUser -s /bin/bash</code></pre><h1>安装依赖&配源</h1><pre><code class=\"language-bash\">wget https://ascend.devcloud.huaweicloud.com/cann/debian/cann-keyring_1.0.0_all.deb\nsudo dpkg -i cann-keyring_1.0.0_all.deb\nsudo apt-get update\nsudo apt-get install -y gcc python3 python3-pip linux-headers-$(uname -r)</code></pre><h1>安装NPU驱动</h1><pre><code class=\"language-bash\">sudo apt-get install atlas-a5-hdk-npu-driver=25.7.rc1</code></pre><h1>安装Toolkit</h1><pre><code class=\"language-bash\">sudo apt-get install ascend-cann-toolkit=9.2.0-beta.2\nsudo apt-get install ascend-cann-950-ops=9.2.0-beta.2</code></pre><h1>安装后验证</h1><pre><code class=\"language-bash\"># 配置环境变量(如下命令以root用户为例，请以实际安装路径为准)\nsource /usr/local/Ascend/cann/set_env.sh\n\npython3 -c \"import acl;print(acl.get_soc_name())\"https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/910beta1</code></pre><p>若返回芯片型号，则安装成功</p><p>若本页面使用有疑问，请参考<a href=\"https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/920beta2/softwareinst/instg/instg_0050.html\" target=\"_blank\">《CANN 快速安装FAQ》</a>获取更多帮助，若需要安装NNAL包或获取更多详细步骤请参考<a href=\"https://www.hiascend.com/document/detail/zh/CANNCommunityEdition/920beta2/softwareinst/instg/instg_0000.html\" target=\"_blank\">《CANN 安装指南》</a>。</p>"
+}

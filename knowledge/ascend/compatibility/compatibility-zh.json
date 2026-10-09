@@ -1,0 +1,868 @@
+{
+  "schema_version": 1,
+  "evidence_type": "official_api_response",
+  "source_url": "https://www.hiascend.com/developer/download/compatibility",
+  "api_root": "https://www.hiascend.com/ascendgateway/ascendservice/matchrelationship",
+  "retrieved_at": "2026-10-09T15:30:09.017004+00:00",
+  "language": "zh",
+  "products": [
+    {
+      "id": "d105",
+      "name": "310B 系列产品"
+    },
+    {
+      "id": "d500",
+      "name": "310P 系列产品"
+    },
+    {
+      "id": "d801",
+      "name": "910 系列产品"
+    },
+    {
+      "id": "d802",
+      "name": "A2 系列产品"
+    },
+    {
+      "id": "d100",
+      "name": "310系列产品"
+    },
+    {
+      "id": "d803",
+      "name": "A3 系列产品"
+    },
+    {
+      "id": "d806",
+      "name": "950PR/DT 系列产品"
+    }
+  ],
+  "version_list": {
+    "detailId": null,
+    "mindSdkVersion": "26.1.0,26.0.0,7.3.0",
+    "mindClusterVersion": "26.1.0,26.0.0,7.3.0",
+    "mindEdgeVersion": "26.0.0,7.3.0",
+    "mindIeVersion": "3.1.0,3.0.0,2.3.0",
+    "mindSpeedVersion": "26.1.0,26.0.0,2.3.0",
+    "mindStudioVersion": "26.1.0,26.0.0,8.3.0",
+    "mindSporeVersion": "2.10.0,2.9.0,2.7.2",
+    "pytorchVersion": "26.1.1,26.0.0,7.3.0",
+    "cannVersion": "9.1.1,9.0.1,8.5.0",
+    "hdkVersion": "26.1.1 (A3/A2/910/310P/310B系列)；25.7.RC1.10 (350加速卡)；25.6.RC1 (850E超节点/650E服务器)；25.1.RC1 (950超节点),26.0.RC1,25.5.1",
+    "vllmVersion": "0.23.0,0.18.0",
+    "sgLangVersion": "5.10.0",
+    "tritonVersion": "3.2.2,3.2.1"
+  },
+  "support_by_product": {
+    "d105": [
+      {
+        "publishTime": "2026/06/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "N/A",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "26.1.0",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "9.1.1",
+          "hdkVersion": "26.1.1 (A3/A2/910/310P/310B系列)；25.7.RC1.10 (350加速卡)；25.6.RC1 (850E超节点/650E服务器)；25.1.RC1 (950超节点)",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2026/03/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "N/A",
+          "mindEdgeVersion": "26.0.0",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "26.0.0",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "9.0.1",
+          "hdkVersion": "26.0.RC1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/12/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "N/A",
+          "mindEdgeVersion": "7.3.0",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "8.3.0",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "8.5.0",
+          "hdkVersion": "25.5.1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/09/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "N/A",
+          "mindEdgeVersion": "7.2.RC1",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "8.2.RC1",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "8.3.RC1",
+          "hdkVersion": "25.3.RC1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/06/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "N/A",
+          "mindEdgeVersion": "7.1.RC1",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "8.1.RC1",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "8.2.RC1",
+          "hdkVersion": "25.2.0",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/03/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "N/A",
+          "mindEdgeVersion": "7.0.RC1",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "8.0.RC1",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "8.1.RC1",
+          "hdkVersion": "25.0.RC1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      }
+    ],
+    "d500": [
+      {
+        "publishTime": "2026/06/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "26.1.0",
+          "mindClusterVersion": "26.1.0",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "3.1.0",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "26.1.0",
+          "mindSporeVersion": "2.10.0",
+          "pytorchVersion": "N/A",
+          "cannVersion": "9.1.1",
+          "hdkVersion": "26.1.1 (A3/A2/910/310P/310B系列)；25.7.RC1.10 (350加速卡)；25.6.RC1 (850E超节点/650E服务器)；25.1.RC1 (950超节点)",
+          "vllmVersion": "0.23.0",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2026/03/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "26.0.0",
+          "mindClusterVersion": "26.0.0",
+          "mindEdgeVersion": "26.0.0",
+          "mindIeVersion": "3.0.0",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "26.0.0",
+          "mindSporeVersion": "2.9.0",
+          "pytorchVersion": "N/A",
+          "cannVersion": "9.0.1",
+          "hdkVersion": "26.0.RC1",
+          "vllmVersion": "0.18.0",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/12/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "7.3.0",
+          "mindClusterVersion": "7.3.0",
+          "mindEdgeVersion": "7.3.0",
+          "mindIeVersion": "2.3.0",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "8.3.0",
+          "mindSporeVersion": "2.7.2",
+          "pytorchVersion": "N/A",
+          "cannVersion": "8.5.0",
+          "hdkVersion": "25.5.1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/09/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "7.2.RC1",
+          "mindClusterVersion": "7.2.RC1",
+          "mindEdgeVersion": "7.2.RC1",
+          "mindIeVersion": "2.2.RC1",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "8.2.RC1",
+          "mindSporeVersion": "2.7.1",
+          "pytorchVersion": "N/A",
+          "cannVersion": "8.3.RC1",
+          "hdkVersion": "25.3.RC1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/06/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "7.1.RC1",
+          "mindClusterVersion": "7.1.RC1",
+          "mindEdgeVersion": "7.1.RC1",
+          "mindIeVersion": "2.1.RC1",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "8.1.RC1",
+          "mindSporeVersion": "2.7.0-RC1",
+          "pytorchVersion": "N/A",
+          "cannVersion": "8.2.RC1",
+          "hdkVersion": "25.2.0",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/03/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "7.0.RC1",
+          "mindClusterVersion": "7.0.RC1",
+          "mindEdgeVersion": "7.0.RC1",
+          "mindIeVersion": "2.0.RC2",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "8.0.RC1",
+          "mindSporeVersion": "2.6.0-RC1",
+          "pytorchVersion": "N/A",
+          "cannVersion": "8.1.RC1",
+          "hdkVersion": "25.0.RC1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      }
+    ],
+    "d801": [
+      {
+        "publishTime": "2026/06/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "26.1.0",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "26.1.0",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "26.1.1",
+          "cannVersion": "9.1.1",
+          "hdkVersion": "26.1.1 (A3/A2/910/310P/310B系列)；25.7.RC1.10 (350加速卡)；25.6.RC1 (850E超节点/650E服务器)；25.1.RC1 (950超节点)",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2026/03/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "26.0.0",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "26.0.0",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "26.0.0",
+          "cannVersion": "9.0.1",
+          "hdkVersion": "26.0.RC1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/12/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "7.3.0",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "8.3.0",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "7.3.0",
+          "cannVersion": "8.5.0",
+          "hdkVersion": "25.5.1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/09/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "7.2.RC1",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "8.2.RC1",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "7.2.0",
+          "cannVersion": "8.3.RC1",
+          "hdkVersion": "25.3.RC1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/06/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "7.1.RC1",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "2.1.0",
+          "mindStudioVersion": "8.1.RC1",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "7.1.0",
+          "cannVersion": "8.2.RC1",
+          "hdkVersion": "25.2.0",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/03/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "7.0.RC1",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "2.0.0",
+          "mindStudioVersion": "8.0.RC1",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "7.0.0",
+          "cannVersion": "8.1.RC1",
+          "hdkVersion": "25.0.RC1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      }
+    ],
+    "d802": [
+      {
+        "publishTime": "2026/06/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "26.1.0",
+          "mindClusterVersion": "26.1.0",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "3.1.0",
+          "mindSpeedVersion": "26.1.0",
+          "mindStudioVersion": "26.1.0",
+          "mindSporeVersion": "2.10.0",
+          "pytorchVersion": "26.1.1",
+          "cannVersion": "9.1.1",
+          "hdkVersion": "26.1.1 (A3/A2/910/310P/310B系列)；25.7.RC1.10 (350加速卡)；25.6.RC1 (850E超节点/650E服务器)；25.1.RC1 (950超节点)",
+          "vllmVersion": "0.23.0",
+          "sgLangVersion": "5.10.0",
+          "tritonVersion": "3.2.2"
+        }
+      },
+      {
+        "publishTime": "2026/03/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "26.0.0",
+          "mindClusterVersion": "26.0.0",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "3.0.0",
+          "mindSpeedVersion": "26.0.0",
+          "mindStudioVersion": "26.0.0",
+          "mindSporeVersion": "2.9.0",
+          "pytorchVersion": "26.0.0",
+          "cannVersion": "9.0.1",
+          "hdkVersion": "26.0.RC1",
+          "vllmVersion": "0.18.0",
+          "sgLangVersion": "5.10.0",
+          "tritonVersion": "3.2.1"
+        }
+      },
+      {
+        "publishTime": "2025/12/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "7.3.0",
+          "mindClusterVersion": "7.3.0",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "2.3.0",
+          "mindSpeedVersion": "2.3.0",
+          "mindStudioVersion": "8.3.0",
+          "mindSporeVersion": "2.7.2",
+          "pytorchVersion": "7.3.0",
+          "cannVersion": "8.5.0",
+          "hdkVersion": "25.5.1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/09/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "7.2.RC1",
+          "mindClusterVersion": "7.2.RC1",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "2.2.RC1",
+          "mindSpeedVersion": "2.2.0",
+          "mindStudioVersion": "8.2.RC1",
+          "mindSporeVersion": "2.7.1",
+          "pytorchVersion": "7.2.0",
+          "cannVersion": "8.3.RC1",
+          "hdkVersion": "25.3.RC1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/06/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "7.1.RC1",
+          "mindClusterVersion": "7.1.RC1",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "2.1.RC1",
+          "mindSpeedVersion": "2.1.0",
+          "mindStudioVersion": "8.1.RC1",
+          "mindSporeVersion": "2.7.0-RC1",
+          "pytorchVersion": "7.1.0",
+          "cannVersion": "8.2.RC1",
+          "hdkVersion": "25.2.0",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/03/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "7.0.RC1",
+          "mindClusterVersion": "7.0.RC1",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "2.0.RC2",
+          "mindSpeedVersion": "2.0.0",
+          "mindStudioVersion": "8.0.RC1",
+          "mindSporeVersion": "2.6.0-RC1",
+          "pytorchVersion": "7.0.0",
+          "cannVersion": "8.1.RC1",
+          "hdkVersion": "25.0.RC1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      }
+    ],
+    "d100": [
+      {
+        "publishTime": "2026/06/30",
+        "supportOutVO": {
+          "detailId": 59,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "N/A",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "N/A",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "N/A",
+          "hdkVersion": "N/A",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2026/03/30",
+        "supportOutVO": {
+          "detailId": 44,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "N/A",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "N/A",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "N/A",
+          "hdkVersion": "N/A",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/12/30",
+        "supportOutVO": {
+          "detailId": 62,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "N/A",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "N/A",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "N/A",
+          "hdkVersion": "N/A",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/09/30",
+        "supportOutVO": {
+          "detailId": 63,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "N/A",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "N/A",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "N/A",
+          "hdkVersion": "N/A",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/06/30",
+        "supportOutVO": {
+          "detailId": 64,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "N/A",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "N/A",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "N/A",
+          "hdkVersion": "N/A",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/03/30",
+        "supportOutVO": {
+          "detailId": 65,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "N/A",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "N/A",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "N/A",
+          "hdkVersion": "N/A",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      }
+    ],
+    "d803": [
+      {
+        "publishTime": "2026/06/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "26.1.0",
+          "mindClusterVersion": "26.1.0",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "3.1.0",
+          "mindSpeedVersion": "26.1.0",
+          "mindStudioVersion": "26.1.0",
+          "mindSporeVersion": "2.10.0",
+          "pytorchVersion": "26.1.1",
+          "cannVersion": "9.1.1",
+          "hdkVersion": "26.1.1 (A3/A2/910/310P/310B系列)；25.7.RC1.10 (350加速卡)；25.6.RC1 (850E超节点/650E服务器)；25.1.RC1 (950超节点)",
+          "vllmVersion": "0.23.0",
+          "sgLangVersion": "5.10.0",
+          "tritonVersion": "3.2.2"
+        }
+      },
+      {
+        "publishTime": "2026/03/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "26.0.0",
+          "mindClusterVersion": "26.0.0",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "3.0.0",
+          "mindSpeedVersion": "26.0.0",
+          "mindStudioVersion": "26.0.0",
+          "mindSporeVersion": "2.9.0",
+          "pytorchVersion": "26.0.0",
+          "cannVersion": "9.0.1",
+          "hdkVersion": "26.0.RC1",
+          "vllmVersion": "0.18.0",
+          "sgLangVersion": "5.10.0",
+          "tritonVersion": "3.2.1"
+        }
+      },
+      {
+        "publishTime": "2025/12/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "7.3.0",
+          "mindClusterVersion": "7.3.0",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "2.3.0",
+          "mindSpeedVersion": "2.3.0",
+          "mindStudioVersion": "8.3.0",
+          "mindSporeVersion": "2.7.2",
+          "pytorchVersion": "7.3.0",
+          "cannVersion": "8.5.0",
+          "hdkVersion": "25.5.1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/09/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "7.2.RC1",
+          "mindClusterVersion": "7.2.RC1",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "2.2.RC1",
+          "mindSpeedVersion": "2.2.0",
+          "mindStudioVersion": "8.2.RC1",
+          "mindSporeVersion": "2.7.1",
+          "pytorchVersion": "7.2.0",
+          "cannVersion": "8.3.RC1",
+          "hdkVersion": "25.3.RC1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/06/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "7.1.RC1",
+          "mindClusterVersion": "7.1.RC1",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "2.1.RC1",
+          "mindSpeedVersion": "2.1.0",
+          "mindStudioVersion": "8.1.RC1",
+          "mindSporeVersion": "2.7.0-RC1",
+          "pytorchVersion": "7.1.0",
+          "cannVersion": "8.2.RC1",
+          "hdkVersion": "25.2.0",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/03/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "7.0.RC1",
+          "mindClusterVersion": "7.0.RC1",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "2.0.RC2",
+          "mindSpeedVersion": "2.0.0",
+          "mindStudioVersion": "8.0.RC1",
+          "mindSporeVersion": "2.6.0-RC1",
+          "pytorchVersion": "7.0.0",
+          "cannVersion": "8.1.RC1",
+          "hdkVersion": "25.0.RC1",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      }
+    ],
+    "d806": [
+      {
+        "publishTime": "2026/06/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "26.1.0",
+          "mindClusterVersion": "26.1.0",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "3.1.0",
+          "mindSpeedVersion": "26.1.0",
+          "mindStudioVersion": "26.1.0",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "26.1.1",
+          "cannVersion": "9.1.1",
+          "hdkVersion": "26.1.1 (A3/A2/910/310P/310B系列)；25.7.RC1.10 (350加速卡)；25.6.RC1 (850E超节点/650E服务器)；25.1.RC1 (950超节点)",
+          "vllmVersion": "0.23.0",
+          "sgLangVersion": "5.10.0",
+          "tritonVersion": "3.2.2"
+        }
+      },
+      {
+        "publishTime": "2026/03/30",
+        "supportOutVO": {
+          "detailId": null,
+          "mindSdkVersion": "26.0.0",
+          "mindClusterVersion": "26.0.0",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "26.0.0",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "9.0.1",
+          "hdkVersion": "N/A",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "5.10.0",
+          "tritonVersion": "3.2.1"
+        }
+      },
+      {
+        "publishTime": "2025/12/30",
+        "supportOutVO": {
+          "detailId": 62,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "N/A",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "N/A",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "N/A",
+          "hdkVersion": "N/A",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/09/30",
+        "supportOutVO": {
+          "detailId": 63,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "N/A",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "N/A",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "N/A",
+          "hdkVersion": "N/A",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/06/30",
+        "supportOutVO": {
+          "detailId": 64,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "N/A",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "N/A",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "N/A",
+          "hdkVersion": "N/A",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      },
+      {
+        "publishTime": "2025/03/30",
+        "supportOutVO": {
+          "detailId": 65,
+          "mindSdkVersion": "N/A",
+          "mindClusterVersion": "N/A",
+          "mindEdgeVersion": "N/A",
+          "mindIeVersion": "N/A",
+          "mindSpeedVersion": "N/A",
+          "mindStudioVersion": "N/A",
+          "mindSporeVersion": "N/A",
+          "pytorchVersion": "N/A",
+          "cannVersion": "N/A",
+          "hdkVersion": "N/A",
+          "vllmVersion": "N/A",
+          "sgLangVersion": "N/A",
+          "tritonVersion": "N/A"
+        }
+      }
+    ]
+  }
+}
