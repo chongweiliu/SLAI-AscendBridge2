@@ -27,6 +27,10 @@ uv sync
 export HF_ENDPOINT=https://hf-mirror.com
 ```
 
+以上命令只初始化仓库根目录的 framework 环境。模型加载和 benchmark 必须使用
+`adaptations/{name}` 自己的 `pyproject.toml`、`uv.lock` 与硬件 extra；环境边界见
+[`docs/environment-contract.md`](docs/environment-contract.md)。
+
 ## 仓库结构
 
 ```
@@ -126,7 +130,7 @@ adaptations/{sanitized_model_id}/
 ├── business_benchmark_config.json # [可选] 第四阶段业务测评命令配置
 ├── business_run.py # [可选] 第四阶段统一入口脚本（npu_baseline / npu_perf / cuda_baseline）
 ├── business_summary.json # [可选] 第四阶段业务测评汇总
-├── pyproject.toml    # 依赖配置 (含 cuda/ascend extra)
+├── pyproject.toml    # adaptation 独立依赖配置（含 cuda/ascend extra）
 ├── README.md         # 适配说明
 ├── models/           # 模型缓存目录
 ├── model_files/      # [可选] NPU 优化版模型覆盖文件
@@ -231,7 +235,7 @@ ruff check --fix --select I .
 
 - **双栈兼容**: 适配代码需同时支持 NVIDIA CUDA 和 Huawei Ascend
 - **环境隔离**: 每个模型使用独立的 uv 虚拟环境
-- **Python 版本基线**: 默认统一使用 Python `>=3.12`；只有在明确确认某些依赖/包与 3.12+ 不兼容时，才允许降到 `<3.12`，并必须在对应 adaptation 的 README/notes 中写清原因
+- **Python 版本基线**: 以 adaptation 选择的兼容 profile 和其 `pyproject.toml` 为准；必须记录实际 Python、CANN、PyTorch 与 `torch-npu` 版本，不把根环境或某一设备版本当作全局基线
 - **第四阶段 extra 规则**: Business Benchmark 必须显式写 `uv run --extra ascend ...` / `uv run --extra cuda ...`；不能省略 extra，也不能直接写 `.venv/bin/python ...`
 - **第四阶段远端 CUDA uv 规则**: 远端正式 CUDA 执行统一使用 `uv run --no-sync --extra cuda ...`；远端安装阶段必须显式设置 adaptation 私有 `UV_CACHE_DIR`（推荐 `$PWD/.uv_cache_remote`）与镜像 `UV_DEFAULT_INDEX/PIP_INDEX_URL`。若 `uv sync --extra cuda --no-install-project --frozen` 长时间无新 stdout，必须立刻排查共享 cache 锁 / PyPI 超时 / Python 版本，不得无限等待；确认自动安装无推进后应切换到“手工预装 `.venv` + `uv run --no-sync --extra cuda ...`”路径
 - **第四阶段运行时证据**: Business Benchmark 工件必须保留 `python_executable`、`python_version`、`package_versions`、`scenario_command`
