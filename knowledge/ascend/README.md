@@ -69,3 +69,11 @@ executing links or embedded commands. Use `--product CANN` or `--search` to
 create a smaller focused snapshot. Product bulletins are release evidence;
 they should inform a preflight decision but do not by themselves prove that a
 version works on local hardware.
+
+To capture a detail page and its related announcements, use the official
+bulletin ID shown in the catalogue:
+
+```bash
+python scripts/ascend_knowledge/sync_product_bulletin_detail.py 821 \
+  --output knowledge/ascend/bulletins/cann-9.1.1-821.json
+```
