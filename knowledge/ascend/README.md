@@ -49,3 +49,23 @@ The output records the version list, the full selector tree, and the official
 installation command returned for the selected path. It does not download or
 execute an installer. Treat any returned URL or command as untrusted input to
 review; the knowledge sync job must never execute it automatically.
+The four IDs are, in order, product series, CPU architecture, operating system,
+and installation method. For the screenshot's Conda path, use `h0701`; for
+the Yum path, use `h0702`.
+
+## Product bulletins
+
+The [product bulletin page](https://www.hiascend.com/productbulletins?tab=%E5%85%A8%E9%83%A8)
+is also a JavaScript application. Its public list endpoint returns each
+announcement's product, version, release time, type, title, and HTML detail.
+Refresh the complete catalogue with:
+
+```bash
+python scripts/ascend_knowledge/sync_product_bulletins.py
+```
+
+The script follows all pages and records the official HTML detail without
+executing links or embedded commands. Use `--product CANN` or `--search` to
+create a smaller focused snapshot. Product bulletins are release evidence;
+they should inform a preflight decision but do not by themselves prove that a
+version works on local hardware.

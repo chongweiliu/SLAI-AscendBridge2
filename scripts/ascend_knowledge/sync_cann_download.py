@@ -71,12 +71,17 @@ def main() -> int:
             result["download_tree"] = tree
             if args.ids:
                 ids = [item.strip() for item in args.ids.split(",") if item.strip()]
+                if len(ids) != 4:
+                    raise RuntimeError(
+                        "--ids must contain hardware, CPU architecture, operating system, and install method IDs"
+                    )
                 command_params = {
                     "versionId": args.version_id,
                     "lang": args.lang,
                     "hardwareId": ids[0],
-                    "type": "h05",
-                    "ids": ",".join(ids),
+                    "cpuArchitectureId": ids[1],
+                    "operateSystemId": ids[2],
+                    "installMethodId": ids[3],
                 }
                 if args.current_tab is not None:
                     command_params["currentTab"] = args.current_tab
