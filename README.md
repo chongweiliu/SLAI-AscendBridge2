@@ -233,6 +233,12 @@ uv sync
 uv run python scripts/board_ops.py init
 ```
 
+这里初始化的是仓库根目录的 **framework 环境**，用于 board、checker 和其他框架工具。
+模型运行使用每个 `adaptations/<name>/` 自己的 `pyproject.toml` 和 `uv.lock`；请先
+进入该目录，再按硬件执行 `uv sync --extra ascend` 或 `uv sync --extra cuda`。
+根目录没有定义这两个 optional extra，因此不要在根目录执行 `uv sync --extra ascend`。
+完整边界和版本选择见 [`docs/environment-contract.md`](docs/environment-contract.md)。
+
 ### 4. 推荐环境变量
 
 ```bash
@@ -696,10 +702,15 @@ uv run python business_benchmark/scripts/check_business_benchmark_run.py --adapt
 
 ```bash
 cd adaptations/<name>
-uv run python demo.py
-uv run python accuracy_run.py --use-pretrained
-uv run python accuracy_run_perf.py --use-pretrained
+uv sync --locked --extra ascend
+uv run --no-sync --extra ascend python demo.py
+uv run --no-sync --extra ascend python accuracy_run.py --use-pretrained
+uv run --no-sync --extra ascend python accuracy_run_perf.py --use-pretrained
 ```
+
+CUDA 验证使用 `uv sync --locked --extra cuda` 和
+`uv run --no-sync --extra cuda ...`。CANN、Python、PyTorch 与 `torch-npu`
+版本必须按兼容 profile 选择，不能把某一台机器的版本当成所有设备的全局要求。
 
 如果当前模型只做到前三个阶段，可以不启用 `business_benchmark`。
 

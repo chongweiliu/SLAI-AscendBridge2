@@ -30,6 +30,9 @@ fi
 
 ## 1.5 CANN 版本选择（重要）
 
+具体硬件代际的选择以 [兼容 profile](references/compatibility-profiles.md) 为准；本节
+的版本表是 profile 的背景说明，不能把单一组合当成所有设备的全局要求。
+
 **默认用 CANN 9.0.0**（最新主流发布版本）。配套组件版本同步：
 
 | CANN | torch-npu | PyTorch | 备注 |
