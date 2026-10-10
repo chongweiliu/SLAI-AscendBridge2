@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "evidence_type": "official_api_response",
+  "source_url": "https://www.hiascend.com/cann/download",
+  "api_root": "https://www.hiascend.com/ascendgateway/ascendservice",
+  "retrieved_at": "2026-10-09T16:30:11.866012+00:00",
+  "language": "zh",
+  "versions": [
+    {
+      "versionId": 793,
+      "versionName": "9.2.0-beta.2",
+      "publishTime": "2026/09/01"
+    },
+    {
+      "versionId": 795,
+      "versionName": "9.1.1",
+      "publishTime": "2026/09/01"
+    },
+    {
+      "versionId": 779,
+      "versionName": "9.2.0-beta.1",
+      "publishTime": "2026/08/11"
+    },
+    {
+      "versionId": 796,
+      "versionName": "9.1.0",
+      "publishTime": "2026/07/31"
+    },
+    {
+      "versionId": 800,
+      "versionName": "preview",
+      "publishTime": "2026/09/30"
+    },
+    {
+      "versionId": 751,
+      "versionName": "9.1.0-beta.3",
+      "publishTime": "2026/07/13"
+    },
+    {
+      "versionId": 745,
+      "versionName": "9.0.1",
+      "publishTime": "2026/07/02"
+    },
+    {
+      "versionId": 750,
+      "versionName": "9.1.0-beta.1",
+      "publishTime": "2026/05/15"
+    },
+    {
+      "versionId": 734,
+      "versionName": "9.0.0",
+      "publishTime": "2026/04/30"
+    },
+    {
+      "versionId": 684,
+      "versionName": "9.0.0-beta.2",
+      "publishTime": "2026/03/30"
+    },
+    {
+      "versionId": 682,
+      "versionName": "9.0.0-beta.1",
+      "publishTime": "2026/03/02"
+    },
+    {
+      "versionId": 747,
+      "versionName": "8.5.1",
+      "publishTime": "2026/02/24"
+    },
+    {
+      "versionId": 748,
+      "versionName": "8.5.0-一站式",
+      "publishTime": "2026/01/16"
+    },
+    {
+      "versionId": 630,
+      "versionName": "8.5.0.alpha002",
+      "publishTime": "2025/12/12"
+    }
+  ]
+}
