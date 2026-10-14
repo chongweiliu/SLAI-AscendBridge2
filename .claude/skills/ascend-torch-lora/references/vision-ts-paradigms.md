@@ -92,3 +92,25 @@
   同分布且审计链完整；
 - 时序按**序列**为单位切分（不是按窗口滑动采样——同序列多窗口会泄漏）；
 - 其余同 cat1-4 协议：seed 42/43/7/123、写盘前洗牌（#34）、split_meta.json 索引审计、不相交 assert。
+
+## v2 台账批次扩展（2026-09-20/21，dinov3 / grounding-dino / DepthPro / chronos-2 / GOT-OCR 实测）
+
+> 资产：`lora-ws/.v2/scripts/`（ch2_all=chronos 包 API 封装、got_all=ocr_gen 生成式变体）。
+
+- **img_cls（dinov3-vitl16）**：类名 `DINOv3ViTModel` 大小写敏感（pitfalls #56③）；归档
+  "dinov3-imagenette" 实为 **tiny-imagenet 200 类**（pitfalls #58——N_CLASSES 以实际标签空间扫描为准）。
+  top1 0.1→0.2、CE 5.003→4.792（-4.2%）——LVD 强基座+每类 16 图少样本，小幅改善如实判（边界情形）；
+- **det_grounded（grounding-dino-base，开放词汇检测新变体）**：三坑见 pitfalls #55（get_input_embeddings
+  补丁 / labels list[dict] 逐个搬 NPU / 短语解析不稳定→**类别无关 F1@IoU + THR=0.1**）。类别无关
+  F1 0.288→0.358（+24%）、R 0.508→0.649——与 v1 rtdetr（闭集新头、学抑制误报）互补：开放词汇模型
+  base 已具类别知识，LoRA 增益在**定位召回**；
+- **depth（DepthPro-hf）**：1536² eager batch2 OOM→BATCH=1 + 禁 NpuFusedAdamW（pitfalls #57）。
+  δ1 0.908→0.966、AbsRel -42%、RMSE -35%——闭式对齐口径同 DAv2（本文共性模式 6 直接复用），
+  证明该口径跨深度模型族通用；
+- **forecast（chronos-2）**：走 **chronos 包 API**（非 transformers 原生，与 timesfm 路线的接口封装
+  不同需单独写）。MASE 1.724→**1.078**（-37%）——对照 timesfm 的 -1.6% 近同源：增益幅度取决于
+  base 预训练分布与目标域的重叠度，两例构成该规律的两端；
+- **ocr_gen（GOT-OCR2_0，生成式文档 OCR）**：5.x 键名 remap 472/472 + 零样本功能门（pitfalls #52）；
+  val CE -29% 但生成 CER +24%——**#33 分歧 + 59 文档×13.5 epoch 过拟合**（池太小 epoch 失控），
+  终判如实记分歧、不宣称 OCR 能力提升。教训：生成式任务小池（<100 文档）必须控 epoch 或扩池，
+  CE 改善不外推为生成改善。

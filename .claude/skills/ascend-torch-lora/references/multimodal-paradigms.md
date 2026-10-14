@@ -105,3 +105,20 @@
 - 图像路径写**绝对路径**（#41）；训练样本写盘前洗牌（#34）。
 - CSV 的 caption 列可能是**字符串化列表**（`'["caption", ...]'`）：`json.loads` 取首元素，
   只 `strip('"')` 洗不干净（#44）——残留 `["` 会污染训练文本与 sweep 判据。
+
+## v2 台账批次扩展（2026-09-20，Qwen3-VL / SD3.5 / Wan2.2-A14B 实测）
+
+> 资产：`lora-ws/.v2/scripts/`（sd3_all / wan22_all，FM 双扩散变体）。
+
+- **vlm（Qwen3-VL-4B-Instruct）**：processor 输出须透传 **mm_token_type_ids**（M-RoPE 新接口，
+  Qwen2.5-VL 无此键，pitfalls #56②）。ROUGE-L 0.541→0.584（+0.043）、pred_len 166→86（收敛到 GT
+  量级——长度校正为主要可见增益）。sweep 全组合近平选 r8（打平取保守）。token-id 序列定位 assistant
+  头的 labels 掩码法（本文 vlm 细节）跨 Qwen-VL 代际通用；
+- **diffusion（stable-diffusion-3.5-medium，MMDiT + Flow Matching）**：与 SDXL（UNet+DDPM）两点口径差——
+  ① **FM v-MSE**（velocity 预测，非 epsilon）；② SD3Transformer2DModel.forward **位置参数序**不同
+  （hs, enc_hs, pooled, timestep）→ **一律全 kwargs**（pitfalls #56①，错序是静默错误）。
+  T5-XXL 归档缺失 → **零 T5 上下文 + 真实 CLIP pooled**（口径如实记）；512px（原生 1024，显存预算）。
+  v-MSE 0.1416→**0.1141**（-19.4%）。LoRA 目标沿用 DiT attention 后缀匹配打法；
+- **video（Wan2.2-T2V-A14B 高噪专家）**：双专家 MoE-DiT——**只训高噪专家**（单专家口径，不表述为
+  完整 T2V）。FM v-MSE 1.059→**0.442**（-58.2%），零文本=无条件帧去噪口径同 Wan2.1（本文 video 细节）。
+  A14B 单卡可训：单专家权重驻留 + 预编码缓存（共性模式 1）。

@@ -78,7 +78,7 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 - 调度：cosine + warmup。逐 step 记录 loss 到 `loss.jsonl`。
 - `use_cache=False`（训练时）。
 - **大模型(≥13B)多卡训练，两条路线都已实测跑通（27B/Qwen3.5）**：
-  - **路线A：FSDP2 数据并行（吞吐优先，实测 2.18× 提速/样本）**——用 `scripts/lora_train_fsdp.py.tmpl`，`python -m torch.distributed.run --nproc_per_node=N` 启动。**必须**：① 禁用 `expandable_segments`（它破坏 FSDP2 all-gather buffer 复用致假 OOM，pitfalls #19 根因①）；② 训练前 `model.train()`（否则 GC 被跳过、全层激活压单卡，pitfalls #19 根因②）；③ 只逐层 `fully_shard` 不切顶层 + 顶层参数手动上 NPU；④ `torch.optim.AdamW`；⑤ adapter 保存用 `requires_grad` 参数 + `DTensor.full_tensor()`（所有 rank 都要执行，集合通信）。27B 4-die 实测：3.15s/样本。
+  - **路线A：FSDP2 数据并行（吞吐优先，实测 2.18× 提速/样本）**——用 `scripts/lora_train_fsdp.py.tmpl`，`python -m torch.distributed.run --nproc_per_node=N` 启动。**必须**：① 禁用 `expandable_segments`（它破坏 FSDP2 all-gather buffer 复用致假 OOM，pitfalls #19 根因①）；② 训练前 `model.train()`（否则 GC 被跳过、全层激活压单卡，pitfalls #19 根因②）；③ 只逐层 `fully_shard` 不切顶层 + 顶层参数手动上 NPU；④ `torch.optim.AdamW`；⑤ adapter 保存用 `requires_grad` 参数 + `DTensor.full_tensor()`（所有 rank 都要执行，集合通信）；⑥ 保存的 raw state 键含 `.default.` 中缀**非 peft 标准格式**，PeftModel 加载前必须转换（pitfalls #60）；⑦ MoE 模型包装后**事后冻结 `.experts.`**（peft 后缀撞名会误包融合专家，trainable 虚报，pitfalls #61）+ `LORA_DROPOUT=0`。27B 4-die 实测：3.15s/样本；35B/74B MoE 实测见 references/moe-optimization.md §6-7。
   - **路线B：device_map 流水线（稳妥简单）**——`DEVICE_MAP=auto` + `MAX_MEMORY="0:16GiB;1:16GiB;2:16GiB;3:16GiB"`（强制切分，auto 默认不切）+ `GRADIENT_CHECKPOINTING=1` + **`model.train()`**。AdamW（pitfalls #15）+ 装 CANN GE 依赖 `decorator scipy`（pitfalls #14）。mb≥2 填流水线再提速 27%（pitfalls #20）。27B 4-die 实测：6.87s/样本。
   - 选型：吞吐优先路线A（HCCS 快互联下通信被计算掩盖）；求稳/不想管分布式细节用路线B。详见 pitfalls #13-20。
 
@@ -93,7 +93,7 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 - base 与 LoRA 各跑一遍，算 Δ。
 - **生成口径三注意**（pitfalls #31/#32/#30）：base 模型「模板收尾 token ≠ eos」时 `VAL_EOS_ID` 显式指定停止符；Qwen3 系自动 `enable_thinking=False` 且指标剥离 `<think>` 块；无模板模型自动注入 User/Assistant 模板（与训练一致）。
 - **对照实验**（备选超参验证）必须 `OUT_JSON` 指独立文件，否则覆盖主结果（pitfalls #29）。
-- **超参择优**：两阶段 sweep（lr×3 @ r16 → 最优 lr 下 r∈{8,32}，各 60 步）以 64 条 held-out assistant CE 为判据，协议与 4 模型实测数据见 references/hyperparam-selection.md；CE 与生成质量可能背离，开放式任务报告双证据（pitfalls #33）。
+- **超参择优**：两阶段 sweep（lr×3 @ r16 → 最优 lr 下 r∈{8,32}，各 60 步）以 64 条 held-out assistant CE 为判据，协议与 4 模型实测数据见 references/hyperparam-selection.md；CE 与生成质量可能背离，开放式任务报告双证据（pitfalls #33）。**35B+ 大模型/开放式续写终判用 `scripts/val_ce_big.py.tmpl` 补 CE 双证据**（64 条 held-out、device_map 多卡，协议见 references/eval-metrics.md；35B/80B 实测 CE 为主判据）；35B+ 的 sweep 可降级为**确认双组合**（成本考量，见 hyperparam-selection.md）。
 
 ### 7. 概要总结
 - `SUMMARY.md`：环境/模型/数据/LoRA 配置/超参/loss 表/结论。
@@ -152,11 +152,12 @@ python scripts/route_select.py --model-dir <模型> --seq-len 2048 [--steps N | 
 - `scripts/validate_vision_ts.py.tmpl` — 视觉时序五范式 base vs LoRA 验证（top1+CE / F1@IoU0.5 / 实体F1 / AbsRel+δ1+RMSE / MASE+MAE；BASE_RUN_DIR/LORA_RUN_DIR 双侧头加载）
 - `scripts/lora_train_speech.py.tmpl` — 语音音频三范式 LoRA 训练器（asr/audio_cls/tts，PARADIGM 切换；mel 预编码缓存 + batch1×GRAD_ACCUM + transformers 5.x 语音栈修复内置；台账第 6 大类三模型实战验证）
 - `scripts/validate_speech.py.tmpl` — 语音音频三范式 base vs LoRA 验证（CER+ROUGE-L / top1+CE / teacher-forced mel MSE）
-- `scripts/lora_train_fsdp.py.tmpl` — 大模型 FSDP2 数据并行训练（27B 实测 2.18×/样本；含 expandable_segments 禁用与 train() 两个关键修复；MoE 可选 dense/gmm 等价提速补丁 + batch>1 右填充）
+- `scripts/lora_train_fsdp.py.tmpl` — 大模型 FSDP2 数据并行训练（27B 实测 2.18×/样本；含 expandable_segments 禁用与 train() 两个关键修复；MoE 可选 dense/gmm 等价提速补丁 + batch>1 右填充；超大 MoE 加 DENSE_CHUNK 分块 + experts 事后冻结，pitfalls #61；adapter 保存后需转 peft 格式，pitfalls #60）
 - `scripts/plot_loss.py.tmpl` — loss 曲线 + 公网上传
 - `scripts/validate.py.tmpl` — base vs LoRA teacher-forced 多轮验证（预切分文件全量用/思考块剥离/VAL_EOS_ID/OUT_JSON 可覆盖/无模板注入）
+- `scripts/val_ce_big.py.tmpl` — 大模型(35B+) base vs LoRA held-out CE 双证据（device_map 多卡 + MAX_MEMORY 强制切分；开放式续写终判主证据，协议见 references/eval-metrics.md，35B/80B 实测）
 - `scripts/run_env.sh.tmpl` — 环境变量与 CANN source
-- `references/pitfalls.md` — 踩坑全集（51 条，避免重复浪费时间）
+- `references/pitfalls.md` — 踩坑全集（62 条，避免重复浪费时间）
 - `references/moe-optimization.md` — MoE 训练提速双路线（dense/gmm 补丁代码、选型表、等价性验证协议、已试错清单）
 - `references/npu-op-discovery.md` — 三步算子发现法（本机 CANN 接口盘点 → gitcode.com/cann 搜索 → 文档案例落地；报"不支持"前的强制排查流程）
 - `references/label-masking.md` — loss 掩掩三种方法 + 自检

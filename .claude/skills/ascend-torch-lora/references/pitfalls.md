@@ -465,3 +465,128 @@ venv 本体在 /mnt（共享盘）、解释器在 /root（本地盘）——**/r
 `ls -la .venv/bin/python`（看悬空指向）+ `cat .venv/pyvenv.cfg`（home 字段）。
 
 
+
+## #52 transformers 5.x 键名重构："加载成功但全随机"双杀（2026-09-20，v2 台账 GOT-OCR/Qwen3-ASR remap 实战）
+
+**症状**：老归档 ckpt 加载进 5.x 新类，`load_state_dict(strict=False)` 无报错"成功"，但模型输出全随机
+（OCR 乱码/转写不可读）。**根因**：5.x 重构了键名前缀——GOT：`model.layers.*`→`model.language_model.*`、
+`vision_tower_high`→`vision_tower`；Qwen3-ASR：`thinker.*`→`model.*` + projector 改名。strict=False 下
+新旧键零重叠 → 全部 missing 被静默忽略 → 权重仍是随机初始化。
+**修复（双门，缺一不可）**：
+1. **数值门**：remap 后 missing=0 且 unexpected=0（不是"尽量少"）；
+2. **功能门**：零样本真实推理可读（OCR 能出文字 / ASR 能转写清晰样本）——数值门防漏键，功能门防形状巧合。
+**remap 方法**：规则映射（前缀替换表）为主 + shape 匹配兜底（同形状分桶内 sorted 对位，与多模态
+shape-remap 同款）。实战：GOT 472/472、Qwen3-ASR 708/708 张量全命中。
+**配套 config 迁移**：5.x 不识别老 config 嵌套字段——Qwen3-ASR 的 `thinker_config.*` 需字段级迁移扁平化
+（否则 projector 维度落默认 3584 ≠ ckpt 2048，形状错配让 remap 白做）；`audio_config.model_type`
+同步改名（`qwen3_asr_audio_encoder`→`qwen3_asr_encoder`）。
+**预防**：与 #47（strict=False 静默不加载）同族——任何 strict=False 加载必须核对返回的
+missing/unexpected 键数，并抽查若干键确认真实命中。
+
+## #53 自定义 chat 模板角色被静默滤空 → loss 恒 ln2（2026-09-20，Qwen3-Reranker）
+
+**症状**：训练 loss 从头到尾恒 ln2≈0.693（或其它常数），与输入数据完全无关。
+**根因**：模型自带 chat 模板用非标准角色——Qwen3-Reranker 模板以 `selectattr("role","equalto","query")`/
+`"document"` 提取内容，通用 `{"role":"user"}` 消息被 **selectattr 静默滤空** → 所有输入渲染成同一段
+86 token 文本 → 模型只学到先验分布，CE=二分类先验熵 ln2。
+**诊断特征**：loss 与输入无关恒定 → **打印渲染后文本**（apply_chat_template 输出），不同样本渲染相同即实锤。
+**修复**：按模板期望的角色构造 messages（query/document 而非 user/assistant）；凡用自定义模板的模型，
+入训前先渲染 1 条样本人工检查内容确实进入了 prompt。与 #30（无模板注入）同族。
+**实战**：修复后 Qwen3-Reranker margin -0.28→+5.93、MRR 0.633→0.742。
+
+## #54 Qwen3ASRProcessor 语义三坑（2026-09-20，thinker 风格 ASR 实战）
+
+1. `proc(text=纯文本, audio=...)` 返回**裸 token**（无 chat 模板、无音频占位展开）——训练/评测输入
+   必须走规范路径：`proc.apply_chat_template(含 audio 的 conversation, return_dict=True)`；
+2. **labels 掩码=prompt token 长度截断**（prompt 段 -100，只对转写段计 loss）——音频占位展开后
+   字符偏移不可靠，改用 token 计数定位；
+3. `apply_transcription_request` 有 continue_final_message 兼容 bug（transformers 5.16），**不可用**——
+   手工构造 conversation。
+实战：Qwen3-ASR-1.7B（remap 见 #52），base/LoRA 同用自定义指令 prompt 口径，CER 0.1385→0.0080（-94%；
+base 零样本 CER 在该口径下偏高 0.139，报告如实写明）。
+
+## #55 GroundingDino 三坑（2026-09-20，开放词汇检测 det_grounded 变体）
+
+1. **`get_input_embeddings` 未实现** → peft 包装直接崩。修复：给模型类补丁该方法
+   （返回 `self.text_backbone.embeddings` 即可满足 peft 检查）；
+2. **labels 是 list[dict]**（COCO 格式）：batch 搬 NPU 时内部张量必须**逐个搬**——只搬顶层图像，
+   匈牙利匹配里 cdist 混 device 崩；
+3. **post_process 短语解析不稳定**：开放词汇 text label 被整串 prompt 解析成单一标签 → 标签空间爆炸。
+   评测改用**类别无关 F1@IoU**（只匹配框、忽略标签文本）+ 低分数阈值（THR=0.1——该系模型 base
+   分数上限仅 ~0.15，通用 0.3 阈值下全空）。
+实战：grounding-dino-base，类别无关 F1 0.288→0.358（+24%），R 0.508→0.649。
+
+## #56 接口细节四连坑（2026-09-20/21，v2 台账）
+
+1. **SD3Transformer2DModel.forward 位置参数序** = `(hidden_states, encoder_hidden_states,
+   pooled_projections, timestep)`——与 SDXL UNet 的调用签名不同；**一律全 kwargs 调用**
+   （位置传参错序时 FM loss 仍会"正常"下降，属静默错误）；
+2. **Qwen3-VL 需 `mm_token_type_ids`**（M-RoPE 新接口，Qwen2.5-VL 无此键）：processor 输出 dict
+   全键透传，别手挑 input_ids/attention_mask/pixel_values 三件套；
+3. **DINOv3 类名 `DINOv3ViTModel`**（大小写敏感）——`hasattr(transformers,'Dinov3ViTModel')=False`
+   会误判"transformers 不支持"；类名不确定时枚举 `dir(transformers)` 模糊匹配再下结论；
+4. **DebertaV2ForTokenClassification 5.x 构造器不收 num_labels kwarg** → 先写 `config.num_labels=K`
+   再构造（与 #52 的 config 迁移同族：5.x 把更多构造语义收进 config）。
+
+## #57 DepthPro 高分辨率 eager OOM 与融合优化器禁令（2026-09-20，depth 范式 v2 实战）
+
+- DepthPro 原生 1536×1536 输入 + eager 注意力（无 FA 路径），**batch=2 即 OOM**（60GB+）→
+  **BATCH=1**（53GB 峰值通过）；高分辨率回归模型不要硬上 batch，用 GRAD_ACCUM 凑有效 batch；
+- **禁 NpuFusedAdamW**（OPTIM=adamw）：CPT v2 批次已实证该模型族融合优化器崩，depth/视觉回归
+  一律 plain AdamW；
+- 闭式 scale+shift 对齐口径同 vision-ts depth 范式（视差空间 loss、深度空间指标）。
+实战：δ1 0.908→0.966、AbsRel 0.093→0.054（-42%）、RMSE -35%。
+
+## #58 数据集归档名与实际内容不符：dinov3-imagenette 实为 tiny-imagenet 200 类（2026-09-20，CPT v2 同坑二次实证）
+
+归档名带 "imagenette"（10 类），实际内容是 **tiny-imagenet 200 类**。按归档名写 N_CLASSES=10 →
+标签 0-199 落进 10 类头——**NPU 的 CE 不检查越界**（CUDA 会 device-side assert，NPU 静默算出假 loss），
+训练全程 loss"正常"但学到的是垃圾。
+**预防（切分前强制）**：扫描数据集实际标签空间（`max(label)+1` 与类别目录数），N_CLASSES 取**实际值**
+并写入 split_meta.json；归档名/台账名一律不作为类别数依据。
+
+## #59 sweep/official 驱动三 bug + 链式驱动变量自测（2026-09-20，v2 批量驱动实战）
+
+1. **best.json 路径不一致**：official 驱动读固定路径，sweep_mm RERUN 时输出目录带时间戳 → 读到旧
+   择优结果。修复：sweep 输出目录与驱动读取路径统一为同一变量；
+2. **validate 非 nh 范式漏传 LORA_RUN_DIR** → head-only 协议的双侧目录加载失效。修复：驱动参数表
+   按范式逐项自检（与 #50 漏键同族：新增分支先跑参数完整性断言）；
+3. **mlm 验证 preds/truth 混 device**（preds NPU、truth CPU）→ 对比崩或指标失真。修复：指标计算
+   入口统一 `.cpu()`；
+4. **链式驱动（train→convert→validate→报告）变量解析必须自测**：实战案例——`sed` 未剥 `confirm_`
+   前缀直接进 `float()` 崩在链条最后一步（训练数小时白等报告）。链脚本写完后先用 mock 值全链
+   dry-run 一遍再上真任务。
+
+## #60 FSDP2 adapter 保存非 peft 标准格式：`.default.` 中缀必须转换（2026-09-20/21，35B/80B 实战）
+
+FSDP2 训练器保存的是 `adapter_lora_state.pt`（`requires_grad` 参数 raw gather + `DTensor.full_tensor()`），
+键名含 peft active-adapter 中缀 `.default.`（如 `...q_proj.lora_A.default.weight`），
+**PeftModel.from_pretrained 无法直接加载**。
+**修复**（convert_fsdp_adapter.py 模式，早期批实证键名规则）：① 键名 `.default.`→`.`；
+② `safetensors.save_file(..., metadata={"format":"pt"})` 存为 `adapter_model.safetensors`；
+③ 目录需配套 `adapter_config.json`（r/alpha/target_modules 与训练一致）；④ 转换后校验：PeftModel
+包装的 trainable 参数量=训练时（防静默丢键，#47/#52 同族）。
+实战：35B（21.2M）/80B（7.7M）adapter 均转换后才能做 CE 双证据评估与合并。
+
+## #61 80B MoE FSDP2 三连坑：peft 后缀撞名 / dense OOM / dropout 硬约束（2026-09-21，Qwen3-Coder-Next 74B 实战）
+
+1. **peft ParamWrapper 后缀匹配误包融合专家**：融合专家权重是裸参数 `gate_up_proj`（尾部撞 LoRA 候选
+   `up_proj`）与 `down_proj`（直接同名）→ target_modules 后缀匹配把 512 专家权重全部包成可训练，
+   **trainable 虚报 3.4B**（优化器态 41GB，未冻结必 OOM）。修复：包装后**事后冻结**名字含
+   `.experts.` 的全部参数；且开训前用 **meta 设备 30 秒预验证** trainable 名单（数量+名称抽查，
+   应=纯 LoRA 量级，实战 7.7M）；
+2. **dense 补丁在超大 MoE 直接 OOM**：中间张量 ∝ E×T（512 专家×长序列，experts 冻结后仍 OOM）→
+   **DENSE_CHUNK=128 序列分块**（token 维切 128 块逐块 bmm 再拼回，数学恒等——3 步轨迹差 ≤1.3%，
+   bf16 bmm 舍入级；显存降为 ∝ E×chunk；步时 105-140s→73-80s，-30%）；
+3. **LORA_DROPOUT 必须 0**：peft 在 ParamWrapper（FSDP2 DTensor 参数包装）路径明示禁止
+   lora_dropout>0，非 0 构造即报错；200 步量级本无正则需求，直接写死 0。
+实战：FP8→bf16 反量化 74B，200 步 @73s/步 8 卡 FSDP2，train loss 1.034→0.519，CE 双证据 -39.6%。
+详见 references/moe-optimization.md §7。
+
+## #62 pkill 宽模式误杀兄弟进程（2026-09-20，并行批量运维实战 ×2）
+
+同机多工作区并行铺卡时（多个 workspace 跑同名驱动脚本），`pkill -f <脚本名>` 类宽模式会把**所有
+同 cmdline 的兄弟工作区进程一并杀死**（实战 ×2：另一批次的 sweep 被误杀）。
+**正确做法**：杀进程前按 `/proc/<PID>/cwd`（readlink 后匹配目标工作区绝对路径）定位 PID 列表再逐个
+kill；或让驱动脚本 cmdline 自带工作区唯一标识、pkill 模式带上该标识。误杀后对应批次的 sweep/official
+进度必须全量复核（不要假设"杀之前刚好停在断点"）。

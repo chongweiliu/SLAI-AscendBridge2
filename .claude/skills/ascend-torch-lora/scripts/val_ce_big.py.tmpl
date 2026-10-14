@@ -1,0 +1,125 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""val_ce_big.py.tmpl — 大模型(35B+) base vs LoRA 的 held-out assistant-token CE 双证据（device_map 多卡）
+
+场景（协议详见 references/eval-metrics.md「大模型 CE 双证据协议」）：
+- 开放式续写任务 greedy 生成指标（ROUGE/重叠）退化或持平、但 train CE 持续下降时的终判主证据（pitfalls #33）；
+- FSDP2 大模型 adapter（须先经 convert 转 peft 标准格式，pitfalls #60）的加载验证与终判。
+
+复用 cat1 val_loss.py 的字符偏移掩码口径（与训练一致），单进程先评 base 再包 adapter 评 LoRA
+（同模型实例同数据，排除加载差异）。2026-10 实测：35B-A3B CE -12.6%、74B(FP8反量化) CE -39.6%。
+
+env: MODEL_DIR ADAPTER_DIR DATA_FILE MAX_LEN MAX_MEMORY("0:18GiB;1:18GiB;...") OUT_JSON
+     [ASSISTANT_START ASSISTANT_END]
+输出: OUT_JSON = {"base_ce","lora_ce","delta","n","n_label_tokens"} + 末行 JSON
+"""
+import json
+import os
+
+os.environ.setdefault("TORCH_DEVICE_BACKEND_AUTOLOAD", "0")
+os.environ.setdefault("TASK_QUEUE_ENABLE", "1")
+os.environ.setdefault("PYTORCH_NPU_ALLOC_CONF", "expandable_segments:True")
+os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+import torch  # noqa: E402
+import torch_npu  # noqa: E402,F401
+from transformers import AutoModelForCausalLM, AutoTokenizer  # noqa: E402
+
+MODEL_DIR = os.environ["MODEL_DIR"]
+ADAPTER_DIR = os.environ["ADAPTER_DIR"]
+DATA = os.environ["DATA_FILE"]
+MAX_LEN = int(os.environ.get("MAX_LEN", "2048"))
+OUT_JSON = os.environ.get("OUT_JSON", "")
+ASTART = os.environ.get("ASSISTANT_START", "<|im_start|>assistant\n")
+AEND = os.environ.get("ASSISTANT_END", "<|im_end|>")
+max_memory = None
+if os.environ.get("MAX_MEMORY"):
+    max_memory = {}
+    for part in os.environ["MAX_MEMORY"].split(";"):
+        k, v = part.split(":")
+        max_memory[int(k)] = v
+
+
+def build_examples(tok):
+    examples = []
+    with open(DATA, encoding="utf-8") as f:
+        for line in f:
+            msgs = json.loads(line)["messages"]
+            rendered = tok.apply_chat_template(msgs, tokenize=False, add_generation_prompt=False)
+            enc = tok(rendered, return_offsets_mapping=True, add_special_tokens=False)
+            input_ids, offsets = enc["input_ids"], enc["offset_mapping"]
+            spans, pos = [], 0
+            while True:
+                idx = rendered.find(ASTART, pos)
+                if idx < 0:
+                    break
+                end = rendered.find(AEND, idx)
+                if end < 0:
+                    end = len(rendered)
+                spans.append((idx, end))
+                pos = end + 1
+            labels = [-100] * len(input_ids)
+            for ti, (cs, ce) in enumerate(offsets):
+                if cs == ce:
+                    continue
+                for (sp_st, sp_en) in spans:
+                    if cs < sp_en and ce > sp_st:
+                        labels[ti] = input_ids[ti]
+                        break
+            if sum(1 for l in labels if l != -100) == 0:
+                continue
+            examples.append({"input_ids": torch.tensor(input_ids[:MAX_LEN], dtype=torch.long),
+                             "labels": torch.tensor(labels[:MAX_LEN], dtype=torch.long)})
+    assert examples, "0 条可评样本——检查 chat 模板定界符"
+    return examples
+
+
+def eval_ce(model, examples):
+    tot, ntok = 0.0, 0
+    dev0 = next(model.parameters()).device
+    with torch.no_grad():
+        for ex in examples:
+            ids = ex["input_ids"].unsqueeze(0).to(dev0)
+            lbl = ex["labels"].unsqueeze(0).to(dev0)
+            out = model(input_ids=ids, labels=lbl)
+            n = int((lbl != -100).sum())
+            tot += out.loss.item() * n
+            ntok += n
+    return tot / max(1, ntok), ntok
+
+
+def main():
+    tok = AutoTokenizer.from_pretrained(MODEL_DIR, trust_remote_code=True)
+    if tok.chat_template is None:
+        tok.chat_template = ("{%- for message in messages %}{{ message['role'] | capitalize }}: "
+                             "{{ message['content'] }}{{ eos_token }}{%- endfor %}"
+                             "{%- if add_generation_prompt %}Assistant: {%- endif %}")
+    examples = build_examples(tok)
+    print(f"[data] {len(examples)} examples from {DATA}", flush=True)
+    model = AutoModelForCausalLM.from_pretrained(
+        MODEL_DIR, dtype=torch.bfloat16, trust_remote_code=True, attn_implementation="eager",
+        device_map="auto", max_memory=max_memory, low_cpu_mem_usage=True)
+    model.eval()
+    print("[eval] BASE CE ...", flush=True)
+    base_ce, ntok = eval_ce(model, examples)
+    print(f"[eval] BASE mean_ce={base_ce:.6f} (tok={ntok})", flush=True)
+    from peft import PeftModel
+    model = PeftModel.from_pretrained(model, ADAPTER_DIR)
+    model.eval()
+    print("[eval] LORA CE ...", flush=True)
+    lora_ce, _ = eval_ce(model, examples)
+    print(f"[eval] LORA mean_ce={lora_ce:.6f}", flush=True)
+    out = {"model": MODEL_DIR, "adapter": ADAPTER_DIR, "n": len(examples), "n_label_tokens": ntok,
+           "max_len": MAX_LEN, "base_ce": round(base_ce, 6), "lora_ce": round(lora_ce, 6),
+           "delta_ce": round(lora_ce - base_ce, 6),
+           "pct": round((lora_ce - base_ce) / base_ce * 100, 2)}
+    if OUT_JSON:
+        json.dump(out, open(OUT_JSON, "w"), indent=2, ensure_ascii=False)
+    print(json.dumps(out), flush=True)
+    verdict = "✅ CE改善" if out["delta_ce"] < 0 else ("⚠️ 持平" if abs(out["pct"]) < 1 else "⚠️ CE退化")
+    print(f"=== CE 双证据: base={base_ce:.4f} lora={lora_ce:.4f} ({out['pct']:+.2f}%) {verdict}", flush=True)
+
+
+if __name__ == "__main__":
+    main()

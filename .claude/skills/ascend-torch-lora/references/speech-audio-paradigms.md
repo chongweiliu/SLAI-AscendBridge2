@@ -89,3 +89,21 @@
 - whisper 池 611 < 200×4=800 消耗 → 有放回重采样属预期（池即 30% 上限），报告记录池大小；
 - 其余同协议：seed 42/43/7/123、写盘前洗牌（#34）、split_meta.json、不相交 assert、
   probe 前 300 标签覆盖检查（audio_cls 50 类全覆盖才进 sweep）。
+
+## v2 台账批次扩展（2026-09-20，Qwen3-ASR / CosyVoice3 / AST-v2 实测）
+
+> 资产：`lora-ws/.v2/scripts/`（asr3_all，thinker 风格 ASR 变体）。
+
+- **asr（Qwen3-ASR-1.7B，thinker 风格）**：与 whisper（encoder-decoder 原生）完全不同路线，三组坑——
+  ① **5.x 键名 remap 708 张量**（`thinker.*`→`model.*` + projector 改名 + config `thinker_config`
+  字段级扁平化，pitfalls #52 双门）；② **Processor 语义三坑**（pitfalls #54：裸 token 路径/规范
+  apply_chat_template 路径/apply_transcription_request bug）；③ audio 塔 model_type 改名
+  （`qwen3_asr_audio_encoder`→`qwen3_asr_encoder`）。CER 0.1385→**0.0080**（-94%，base/LoRA 同用
+  自定义指令 prompt，base 在该口径下偏高如实注明）。教训：**CausalLM 壳+音频塔的 thinker 风格 ASR**，
+  remap 与 processor 都要按 5.x 新类口径验证，不能沿用 whisper 系经验；
+- **语音生成模型的文本侧口径（CosyVoice3-0.5B）**：归档只有 llm.pt（Qwen2-0.5B 结构的语言侧权重，
+  remap 加载）→ 按**文本续写 CE/ROUGE** 训练评测（ROUGE-L 0.071→0.300，4.3×；overlap 0.053→0.199），
+  口径如实记「LLM 文本侧改善」，**不得表述为合成音质提升**（flow/vocoder 侧不在归档内）——与 tts
+  mel 域口径同一原则：口径只覆盖实际训练的部分；
+- **audio_cls 复证（ast-finetuned-audioset-v2）**：CE 1.836→**0.145**（-92%）、top1 0.9→0.9（天花板）
+  ——#45-47 新头三件套协议直接复用，零新坑（协议稳定性二次实证）。

@@ -91,3 +91,22 @@
   不表述为音质提升。逐条列帧数（frames）——MSE 与谱长无关才可跨条平均。
 
 
+
+## 大模型 CE 双证据协议（2026-10-14，35B/80B FSDP2 实测）
+
+> 实现：`scripts/val_ce_big.py.tmpl`（device_map 多卡）；是 pitfalls #33（CE-生成背离）在
+> 大模型/开放式续写任务上的终判协议。
+
+- **何时必须做**：① 开放式续写（wikitext/codeparrot 类）greedy 生成指标（ROUGE/重叠）退化或持平、
+  但 train CE 持续下降——10 条生成样本噪声大，不能直接终判"退化"；② 35B+ 大模型走完 FSDP2
+  （adapter 须先转 peft 格式，pitfalls #60）后的正式终判。
+- **方法**：64 条 held-out（与训练严格不相交的 val_loss.jsonl）上计算 assistant-token CE，掩码用与
+  训练一致的字符偏移口径；**单进程先评 base、再包 PeftModel 评 LoRA**（同模型实例同数据，排除加载
+  差异）；device_map="auto" + `MAX_MEMORY="0:22GiB;1:22GiB;..."` 强制跨卡切分（auto 默认不切）。
+- **判读**：开放式续写以 **CE 为主证据**——greedy ROUGE 对轻量 adapter（Δ/W≈1.2% 属"改不了风格
+  但扰动分布"区间）的分布扰动敏感，只作辅证；生成式字符重叠同向改善可加强判定。
+- **实测判例**：35B-A3B：CE 2.1322→1.8633（-12.6%）而 ROUGE-L -0.143 → 终判 ✅ 改善（CE 主判据，
+  ROUGE 退化为 #33 已知模式如实记录）；74B（FP8 反量化）：CE 0.8807→0.5321（-39.6%）+ 重叠 +31% +
+  ROUGE 持平 → ✅ 改善（主证据+佐证同向）。
+- **证据落盘**：`ce_dual_evidence.json`（n / n_label_tokens / max_len / base_ce / lora_ce / delta / pct）
+  ——n_label_tokens（64 条即 1.5万-2.4万 token）证明 CE 不是小样本偶然，报告引用该文件。
