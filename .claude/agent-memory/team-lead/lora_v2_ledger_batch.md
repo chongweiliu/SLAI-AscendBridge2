@@ -10,6 +10,7 @@ metadata:
 《24模型CPT台账-v2》24 个新 SOTA 模型全量 LoRA：30% 数据+sweep 择优+10 held-out（协议同 v1 六批）。
 **结果（24/24 全终判）：19 改善 / 4 饱和或无提升(正确结论) / 1 CE-生成分歧(GOT) / 大模型 35B+80B FSDP2 以 CE 双证据收尾（35B -12.6%、80B -39.6%）**。
 总报告 `lora-ws/.v2/LoRA-v2台账-24模型验证报告.md`；CPT 批次地雷记忆 [[cpt-v2-24model-batch-run]] 高度复用。
+**2026-10-14：12 bug + 80B 三连坑 + CE 双证据协议已合入 skill（pitfalls #52-#62 + val_ce_big.py.tmpl + eval-metrics/moe-optimization §7/hyperparam/四范式 v2 节，MR !73；记忆入库 MR !72）**。
 
 ## 结果速记
 - 显著：Qwen3.5-9B ROUGE 0.32→**0.87**；Qwen3-ASR CER **-94%**(remap 708张量)；chronos-2 MASE **-37%**；CosyVoice3 LLM侧 ROUGE **4.3×**(llm.pt=Qwen2-0.5B remap)；gliner2 F1 0.10→**0.80**(encoder.*→deberta.* remap)；Wan2.2-A14B 高噪专家 v-MSE **-58%**；DepthPro AbsRel **-42%**(禁融合优化器+batch1)；Qwen3-Embedding MRR +0.075；Qwen3-Reranker MRR +0.11(margin -0.28→+5.9)
