@@ -1,8 +1,8 @@
-# SLAI-AscendBridge2.3
+# SLAI-AscendBridge2.5
 
 `SLAI-AscendBridge2` 是一款面向华为昇腾 NPU 的自动化智能体编排、单模型适配与推理部署框架，用于将 PyTorch 模型迁移到 Ascend。它支持从模型发现、环境治理、代码适配、精度评测到 NPU 性能优化的闭环流程；如果需要，也可以继续扩展到第四阶段 `business_benchmark`。
 
-当前版本为 **v2.3**。在 v2.0 模型适配、评测和优化能力的基础上：v2.1 新增 **vLLM-Ascend 自动部署**能力（本机/SSH/Kubernetes/CCE/ACK 推理服务部署与真实请求验收）；v2.2 新增 **CANNBot 按需协同适配**（仅在标准 PyTorch 与 `torch_npu` 专用接口均无法解决算子缺口时，才调用 CANNBot 生成 Ascend C 自定义算子）；v2.3 新增 **昇腾 NPU 继续预训练（CPT）** 能力，通过 `ascend-torch-cpt` Skill 把任意 HF 模型 + 语料在昇腾 NPU 上端到端跑通继续预训练，覆盖 10 类训练范式自动选型（文本 LM / Encoder MLM / Seq2Seq / 扩散流匹配与 DDPM / 音频-LLM / MLIP 力场 / ViT-MAE / VLM 文本头 / 视觉时序音频专用 + Keras→PyTorch 迁移）、单卡/DDP/FSDP2/模型并行自动选型、torch_npu 融合路径、超参自动择优、实时用时表、loss 曲线（公网直链）、训练前后域内评估与断点续训，附 140 条实战踩坑与 20 个标准脚本模板。
+当前版本为 **v2.5**。在 v2.0 模型适配、评测和优化能力的基础上：v2.1 新增 **vLLM-Ascend 自动部署**能力（本机/SSH/Kubernetes/CCE/ACK 推理服务部署与真实请求验收）；v2.2 新增 **CANNBot 按需协同适配**（仅在标准 PyTorch 与 `torch_npu` 专用接口均无法解决算子缺口时，才调用 CANNBot 生成 Ascend C 自定义算子）；v2.3 新增 **昇腾 NPU 继续预训练（CPT）** 能力，通过 `ascend-torch-cpt` Skill 把任意 HF 模型 + 语料在昇腾 NPU 上端到端跑通继续预训练，覆盖 10 类训练范式自动选型（文本 LM / Encoder MLM / Seq2Seq / 扩散流匹配与 DDPM / 音频-LLM / MLIP 力场 / ViT-MAE / VLM 文本头 / 视觉时序音频专用 + Keras→PyTorch 迁移）、单卡/DDP/FSDP2/模型并行自动选型、torch_npu 融合路径、超参自动择优、实时用时表、loss 曲线（公网直链）、训练前后域内评估与断点续训，附 140 条实战踩坑与 20 个标准脚本模板；v2.5 新增 **昇腾 NPU LoRA 监督微调（SFT）** 能力，通过 `ascend-torch-lora` Skill 把任意 HF 模型 + 对话/指令数据在昇腾 NPU 上端到端跑通 LoRA 微调，覆盖 19 类训练范式自动选型（CausalLM 指令 SFT / 嵌入·重排·翻译·分类·NER·MLM·MIM 七范式 / VLM·文生图·视频生成三范式 / 图像分类·目标检测·版面 NER·深度估计·时序预测五范式 / ASR·音频分类·TTS 三范式）、单卡/FSDP2/device_map 自动选路（实测至 74B）、两阶段 sweep 超参择优、MoE 训练提速（dense/gmm 数学等价补丁）、base vs LoRA 验证对比与大模型 CE 双证据终判、loss 曲线（公网直链）与实时用时表，附 62 条实战踩坑与 16 个标准脚本模板，两批台账共 48 模型实战归档。
 
 这个仓库是**框架仓**，负责脚本、检查器、调度骨架、dashboard、`.claude` 下的 agents / skills / agent-memory，以及 prompt 模板，不默认携带公开 adaptation 集合。模型级 adaptation 建议放在独立仓库 `SLAI-AscendBridge2-Adaptations`，或按你的内部目录结构单独维护。
 
@@ -10,6 +10,32 @@
 
 - `.agents -> .claude`
 - `AGENTS.md -> CLAUDE.md`
+
+## v2.5 新增功能
+### 昇腾 NPU LoRA 监督微调（SFT）功能
+
+v2.5 新增 `ascend-torch-lora` Skill，把任意 HuggingFace 模型 + 对话/指令数据集在昇腾 NPU（Ascend 910/910B/910C/950 等）上端到端跑一遍 LoRA 监督微调（SFT / instruction tuning），并产出训练脚本、loss 曲线（含公网直链）、LoRA adapter 权重、概要总结与 base vs LoRA 验证对比。
+
+用户只需给出【模型权重路径】+【对话/指令数据集路径】即可启动；其余超参由 Skill 据模型规模、硬件显存与数据规模自动择优（也可以提示词输入超参内容）。核心能力：
+
+- **训练范式自动选型（19 类，不止 CausalLM）**：CausalLM 指令 SFT（Qwen2/3/3.5、Llama、GLM、Mistral 等，含多模态模型的文本语言头）；非 CausalLM 七范式（embed 双塔检索 InfoNCE / seq2seq 翻译 / rerank 重排打分（回归头与生成式 yes-no 两变体）/ cls 分类 / ner token 分类 / mlm 掩码重建 / mim MAE 视觉重建）；多模态生成三范式（vlm 图像描述与视觉指令 / diffusion 文生图 UNet·MMDiT（DDPM 与 Flow Matching 双口径）/ video 视频生成 DiT）；视觉时序五范式（img_cls / det 目标检测（闭集 DETR 与开放词汇 GroundingDino）/ layout_ner 文档版面 / depth 单目深度 / forecast 时序预测）；语音音频三范式（asr 语音识别（whisper 系与 thinker 风格）/ audio_cls 音频分类 / tts 语音合成）。新头范式 base 侧自带 **head-only 线性探针基线**（同头初始化/同步数/同 lr），公平回答"LoRA 是否优于纯线性探针"
+- **自动选路（route_select）**：按模型大小 + 空闲卡自动决策单卡 / FSDP2 数据并行 / device_map 流水线；`--probe` 自动 2 步试训（兼容性/显存校准/ETA 三合一）；大模型实测至 74B（FP8 块状反量化 bf16 后 8 卡 FSDP2，200 步 @73s/步）
+- **两阶段 sweep 超参择优**：lr×3 @ r16 → 最优 lr 下 r∈{8,32}，各 60 步，以 64 条 held-out assistant CE 为判据；48 模型实测规律沉淀（新头/域差大→2e-4/r32、近同源饱和→保守档且"持平是正确结论"、小数据 reranker→中秩防过拟合）；35B+ 大模型降级为**确认双组合**经济策略（多卡成本考量）
+- **MoE 模型训练提速**：`MOE_IMPL=dense|gmm` 数学等价补丁——dense bmm 短序列步时 -34%，`npu_grouped_matmul` 长序列 3-8× + 省显存 30%，附四层等价性验证协议（微观 dx/dw → step1 loss 逐位 → 多步轨迹 → Δ/W 幅度）；超大 MoE（512 专家/74B）DENSE_CHUNK 序列分块 + experts 事后冻结；35B-A3B 4 卡 FSDP2 实测 11.2s/步
+- **原始语料 → SFT 任务化**：`corpus_to_sft` 一条命令把维基/文章/代码/偏好对任务化（4 种范式），产出 train/probe/val_loss/val10 四份文件 + 30% 池/held-out 严格不相交的索引审计（split_meta.json），内置"无信息间隙"自检（间隙曾致 83.7% 样本不可学）
+- **loss 掩码口径**：字符偏移法（渲染文本对齐，掩 prompt 只对 assistant 回复计 loss）或 token-id 序列定位 assistant 头（多模态图像 token 展开后专用）；无模板模型自动注入与训练一致的 User/Assistant 模板；自定义模板角色不匹配（loss 恒 ln2）有诊断协议
+- **base vs LoRA 验证对比**：生成式三指标（char ROUGE-L / 字符重叠 Jaccard / 生成长度）三角验证 + 分范式指标（CER / MASE / AbsRel+δ1 / 实体 F1 / 固定掩码 CE / 固定噪声 MSE / mel MSE / MRR+hit@1）；逐条输出 + 双侧对照 + 口径诚实限定；**大模型 CE 双证据协议**（`val_ce_big.py.tmpl`：64 条 held-out、device_map 多卡，开放式续写以 CE 为主判据——greedy 生成指标对轻量 adapter 噪声大，35B CE -12.6% / 74B CE -39.6% 实测判例）
+- **FSDP2 大模型全流程**：expandable_segments 自动守卫（破坏 all-gather buffer 复用致假 OOM）、`model.train()` 双根因修复、DTensor adapter 保存与 `.default.` 中缀转 peft 标准格式、MoE experts 冻结与 trainable 名单 meta 预验证
+- **loss 曲线 + 公网直链 + 实时用时表**：matplotlib 画图（EMA 平滑），catbox.moe/0x0.st/uguu.se 顺序上传取直链，外网全不通降级表格
+- **踩坑清单与标准模板**：**62 条真实踩坑**（transformers 5.x 键名重构"加载成功但全随机"remap 双门（数值门+功能门）、5.x 语音栈五连坑、模型内新头×peft×融合优化器三件套、peft 后缀撞名误包融合专家、自定义 chat 模板角色静默滤空、sweep 判据污染确认复验、NPU CE 标签越界假 loss、数据集归档名实不符、FSDP2 adapter 格式转换等）+ **16 个可直接复用的脚本模板**（自动选路器 / 文本 SFT / 七范式任务训练器 / 多模态·视觉时序·语音训练器与验证器 / FSDP2 / 原始语料任务化 / CE 双证据 / loss 绘图等）+ 12 个专题 references（超参选择 / 标签掩码 / 评估指标 / MoE 提速 / NPU 算子发现法 / 非 CausalLM·多模态·视觉时序·语音四范式专题 / 原始语料任务化 / 环境配置 / 踩坑全集）
+
+> 与 CPT（`ascend-torch-cpt`，v2.3）的区分：CPT 喂**原始语料**做继续预训练（全文 next-token CE）；本 Skill 是 **SFT**——喂 chat/指令对话数据且只对 assistant 回复算 loss。范围：单机多卡（1–8 卡）。
+
+适用场景：在已有 HF 模型上"LoRA 微调 / SFT / 指令微调 / 对话微调"（含 MoE 模型如 Qwen3.x-A3B 系），需要 NPU + 模型 + 对话数据 + sweep 择优 + loss 曲线 + base vs LoRA 验证的端到端闭环。
+
+实战归档：v1 台账六批 24 模型 + v2 台账 24 模型（24/24 全终判：19 改善 / 4 饱和或无提升（如实结论）/ 1 CE-生成分歧；含 35B MoE 与 74B FSDP2 大模型收尾）。
+
+Skill 与全部 references/scripts 位于 `.claude/skills/ascend-torch-lora/`。示例见下方"昇腾 NPU LoRA 监督微调（SFT）"章节。
 
 ## v2.3 新增功能
 ### 昇腾 NPU 继续预训练（CPT）功能
@@ -99,7 +125,8 @@ SLAI-AscendBridge2/
 │       ├── vllm-ascend-dtype-selection/ # dtype 约束决策
 │       ├── vllm-ascend-consistency-validation/ # 服务一致性验收
 │       ├── ascend-driver-firmware/    # 驱动、固件和 CANN 诊断
-│       └── ascend-torch-cpt/          # 昇腾 NPU 继续预训练(CPT)技能、知识库、脚本模板
+│       ├── ascend-torch-cpt/          # 昇腾 NPU 继续预训练(CPT)技能、知识库、脚本模板
+│       └── ascend-torch-lora/         # 昇腾 NPU LoRA 监督微调(SFT)技能、知识库、脚本模板
 ├── .agents -> .claude                 # 兼容部分 agent 工具的目录入口
 ├── AGENTS.md -> CLAUDE.md             # 兼容 AGENTS.md 约定
 ├── adaptation/
@@ -255,13 +282,15 @@ export TASK_QUEUE_ENABLE=1
 
 ## 使用指南
 
-下面分五种典型使用方式：
+下面分七种典型使用方式：
 
 1. `Claude` 自动批量编排
 2. `Claude` 单模型连贯适配
 3. `Codex / Cursor` 单模型连贯适配
 4. `CANNBot` 按需协同适配
 5. `vLLM-Ascend` 自动部署
+6. 昇腾 NPU 继续预训练（CPT）
+7. 昇腾 NPU LoRA 监督微调（SFT）
 
 ### 1. Claude 自动批量编排
 
@@ -668,6 +697,72 @@ seq_len、batch、lr、并行方式、是否评估等未指定时，由 Skill �
 - `outputs/train_summary.json` 训练概要 + `cpt_model_state.pt`（评估用）/ `ckpt_latest.pt`（续训用）
 - `outputs/eval_results.json` 训练前后域内评估对比（PPL/acc/F1/CE/MSE 等按范式选择）
 - `README.md` 总结报告（超参表、loss 收敛、关键修正记录、复跑命令 + 完整用时表）
+
+---
+
+### 7. 昇腾 NPU LoRA 监督微调（SFT）
+
+适用场景：
+
+- 已有 HF 模型权重 + 对话/指令数据集（或原始语料可先任务化），希望在昇腾 NPU 上做 LoRA 微调 / SFT / 指令微调
+- 需要范式判定、数据切分审计、sweep 择优到 base vs LoRA 验证的端到端闭环，不想手写训练脚本
+- 需要训练过程可观测（loss 曲线、公网直链）与终判证据（分范式指标 + 大模型 CE 双证据）
+
+#### 启动方式
+
+在仓库根目录启动 Claude 后，直接用自然语言给出【模型权重路径】+【对话/指令数据集路径】，`ascend-torch-lora` Skill 会自动触发：
+
+```text
+请在昇腾 NPU 上对 Qwen3.5-4B 做 LoRA 微调。
+模型权重：/mnt/models/Qwen3.5-4B
+训练数据：/mnt/data/my_sft_data.jsonl（{"messages"} chat 格式）
+```
+
+lr、LoRA 秩、并行方式、验证口径等未指定时，由 Skill 据模型规模、显存与数据规模自动择优（两阶段 sweep）；产物统一归档到 `lora-ws/<模型名>-lora/`。
+
+#### 多范式示例
+
+```text
+# 原始语料（维基/文章/代码）——先任务化再 SFT
+请把 /mnt/data/wiki_zh.jsonl（{"text"} 纯文本）任务化后对 Qwen3.5-0.8B 做 LoRA 微调
+
+# 检索嵌入（embed，InfoNCE 三元组）
+请对 Qwen3-Embedding-0.6B 做 LoRA 微调，数据 /mnt/data/retrieval_triplets.jsonl（{"anchor","positive","negative"}）
+
+# 重排（rerank）/ 分类（cls）/ NER / MLM / MAE（mim）
+请对 bge-reranker-v2-m3 做 LoRA 微调，数据 /mnt/data/mmarco_zh.jsonl（{"query","positive","negative"}）
+
+# 多模态（vlm 图像描述 / diffusion 文生图 / video 视频生成）
+请对 SDXL 做 LoRA 微调，数据 /mnt/data/nouns.parquet（图像+prompt）
+
+# 视觉时序（img_cls / det / layout_ner / depth / forecast）
+请对 Depth-Anything-V2-Small 做 LoRA 微调，数据 /mnt/data/nyu/（图像+深度 .npy）
+
+# 语音音频（asr / audio_cls / tts）
+请对 whisper-large-v3-turbo 做 LoRA 微调，数据 /mnt/data/librispeech_clean100/（音频+转写）
+
+# MoE 大模型（自动 FSDP2 + dense/gmm 提速补丁）
+请对 Qwen3.6-35B-A3B 做 LoRA 微调，数据 /mnt/data/wikitext_train.jsonl
+```
+
+#### 自动流程（7 步）
+
+```text
+环境探测与搭建（CANN 9.0.0 / torch_npu matmul 健康检查 / uv venv）
+-> 自动选路与超参（route_select：单卡 / FSDP2 / device_map + --probe 2 步试训）
+-> 数据准备（转 chat + loss 掩码 + 30% 池 / held-out 切分，split_meta.json 索引审计）
+-> 训练（两阶段 sweep 择优 -> 200 步正式训练；NpuFusedAdamW + bf16 autocast + grad-ckpt + cosine）
+-> loss 曲线（EMA 平滑 + 公网直链，外网不通降级表格）
+-> base vs LoRA 验证（10 条未用数据逐条输出 + 双侧对照；35B+ 补 CE 双证据终判）
+-> 概要总结（SUMMARY.md：环境/超参/loss 表/逐条验证/终判结论）
+```
+
+#### 产出清单（lora-ws/&lt;模型名&gt;-lora/）
+
+- 按范式生成的训练/验证脚本（`lora_train*.py` / `validate*.py`）与数据准备脚本
+- `outputs/lora_adapter/` LoRA adapter 权重（FSDP2 产物含 peft 标准格式转换）+ `loss.jsonl` + `loss_curve.png`（附公网直链）
+- `outputs/validation_results.json` base vs LoRA 对比（分范式指标）+ `best.json`（sweep 择优）+ `split_meta.json`（切分审计）+ 大模型 `ce_dual_evidence.json`（CE 双证据）
+- `SUMMARY.md` 概要总结（超参表、loss 收敛、逐条验证效果、终判结论）
 
 ---
 
