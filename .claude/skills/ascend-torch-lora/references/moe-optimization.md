@@ -79,3 +79,22 @@ torchtitan-npu 的 `aten::_grouped_mm` PrivateUse1 桥接让 PyTorch 核心公�
 单层基准（fwd+bwd, E=256/K=8, ms/层）：T=290: eager 1622.7 / dense 27.1 / gmm 10.0；
 T=2048: 1669.9 / 97.8 / 15.0；T=4096: 1715.7 / 178.6 / 22.0。
 完整探针与验证脚本：`lora-ws/Qwen3.6-35B-A3B-lora/scripts/`（step_probe.py / gmm_moe_test.py / gmm_layer_bench.py）。
+
+## 7. 超大 MoE 扩展（2026-09-21，Qwen3-Coder-Next 74B 8卡 FSDP2 实测）
+
+> 前置口径：FP8 块状量化归档（128×128 块）须先反量化 bf16——40 分片并行转换（dequant_fp8 模式，
+> 148.4GB/74391 键，config 删 quantization_config 后按普通 bf16 模型加载）。台账"30B"是**激活参数**
+> （A3B 式口径），实际总参 79.7B——**排卡前先按架构算总参**，激活参数量级会严重低估显存与卡数需求。
+
+- **DENSE_CHUNK 序列分块（512 专家量级的 dense 路线必配）**：dense 补丁中间张量 ∝ E×T，512 专家+
+  长序列下即使 experts 已冻结仍 OOM → 按 token 维切块（DENSE_CHUNK=128）逐块 bmm 再拼回。数学恒等
+  （3 步轨迹差 ≤1.3%，bf16 bmm 舍入级），显存降为 ∝ E×chunk，步时 105-140s→73-80s（-30%）。
+  §2 选型表的"短序列 dense 胜"结论在超大 E 下依然成立，但要加分块；
+- **experts 事后冻结（peft 后缀撞名，pitfalls #61①）**：融合专家裸参数 `gate_up_proj`（尾撞候选
+  `up_proj`）/`down_proj`（直接同名）会被 ParamWrapper 误包为可训 → trainable 虚报 3.4B/优化器态 41GB。
+  包装后按名字含 `.experts.` 冻结 + **meta 设备 30 秒预验证 trainable 名单**（应=纯 LoRA，实战 7.7M：
+  注意力 + linear_attn out_proj）；
+- **LORA_DROPOUT=0**：ParamWrapper 路径硬约束（peft 明示禁 dropout>0），非 0 构造即报错；
+- **实测**：200 步 @73s/步（4.07h），train loss 1.034→0.519（-50%）；CE 双证据 0.881→0.532（-39.6%，
+  协议见 eval-metrics.md）。与 35B 批（256 专家/4卡/dense 11.2s/步）对比：专家数×2、总参×2.2 →
+  卡数×2、步时×6.5——超大 MoE 的步时按 E×T×总参联合估算，不要按 35B 线性外推。

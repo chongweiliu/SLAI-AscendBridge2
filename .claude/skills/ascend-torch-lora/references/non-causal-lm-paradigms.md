@@ -65,3 +65,23 @@ q_lin,k_lin,v_lin,out_lin,lin1,lin2           # DistilBERT
 - **"dev-only"数据集**（如 mmarco 只有 100 query 的 dev）：以 query 为切分单位（30% query 训练），
   训练对由负采样扩展（每 query 采样 N 负例），**不要**把 999 个负例全部塞进训练
 - 训练样本写盘前必须洗牌（#34：源文件有序 + 索引排序 → probe 全同标签）
+
+## v2 台账批次扩展（2026-09-20，Qwen3-Embedding / Qwen3-Reranker / gliner2 / nllb-1.3B / twitter-roberta 实测）
+
+> 资产：`lora-ws/.v2/scripts/`（lora_train_v2t 五变体：cls_nh/embed_lt/rerank_yn/ner_nh/mlm_nh + 头机制）。
+> **rerank_yn 是生成式 yes/no 打分变体**——Qwen3-Reranker 是 CausalLM 打分器（对 "yes"/"no" token
+> logits 取分差），不是 SequenceClassification 回归头；与 v1 的 bge-reranker（回归头 softplus）互补成对。
+
+- **embed（末 token 池化变体 embed_lt）**：Qwen3-Embedding-0.6B + 检索三元组，MRR@20 0.858→**0.933**、
+  hit@1 0.8→0.9、margin 0.10→0.23——**强基座仍提升**（v1 bge-m3 同结论）。decoder 系嵌入模型池化取
+  **末 token**（非 CLS），InfoNCE 口径与 v1 一致（scale=20、in-batch 负例、真 batch 16）；
+- **rerank（yes/no 变体）**：margin -0.28→**+5.93**、MRR(1正+99负) 0.633→0.742。两坑：① 自定义模板
+  角色 query/document，通用 user 被静默滤空 → loss 恒 ln2（pitfalls #53，诊断=打印渲染文本）；
+  ② 30 query 小数据下 r32 val 反升 → sweep 选 2e-4/r16（大秩过拟合，见 hyperparam-selection.md）；
+- **ner_nh（DeBERTa 系 remap + 新头）**：gliner2-base-v1，ckpt 与 5.x 类键名 `encoder.*`→`deberta.*`
+  remap 198 张量（pitfalls #52 双门：missing/unexpected=0 + 零样本实体可读）；实体 F1 0.10→**0.797**、
+  CE 0.712→0.264（head-only 基线协议同 vision-ts）。DebertaV2 num_labels 写 config（pitfalls #56④）；
+- **饱和/无提升两新样本**：nllb-200-distilled-1.3B（1.3B 蒸馏版强于 v1 的 600M 基线，ROUGE-L 持平
+  0.5235→0.5221、overlap +0.038、pred_len 收敛到 GT——**基座强度会掩盖 LoRA 增益**，如实记）；
+  twitter-roberta-sentiment（base 10/10 天花板 + 2e-4 激进阶微过拟合 CE 0.123→0.190——饱和任务
+  sweep 近平时选保守档）。
