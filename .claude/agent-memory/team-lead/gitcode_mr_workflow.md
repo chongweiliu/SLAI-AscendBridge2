@@ -132,3 +132,9 @@ unset GITCODE_TOKEN
 - 内容：ascend-torch-lora 三批范式沉淀（cat4 multimodal 9-18 未提交部分 + cat5 vision-ts + cat6 speech，6 模板 + 3 参考 + pitfalls #41-51 + SKILL.md/eval-metrics/hyperparam 追加）+ agent-memory 跨会话累积记忆入库（lora_v1~v6 等 22 文件）+ .gitignore 加 lora-ws/(41GB)。
 - 评审 10 项全过，含端到端复现实测（layoutlmv3 skill 模板 = 实战批次逐位一致）。
 - **跨会话 /root 清理三连**：uv python 解释器（[[venv-interpreter-loss-recovery]]）、git 全局身份（user.name/email 按本文件重设即恢复）、`~/.git-credentials`（丢失→需用户重新提供令牌，本次经对话提供**已视为泄露须轮换**）。开工前先查这三样。
+
+### !72 + !73 (2026-10-14, v2 台账收尾双 MR)
+- **!72**（`docs/lora-v2-batch-memory`，commit `3deea3b`，merge `97bc561`）：v2 台账 24 模型 LoRA 批次记忆入库（lora_v2_ledger_batch.md 新增 + MEMORY.md 索引，24/24 全终判 19改善/4饱和/1分歧）。
+- **!73**（`feat/lora-v2-batch-pitfalls`，commit `09aa0ca`，merge `b58d3a3`）：ascend-torch-lora skill 沉淀——pitfalls #52-#62（11 条）+ 新模板 val_ce_big.py.tmpl + eval-metrics CE 双证据协议 + moe-optimization §7 超大 MoE + hyperparam v2 sweep + 四范式 reference v2 节 + SKILL.md 单行引用。10 文件 +386/-4，回归验证 6 项全过。
+- **新坑**：① MR POST 首次返回空响应（超长多段 body）——**精简 body 重试即成功**，别急着查令牌；② push URL 笔误（`SLAI/AscendBridge2`）返回 403 "project not found"，报错里的 URL 要看清；③ `cmd | grep -v xxx || fallback` 结构中 grep 有输出即 exit 0，**fallback 不会执行**——串联兜底命令别藏在管道后。
+- 跨会话恢复三件套（uv python / git 身份 / ~/.git-credentials）本次全存活，开工前检查照旧。
