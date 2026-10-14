@@ -29,6 +29,7 @@
 - [台账第4大类 3 模型 LoRA（多模态）](lora_v4_cat4_batch.md) — 3/3全改善(VL描述ROUGE+0.062/SDXL MSE-47.6%/Wan MSE-55.4% base零文本预测劣于零预测器)；vlm/diffusion/video三范式沉淀(pixel concat/预编码缓存/peft后缀匹配to_q/shape-remap)；四新坑：切分须写绝对路径/就地改文件必须临时文件+原子替换(截断事故)/flickr caption字符串化列表/pixel_values[0]切片错只剩2视觉token；**2026-09-18 三范式已合入 skill（multimodal-paradigms.md+两模板+#41-44）并用模板全量重跑复现（SDXL/Wan 逐位一致，VL全5组合r32略优）**
 - [台账第5大类 5 模型 LoRA（视觉与时序）](lora_v5_cat5_batch.md) — 5/5改善：layoutlmv3 F1 0.52→0.85最强/depth AbsRel-44%/dinov2 CE-40%/det预算内改善(新头+300图+200步不收敛如实记)/timesfm近同源小幅；**head-only基线协议**(新头范式base侧=冻骨干只训头,同HEAD_SEED)；四新bug：peft冻结模型内新头须重新requires_grad+去重/NpuFusedAdamW拒纯bf16参数组头须.float()/validate字典漏键/sweep污染须确认复验
 - [台账第6大类 3 模型 LoRA（语音音频）](lora_v6_cat6_batch.md) — 3/3改善：whisper CER减半(0.0091→0.0045主场仍降)/AST top1 7→10 CE-91.5%/speecht5 mel MSE-37%；transformers 5.x语音栈五坑：WhisperFE max_length变采样点语义须手动pad3000帧/SpeechT5偶帧+guided_attn崩+pos_weight留CPU/ASTMLPHead layernorm被误清零致CE恒ln(50)+dense候选撞classifier.dense；**纪律：新头范式先单批过拟合测试再sweep**
+- [v2台账 24 模型 LoRA 批量](lora_v2_ledger_batch.md) — 24/24全终判:19改善/4饱和/1分歧(GOT CE-29%但生成CER+24%)；大模型CE双证据收尾(35B -12.6%/80B -39.6%)；**5.x键名重构"加载成功但全随机"双杀**(GOT/ASR须remap+功能门)、Reranker自定义模板角色静默滤空(loss恒ln2)、FSDP2 adapter须.default.转换、80B peft后缀撞名误包experts须事后冻结+DENSE_CHUNK=128、GroundingDino三坑、v2数据90%软链v1切分全复用、pkill宽模式误杀兄弟进程按/proc/cwd定位
 
 ## 模型适配案例
 
