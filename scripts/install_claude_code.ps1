@@ -53,17 +53,16 @@ function Get-ProviderUrl([string]$ProviderKey) {
 }
 
 function Get-ModelUrl([string]$ModelName) {
-    switch -Regex ($ModelName.ToLowerInvariant()) {
-        "^claude-" { return "https://api.anthropic.com" }
-        "^deepseek-" { return "https://api.deepseek.com/anthropic" }
-        "^(glm-|chatglm-)" { return "https://open.bigmodel.cn/api/anthropic" }
-        "^doubao-" { return "https://ark.cn-beijing.volces.com/api/coding" }
-        "^(qwen|qwq)" { return "https://dashscope.aliyuncs.com/apps/anthropic" }
-        "^(minimax-|abab)" { return "https://api.minimaxi.com/anthropic" }
-        "^(kimi-|moonshot-)" { return "https://api.moonshot.cn/anthropic" }
-        "^step-" { return "https://api.stepfun.com/step_plan" }
-        default { return "" }
-    }
+    $normalizedModel = $ModelName.ToLowerInvariant()
+    if ($normalizedModel -match "^claude-") { return "https://api.anthropic.com" }
+    if ($normalizedModel -match "^deepseek-") { return "https://api.deepseek.com/anthropic" }
+    if ($normalizedModel -match "^(glm-|chatglm-)") { return "https://open.bigmodel.cn/api/anthropic" }
+    if ($normalizedModel -match "^doubao-") { return "https://ark.cn-beijing.volces.com/api/coding" }
+    if ($normalizedModel -match "^(qwen|qwq)") { return "https://dashscope.aliyuncs.com/apps/anthropic" }
+    if ($normalizedModel -match "^(minimax-|abab)") { return "https://api.minimaxi.com/anthropic" }
+    if ($normalizedModel -match "^(kimi-|moonshot-)") { return "https://api.moonshot.cn/anthropic" }
+    if ($normalizedModel -match "^step-") { return "https://api.stepfun.com/step_plan" }
+    return ""
 }
 
 function Read-RequiredValue([string]$Prompt, [string]$DefaultValue) {
@@ -162,7 +161,8 @@ function Install-NodeJs {
     if ($nodeCommand) {
         $currentVersion = (& node --version).Trim().TrimStart("v")
         $majorVersion = [int]($currentVersion.Split(".")[0])
-        if ($majorVersion -ge $NodeMinVersion -and (Get-Command npm -ErrorAction SilentlyContinue)) {
+        # PowerShell 可能优先解析到未签名的 npm.ps1；始终检查并调用 npm.cmd。
+        if ($majorVersion -ge $NodeMinVersion -and (Get-Command npm.cmd -ErrorAction SilentlyContinue)) {
             Write-Success "Node.js 已安装: v$currentVersion"
             return
         }
@@ -215,29 +215,32 @@ function Install-NodeJs {
     }
 
     if (-not (Get-Command node -ErrorAction SilentlyContinue)) { throw "Node.js 安装完成，但 node 不在 PATH 中。" }
-    if (-not (Get-Command npm -ErrorAction SilentlyContinue)) { throw "Node.js 安装完成，但 npm 不在 PATH 中。" }
+    if (-not (Get-Command npm.cmd -ErrorAction SilentlyContinue)) { throw "Node.js 安装完成，但 npm.cmd 不在 PATH 中。" }
     Write-Success "Node.js 已安装: $(& node --version)"
-    Write-Success "npm 版本: $(& npm --version)"
+    $npmCommand = (Get-Command npm.cmd -ErrorAction Stop).Source
+    Write-Success "npm 版本: $(& $npmCommand --version)"
 }
 
 function Install-ClaudeCode {
+    $npmCommand = (Get-Command npm.cmd -ErrorAction Stop).Source
     $npmPrefix = Join-Path $env:LOCALAPPDATA "Programs\claude-code"
     New-Item -ItemType Directory -Force -Path $npmPrefix | Out-Null
     Add-UserPath $npmPrefix
-    & npm config set prefix $npmPrefix
+    & $npmCommand config set prefix $npmPrefix
 
-    if (Get-Command claude -ErrorAction SilentlyContinue) {
+    if (Get-Command claude.cmd -ErrorAction SilentlyContinue) {
         Write-Info "正在更新 Claude Code..."
     } else {
         Write-Info "正在安装 Claude Code..."
     }
-    & npm install -g "$ClaudePackage@latest"
+    & $npmCommand install -g "$ClaudePackage@latest"
     if ($LASTEXITCODE -ne 0) {
         Write-Info "默认 npm registry 安装失败，改用 npmmirror。"
-        & npm install -g "$ClaudePackage@latest" --registry=https://registry.npmmirror.com
+        & $npmCommand install -g "$ClaudePackage@latest" --registry "https://registry.npmmirror.com"
     }
     if ($LASTEXITCODE -ne 0) { throw "Claude Code npm 安装失败" }
-    Write-Success "Claude Code 已就绪: $(& claude --version)"
+    $claudeCommand = (Get-Command claude.cmd -ErrorAction Stop).Source
+    Write-Success "Claude Code 已就绪: $(& $claudeCommand --version)"
 }
 
 function Configure-ClaudeCode {
