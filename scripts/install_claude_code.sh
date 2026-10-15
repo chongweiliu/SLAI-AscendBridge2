@@ -1,8 +1,7 @@
 #!/bin/bash
 
-# Claude Code 一键安装脚本（Linux/Windows Git Bash、MSYS2、Cygwin）
+# Claude Code 容器内一键安装脚本
 # 用法: bash install_claude_code.sh [模型名称] [API_KEY] [BASE_URL]
-# Windows 请在 Git Bash、MSYS2 或 Cygwin 中运行，并确保系统自带的 Windows PowerShell 可用。
 # 交互模式 (不传参): 先弹提供方菜单(智谱/百炼/幻方/火山/MiniMax/Kimi/阶跃/Anthropic/自定义),
 #                   选完后填模型名(带默认) → 填 API_KEY, URL 由所选提供方自动给出
 # 非交互示例:
@@ -33,21 +32,6 @@ API_TIMEOUT_MS=3000000
 log_info()    { echo "🔹 $*"; }
 log_success() { echo "✅ $*"; }
 log_error()   { echo "❌ $*" >&2; }
-
-is_windows() {
-    case "$(uname -s 2>/dev/null || true)" in
-        MINGW*|MSYS*|CYGWIN*) return 0 ;;
-        *)                    return 1 ;;
-    esac
-}
-
-to_windows_path() {
-    if command -v cygpath >/dev/null 2>&1; then
-        cygpath -w "$1"
-    else
-        printf '%s\n' "$1"
-    fi
-}
 
 # ========================
 #    参数解析
@@ -207,114 +191,19 @@ echo ""
 # ========================
 #    Node.js 安装
 # ========================
-check_nodejs_windows() {
-    command -v powershell.exe >/dev/null 2>&1 || {
-        log_error "Windows 安装 Node.js 需要 powershell.exe。请安装 Node.js ${NODE_INSTALL_VERSION}+ 后重新运行。"
-        return 1
-    }
-
-    local machine_arch node_arch node_full_ver node_zip node_archive checksums_file temp_dir
-    local dist_base index_data expected_checksum actual_checksum install_root version_dir path_line shell_rc
-    machine_arch=$(uname -m)
-    case "$machine_arch" in
-        x86_64|amd64)   node_arch="win-x64" ;;
-        aarch64|arm64)  node_arch="win-arm64" ;;
-        *) log_error "Unsupported Windows architecture: $machine_arch"; return 1 ;;
-    esac
-
-    if [ -n "${NODE_VERSION:-}" ]; then
-        node_full_ver="$NODE_VERSION"
-        [[ "$node_full_ver" == v* ]] || node_full_ver="v${node_full_ver}"
-    else
-        index_data=""
-        for dist_base in "https://nodejs.org/dist" "https://npmmirror.com/mirrors/node"; do
-            log_info "Resolving latest Node.js ${NODE_INSTALL_VERSION}.x from ${dist_base}..."
-            if index_data=$(curl --fail --show-error --silent --location --retry 3 --connect-timeout 15 "${dist_base}/index.tab"); then
-                node_full_ver=$(awk -v prefix="v${NODE_INSTALL_VERSION}." 'NR > 1 && index($1, prefix) == 1 { print $1; exit }' <<< "$index_data")
-                [ -n "$node_full_ver" ] && break
-            fi
-        done
-        if [ -z "${node_full_ver:-}" ]; then
-            log_error "Unable to resolve the latest Node.js ${NODE_INSTALL_VERSION}.x version. Set NODE_VERSION=v${NODE_INSTALL_VERSION}.x.y and retry."
-            return 1
+check_nodejs() {
+    if command -v node &>/dev/null; then
+        current_version=$(node -v | sed 's/v//')
+        major_version=$(echo "$current_version" | cut -d. -f1)
+        if [ "$major_version" -ge "$NODE_MIN_VERSION" ]; then
+            log_success "Node.js is already installed: v$current_version"
+            return 0
         fi
+        log_info "Node.js v$current_version < $NODE_MIN_VERSION, upgrading..."
     fi
 
-    node_zip="node-${node_full_ver}-${node_arch}.zip"
-    temp_dir=$(mktemp -d "${TMPDIR:-/tmp}/claude-node.XXXXXX")
-    node_archive="${temp_dir}/${node_zip}"
-    checksums_file="${temp_dir}/SHASUMS256.txt"
-    dist_base=""
-    local candidate_base
-    for candidate_base in "https://nodejs.org/dist" "https://npmmirror.com/mirrors/node"; do
-        log_info "Downloading Node.js ${node_full_ver} (${node_arch}) from ${candidate_base}..."
-        if curl --fail --show-error --location --retry 3 --connect-timeout 15 \
-            "${candidate_base}/${node_full_ver}/${node_zip}" -o "$node_archive"; then
-            dist_base="$candidate_base"
-            break
-        fi
-        log_error "Download failed from ${candidate_base}; trying the next mirror."
-    done
-    if [ -z "$dist_base" ]; then
-        rm -rf "$temp_dir"
-        log_error "Failed to download ${node_zip} from all configured mirrors."
-        return 1
-    fi
+    log_info "Installing Node.js..."
 
-    log_info "Verifying Node.js archive checksum..."
-    if ! curl --fail --show-error --silent --location --retry 3 --connect-timeout 15 \
-        "${dist_base}/${node_full_ver}/SHASUMS256.txt" -o "$checksums_file"; then
-        rm -rf "$temp_dir"
-        log_error "Failed to download SHASUMS256.txt from ${dist_base}."
-        return 1
-    fi
-    expected_checksum=$(awk -v filename="$node_zip" '$2 == filename { print $1; exit }' "$checksums_file")
-    actual_checksum=$(INSTALLER_ARCHIVE="$(to_windows_path "$node_archive")" powershell.exe -NoProfile -Command \
-        '(Get-FileHash -Algorithm SHA256 -LiteralPath $env:INSTALLER_ARCHIVE).Hash.ToLowerInvariant()' | tr -d '\r')
-    if [ -z "$expected_checksum" ] || [ "$actual_checksum" != "$expected_checksum" ]; then
-        rm -rf "$temp_dir"
-        log_error "Checksum verification failed for ${node_zip}."
-        return 1
-    fi
-
-    if [ -n "${LOCALAPPDATA:-}" ] && command -v cygpath >/dev/null 2>&1; then
-        install_root="$(cygpath -u "$LOCALAPPDATA")/Programs/nodejs"
-    else
-        install_root="${HOME}/AppData/Local/Programs/nodejs"
-    fi
-    version_dir="${install_root}/node-${node_full_ver}-${node_arch}"
-    mkdir -p "$install_root"
-    rm -rf "$version_dir"
-    log_info "Installing Node.js into ${version_dir}..."
-    INSTALLER_ARCHIVE="$(to_windows_path "$node_archive")" \
-    INSTALLER_DEST="$(to_windows_path "$install_root")" \
-        powershell.exe -NoProfile -Command \
-        'Expand-Archive -LiteralPath $env:INSTALLER_ARCHIVE -DestinationPath $env:INSTALLER_DEST -Force'
-    rm -rf "$temp_dir"
-
-    export PATH="${version_dir}:$PATH"
-    printf -v path_line 'export PATH=%q:$PATH' "$version_dir"
-    for shell_rc in "$HOME/.bashrc" "$HOME/.bash_profile"; do
-        touch "$shell_rc"
-        grep -Fqx "$path_line" "$shell_rc" || printf '%s\n' "$path_line" >> "$shell_rc"
-    done
-    # 同时写入 Windows 用户级 PATH，确保重新打开终端后仍可使用 node/claude。
-    INSTALLER_NODE_DIR="$(to_windows_path "$version_dir")" powershell.exe -NoProfile -Command '
-        $nodeDir = $env:INSTALLER_NODE_DIR
-        $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-        $parts = @($userPath -split ";" | Where-Object { $_ })
-        if (-not ($parts | Where-Object { $_.TrimEnd("\\") -ieq $nodeDir.TrimEnd("\\") })) {
-            [Environment]::SetEnvironmentVariable("Path", (($parts + $nodeDir) -join ";"), "User")
-        }
-    '
-
-    command -v node >/dev/null 2>&1 || { log_error "Node.js installation completed but node is not on PATH."; return 1; }
-    command -v npm >/dev/null 2>&1 || { log_error "Node.js installation completed but npm is not on PATH."; return 1; }
-    log_success "Node.js installed: $(node -v)"
-    log_success "npm version: $(npm -v)"
-}
-
-check_nodejs_unix() {
     local machine_arch node_arch node_full_ver node_tar node_archive checksums_file
     local dist_base index_data expected_checksum actual_checksum install_prefix version_dir
     machine_arch=$(uname -m)
@@ -425,26 +314,6 @@ check_nodejs_unix() {
     log_success "npm version: $(npm -v)"
 }
 
-check_nodejs() {
-    local current_version major_version
-    if command -v node >/dev/null 2>&1; then
-        current_version=$(node -v | sed 's/^v//')
-        major_version=${current_version%%.*}
-        if [[ "$major_version" =~ ^[0-9]+$ ]] && [ "$major_version" -ge "$NODE_MIN_VERSION" ]; then
-            log_success "Node.js is already installed: v$current_version"
-            return 0
-        fi
-        log_info "Node.js v$current_version < $NODE_MIN_VERSION, upgrading..."
-    fi
-
-    log_info "Installing Node.js..."
-    if is_windows; then
-        check_nodejs_windows
-    else
-        check_nodejs_unix
-    fi
-}
-
 # ========================
 #    Claude Code 安装
 # ========================
@@ -488,17 +357,14 @@ configure_claude_json() {
 configure_claude() {
     log_info "Configuring Claude Code..."
 
-    INSTALL_API_KEY="$API_KEY" \
-    INSTALL_PROVIDER_URL="$PROVIDER_URL" \
-    INSTALL_MODEL="$MODEL" \
-    INSTALL_API_TIMEOUT_MS="$API_TIMEOUT_MS" \
+    mkdir -p "$HOME/.claude"
+
     node --eval '
         const os = require("os");
         const fs = require("fs");
         const path = require("path");
         const homeDir = os.homedir();
         const filePath = path.join(homeDir, ".claude", "settings.json");
-        fs.mkdirSync(path.dirname(filePath), { recursive: true });
         const content = fs.existsSync(filePath)
             ? JSON.parse(fs.readFileSync(filePath, "utf-8"))
             : {};
@@ -506,13 +372,13 @@ configure_claude() {
             ...content,
             env: {
                 ...content.env,
-                ANTHROPIC_AUTH_TOKEN: process.env.INSTALL_API_KEY,
-                ANTHROPIC_BASE_URL: process.env.INSTALL_PROVIDER_URL,
-                ANTHROPIC_MODEL: process.env.INSTALL_MODEL,
-                ANTHROPIC_DEFAULT_HAIKU_MODEL: process.env.INSTALL_MODEL,
-                ANTHROPIC_DEFAULT_SONNET_MODEL: process.env.INSTALL_MODEL,
-                ANTHROPIC_DEFAULT_OPUS_MODEL: process.env.INSTALL_MODEL,
-                API_TIMEOUT_MS: process.env.INSTALL_API_TIMEOUT_MS,
+                ANTHROPIC_AUTH_TOKEN: "'"$API_KEY"'",
+                ANTHROPIC_BASE_URL: "'"$PROVIDER_URL"'",
+                ANTHROPIC_MODEL: "'"$MODEL"'",
+                ANTHROPIC_DEFAULT_HAIKU_MODEL: "'"$MODEL"'",
+                ANTHROPIC_DEFAULT_SONNET_MODEL: "'"$MODEL"'",
+                ANTHROPIC_DEFAULT_OPUS_MODEL: "'"$MODEL"'",
+                API_TIMEOUT_MS: "'"$API_TIMEOUT_MS"'",
                 CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: 1,
                 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: 1
             }
@@ -538,6 +404,4 @@ main() {
     echo "🚀 使用方式: claude"
 }
 
-if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
-    main "$@"
-fi
+main "$@"
