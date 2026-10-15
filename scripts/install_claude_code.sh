@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Claude Code 一键安装脚本（Linux/Windows Git Bash、MSYS2、Cygwin）
+# Claude Code Bash 一键安装脚本（Linux/Windows Git Bash、MSYS2、Cygwin）
 # 用法: bash install_claude_code.sh [模型名称] [API_KEY] [BASE_URL]
-# Windows 请在 Git Bash、MSYS2 或 Cygwin 中运行，并确保系统自带的 Windows PowerShell 可用。
+# 原生 Windows PowerShell/CMD 请改用同目录的 install_claude_code.ps1/.cmd。
 # 交互模式 (不传参): 先弹提供方菜单(智谱/百炼/幻方/火山/MiniMax/Kimi/阶跃/Anthropic/自定义),
 #                   选完后填模型名(带默认) → 填 API_KEY, URL 由所选提供方自动给出
 # 非交互示例:
