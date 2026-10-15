@@ -1,3 +1,2 @@
-scripts/install_claude_code.sh text eol=lf
 scripts/install_claude_code.ps1 text eol=crlf
 scripts/install_claude_code.cmd text eol=crlf
