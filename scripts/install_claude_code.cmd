@@ -5,8 +5,11 @@ set "CLAUDE_INSTALLER_MODEL=%~1"
 set "CLAUDE_INSTALLER_API_KEY=%~2"
 set "CLAUDE_INSTALLER_BASE_URL=%~3"
 
-rem 通过内存 ScriptBlock 执行，避免企业 AllSigned 策略拦截本地未签名的 .ps1 文件。
-rem 脚本仍来自与本 CMD 同目录的固定文件，不会修改系统执行策略。
+rem ASCII-only on purpose: cmd.exe decodes .cmd using the console OEM codepage,
+rem so non-ASCII comments can be mis-decoded and break batch parsing.
+rem Run the in-memory ScriptBlock to avoid enterprise AllSigned policy blocking the
+rem local unsigned .ps1. The script still comes from the fixed file next to this CMD
+rem and the system execution policy is not modified.
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command ^
-  "$source = Get-Content -Raw -LiteralPath $env:CLAUDE_INSTALLER_PS1; $installer = [ScriptBlock]::Create($source); & $installer -Model $env:CLAUDE_INSTALLER_MODEL -ApiKey $env:CLAUDE_INSTALLER_API_KEY -BaseUrl $env:CLAUDE_INSTALLER_BASE_URL"
+  "$source = Get-Content -Raw -LiteralPath $env:CLAUDE_INSTALLER_PS1; $installer = [ScriptBlock]::Create($source); . $installer -Model $env:CLAUDE_INSTALLER_MODEL -ApiKey $env:CLAUDE_INSTALLER_API_KEY -BaseUrl $env:CLAUDE_INSTALLER_BASE_URL"
 exit /b %errorlevel%
