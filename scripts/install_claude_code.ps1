@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(Position = 0)]
     [string]$Model,
@@ -248,8 +248,15 @@ function Configure-ClaudeCode {
     $env:INSTALL_PROVIDER_URL = $script:BaseUrl
     $env:INSTALL_MODEL = $script:Model
     $env:INSTALL_API_TIMEOUT_MS = $ApiTimeoutMs
+    # 非 Anthropic 官方模型不在 Claude Code 内置模型目录里，它会把上下文窗口按 200k 兜底并在每次
+    # 启动时告警。显式声明窗口即可消除告警；官方模型本身已知，不需要也不应该覆盖。
+    $isKnownClaudeModel = ($script:Provider -in @("anthropic", "claude")) -or ($script:Model -match "^claude-")
+    $env:INSTALL_MAX_CONTEXT_TOKENS = if ($isKnownClaudeModel) { "" } else { "1000000" }
+    $configScriptPath = Join-Path ([IO.Path]::GetTempPath()) ("claude-config-" + [guid]::NewGuid().ToString("N") + ".js")
     try {
-        & node --eval @'
+        # 先落盘成临时 .js 再执行：Windows PowerShell 5.1 调用原生 EXE 时会吞掉参数里的
+        # 双引号，用 --eval 会把 ".claude.json" 传成 .claude.json 从而报语法错误。
+        $configScript = @'
 const os = require("os");
 const fs = require("fs");
 const path = require("path");
@@ -265,28 +272,34 @@ fs.mkdirSync(path.dirname(settingsPath), { recursive: true });
 const settings = fs.existsSync(settingsPath)
     ? JSON.parse(fs.readFileSync(settingsPath, "utf8"))
     : {};
-fs.writeFileSync(settingsPath, JSON.stringify({
-    ...settings,
-    env: {
-        ...settings.env,
-        ANTHROPIC_AUTH_TOKEN: process.env.INSTALL_API_KEY,
-        ANTHROPIC_BASE_URL: process.env.INSTALL_PROVIDER_URL,
-        ANTHROPIC_MODEL: process.env.INSTALL_MODEL,
-        ANTHROPIC_DEFAULT_HAIKU_MODEL: process.env.INSTALL_MODEL,
-        ANTHROPIC_DEFAULT_SONNET_MODEL: process.env.INSTALL_MODEL,
-        ANTHROPIC_DEFAULT_OPUS_MODEL: process.env.INSTALL_MODEL,
-        API_TIMEOUT_MS: process.env.INSTALL_API_TIMEOUT_MS,
-        CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: 1,
-        CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: 1
-    }
-}, null, 2));
+const env = {
+    ...settings.env,
+    ANTHROPIC_AUTH_TOKEN: process.env.INSTALL_API_KEY,
+    ANTHROPIC_BASE_URL: process.env.INSTALL_PROVIDER_URL,
+    ANTHROPIC_MODEL: process.env.INSTALL_MODEL,
+    ANTHROPIC_DEFAULT_HAIKU_MODEL: process.env.INSTALL_MODEL,
+    ANTHROPIC_DEFAULT_SONNET_MODEL: process.env.INSTALL_MODEL,
+    ANTHROPIC_DEFAULT_OPUS_MODEL: process.env.INSTALL_MODEL,
+    API_TIMEOUT_MS: process.env.INSTALL_API_TIMEOUT_MS,
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: 1,
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: 1
+};
+// 自定义/第三方模型：声明真实上下文窗口，避免 Claude Code 按 200k 兜底并告警。
+if (process.env.INSTALL_MAX_CONTEXT_TOKENS) {
+    env.CLAUDE_CODE_MAX_CONTEXT_TOKENS = process.env.INSTALL_MAX_CONTEXT_TOKENS;
+}
+fs.writeFileSync(settingsPath, JSON.stringify({ ...settings, env }, null, 2));
 '@
+        [IO.File]::WriteAllText($configScriptPath, $configScript, (New-Object Text.UTF8Encoding($false)))
+        & node $configScriptPath
         if ($LASTEXITCODE -ne 0) { throw "写入 Claude Code 配置失败" }
     } finally {
+        Remove-Item -LiteralPath $configScriptPath -Force -ErrorAction SilentlyContinue
         Remove-Item Env:INSTALL_API_KEY -ErrorAction SilentlyContinue
         Remove-Item Env:INSTALL_PROVIDER_URL -ErrorAction SilentlyContinue
         Remove-Item Env:INSTALL_MODEL -ErrorAction SilentlyContinue
         Remove-Item Env:INSTALL_API_TIMEOUT_MS -ErrorAction SilentlyContinue
+        Remove-Item Env:INSTALL_MAX_CONTEXT_TOKENS -ErrorAction SilentlyContinue
     }
     Write-Success "Claude Code 配置完成，Agent Teams 已启用。"
 }
@@ -307,6 +320,10 @@ try {
     Configure-ClaudeCode
     Write-Host ""
     Write-Success "安装完成！重新打开终端后运行: claude"
+    # 安装脚本是子进程，改不了"已经开着"的那个终端的环境变量，只能在这里给出可直接粘贴的刷新命令。
+    Write-Info "注意：当前已打开的终端不会自动加载新的 PATH。重开一个全新的终端窗口，"
+    Write-Info "      或先在当前窗口执行下面这行刷新，即可直接用 claude:"
+    Write-Host '      $env:Path = [Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [Environment]::GetEnvironmentVariable("Path","User")' -ForegroundColor Yellow
 } catch {
     Write-Failure $_.Exception.Message
     exit 1
