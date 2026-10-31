@@ -1,4 +1,31 @@
-# SLAI-AscendBridge2.5
+<div align="center">
+  <img src="dashboard/assets/logo_g.svg" width="112" alt="SLAI-AscendBridge logo">
+  <h1>SLAI-AscendBridge 2.5</h1>
+  <p><strong>让 PyTorch 模型在昇腾 NPU 上跑得通、跑得对、跑得快。</strong></p>
+  <p>面向 Ascend 的智能体模型适配、质量评测、性能优化与推理部署框架</p>
+  <p>
+    <a href="paper/SLAI-AscendBridge.pdf">📄 论文 PDF</a>
+    &nbsp;·&nbsp;
+    <a href="https://doi.org/10.13140/RG.2.2.29275.73768">🔗 DOI</a>
+    &nbsp;·&nbsp;
+    <a href="#环境准备">🚀 快速开始</a>
+    &nbsp;·&nbsp;
+    <a href="#使用指南">📚 使用指南</a>
+    &nbsp;·&nbsp;
+    <a href="https://gitcode.com/SLAI/SLAI-AscendBridge2-Adaptations">🧩 Adaptation 仓库</a>
+  </p>
+  <p>
+    <a href="paper/SLAI-AscendBridge.pdf"><img src="https://img.shields.io/badge/Paper-PDF-8B1E5A?logo=adobeacrobatreader&amp;logoColor=white" alt="Paper PDF"></a>
+    <a href="https://doi.org/10.13140/RG.2.2.29275.73768"><img src="https://img.shields.io/badge/DOI-10.13140%2FRG.2.2.29275.73768-8B1E5A" alt="DOI"></a>
+    <img src="https://img.shields.io/badge/version-v2.5-B12A6D" alt="Version 2.5">
+    <img src="https://img.shields.io/badge/Ascend-NPU-FF6A00" alt="Ascend NPU">
+    <img src="https://img.shields.io/badge/PyTorch-2.x-EE4C2C?logo=pytorch&amp;logoColor=white" alt="PyTorch">
+    <img src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&amp;logoColor=white" alt="Python 3.10+">
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache_2.0-2EA44F" alt="Apache 2.0 License"></a>
+  </p>
+</div>
+
+> **Citation:** Chongwei Liu, Congliang Chen, Yucheng Zhang, Mengqin Gu, Xiaoman Hu, Ruoyu Sun, Zhihui Wang, and Wanli Ouyang. *SLAI-AscendBridge: Execution-Grounded Evaluation for Agent-Built PyTorch-to-Ascend Migration*. Preprint, 2026. DOI: [10.13140/RG.2.2.29275.73768](https://doi.org/10.13140/RG.2.2.29275.73768)
 
 `SLAI-AscendBridge2` 是一款面向华为昇腾 NPU 的自动化智能体编排、单模型适配与推理部署框架，用于将 PyTorch 模型迁移到 Ascend。它支持从模型发现、环境治理、代码适配、精度评测到 NPU 性能优化的闭环流程；如果需要，也可以继续扩展到第四阶段 `business_benchmark`。
 
@@ -849,12 +876,6 @@ rsync -av /path/to/SLAI-AscendBridge2-Adaptations/adaptations/<name>/ ./adaptati
 ```
 
 然后继续在本框架仓中跑 checker、benchmark、optimization 和 dashboard。
-
-## 论文
-
-该项目的技术报告：
-
-- Liu, Chognwei, et al. [SLAI-AscendBridge: Execution-Grounded Evaluation for Agent-Built PyTorch-to-Ascend Migration](https://zenodo.org/records/21585210). Zenodo, 2026. DOI: [10.5281/zenodo.21585210](https://doi.org/10.5281/zenodo.21585210)
 
 ## 开源说明
 
