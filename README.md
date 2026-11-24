@@ -315,10 +315,11 @@ ZCode 和 DSH 与 Claude Code 使用相同的提供方菜单、模型前缀匹�
 ```bash
 ZCODE_API_KEY=sk-xxx bash scripts/install_zcode.sh glm-4.6
 bash scripts/install_dsh.sh Qwen3-30B-A3B "" http://localhost:8000/v1
+CODEX_PROVIDER=deepseek CODEX_API_KEY=sk-xxx bash scripts/install_codex.sh
 bash scripts/install_codex.sh my-model "" http://localhost:8000/v1
 ```
 
-重新打开终端后使用 `zcode`、`dsh headless "检查当前项目"` 或 `dsh web`。Codex 支持 ChatGPT 登录，或用 `codex --profile slai-ascendbridge` 启动已配置的模型。为 Codex 配置自定义服务时，该地址需要支持 Responses API。
+重新打开终端后使用 `zcode`、`dsh headless "检查当前项目"` 或 `dsh web`。Codex 的交互菜单内置智谱 GLM、阿里百炼 Token Plan、DeepSeek、火山方舟、MiniMax、Kimi 和阶跃星辰，也可以手动填写自定义网关。地址按显式 `BASE_URL`、`CODEX_PROVIDER`、模型名前缀的顺序解析。新版 Codex 使用 OpenAI Responses API，自定义网关需提供 `/responses`。安装完成后用 `codex --profile slai-ascendbridge` 启动已配置的第三方模型。
 
 ZCode 构建默认优先从 GitCode 获取源码，GitHub 是备用源。可设 `ZCODE_CLI_REPOSITORY` 指向内网 Git 镜像，或设 `ZCODE_CLI_BINARY` 指向本地、适配当前系统和 CPU 架构的 ZCode CLI，跳过源码下载和构建。构建会用到 Git 和 npm。三个安装脚本都支持 `NPM_CONFIG_REGISTRY` 指定 npm 源，并在 npm 安装失败时回退到 npmmirror。
 
