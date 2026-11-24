@@ -51,36 +51,35 @@ PROVIDER_NAMES=(
 )
 PROVIDER_KEYS=(  "zhipu"      "bailian"      "deepseek"   "volcano"   "minimax"   "moonshot"   "stepfun"     "anthropic"      "custom" )
 PROVIDER_MODELS=("glm-4.6"    "qwen3-coder-plus" "deepseek-v3" "doubao-seed-1-6-250615" "MiniMax-M1" "kimi-k2"   "step-2"      "claude-sonnet-4-5" "" )
-PROVIDER_URLS=(
-    "https://open.bigmodel.cn/api/paas/v4"
-    "https://dashscope.aliyuncs.com/compatible-mode/v1"
-    "https://api.deepseek.com/v1"
-    "https://ark.cn-beijing.volces.com/api/v3"
-    "https://api.minimaxi.com/v1"
-    "https://api.moonshot.cn/v1"
-    "https://api.stepfun.com/v1"
-    "https://api.anthropic.com"
-    ""
-)
-PROVIDER_PROTOCOLS=(
-    "openai-completions" "openai-completions" "openai-completions"
-    "openai-completions" "openai-completions" "openai-completions"
-    "openai-completions" "anthropic-messages" ""
-)
 
 # ========================
 #  平台(provider) → API URL
 # ========================
 url_for_provider() {
+    case "${API_PROTOCOL:-}" in
+        openai-completions|openai-responses)
+            case "$1" in
+                anthropic|claude)          echo "https://api.anthropic.com" ;;
+                zhipu|glm)                 echo "https://open.bigmodel.cn/api/paas/v4" ;;
+                deepseek)                  echo "https://api.deepseek.com/v1" ;;
+                bailian|dashscope|qwen)    echo "https://dashscope.aliyuncs.com/compatible-mode/v1" ;;
+                volcano|ark|doubao)        echo "https://ark.cn-beijing.volces.com/api/v3" ;;
+                minimax)                   echo "https://api.minimaxi.com/v1" ;;
+                moonshot|kimi)             echo "https://api.moonshot.cn/v1" ;;
+                stepfun|step)              echo "https://api.stepfun.com/v1" ;;
+                *)                         echo "" ;;
+            esac
+            return ;;
+    esac
     case "$1" in
         anthropic|claude)          echo "https://api.anthropic.com" ;;
-        zhipu|glm)                 echo "https://open.bigmodel.cn/api/paas/v4" ;;
-        deepseek)                  echo "https://api.deepseek.com/v1" ;;
-        bailian|dashscope|qwen)    echo "https://dashscope.aliyuncs.com/compatible-mode/v1" ;;
-        volcano|ark|doubao)        echo "https://ark.cn-beijing.volces.com/api/v3" ;;
-        minimax)                   echo "https://api.minimaxi.com/v1" ;;
-        moonshot|kimi)             echo "https://api.moonshot.cn/v1" ;;
-        stepfun|step)              echo "https://api.stepfun.com/v1" ;;
+        zhipu|glm)                 echo "https://open.bigmodel.cn/api/anthropic" ;;
+        deepseek)                  echo "https://api.deepseek.com/anthropic" ;;
+        bailian|dashscope|qwen)    echo "https://dashscope.aliyuncs.com/apps/anthropic" ;;
+        volcano|ark|doubao)        echo "https://ark.cn-beijing.volces.com/api/coding" ;;
+        minimax)                   echo "https://api.minimaxi.com/anthropic" ;;
+        moonshot|kimi)             echo "https://api.moonshot.cn/anthropic" ;;
+        stepfun|step)              echo "https://api.stepfun.com/step_plan" ;;
         *)                         echo "" ;;
     esac
 }
@@ -89,16 +88,17 @@ url_for_provider() {
 #  模型名前缀 → API URL (无 provider 时的回退)
 # ========================
 get_provider_url() {
-    local model="${1,,}"   # 小写化后匹配, 兼容 Qwen3 / GLM-4.6 等大写写法
+    local model
+    model=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')   # 小写化后匹配, 兼容 Qwen3 / GLM-4.6 等大写写法
     case "$model" in
-        claude-*)                  echo "https://api.anthropic.com" ;;
-        deepseek-*)                echo "https://api.deepseek.com/v1" ;;
-        glm-*|chatglm-*)           echo "https://open.bigmodel.cn/api/paas/v4" ;;
-        doubao-*)                  echo "https://ark.cn-beijing.volces.com/api/v3" ;;
-        qwen*|qwq*)                echo "https://dashscope.aliyuncs.com/compatible-mode/v1" ;;
-        minimax-*|MiniMax-*|abab*) echo "https://api.minimaxi.com/v1" ;;
-        kimi-*|moonshot-*)         echo "https://api.moonshot.cn/v1" ;;
-        step-*)                    echo "https://api.stepfun.com/v1" ;;
+        claude-*)                  url_for_provider anthropic ;;
+        deepseek-*)                url_for_provider deepseek ;;
+        glm-*|chatglm-*)           url_for_provider zhipu ;;
+        doubao-*)                  url_for_provider volcano ;;
+        qwen*|qwq*)                url_for_provider bailian ;;
+        minimax-*|abab*)            url_for_provider minimax ;;
+        kimi-*|moonshot-*)         url_for_provider moonshot ;;
+        step-*)                    url_for_provider stepfun ;;
         *)                         echo "" ;;
     esac
 }
@@ -116,18 +116,17 @@ select_provider_menu() {
     echo "  [0] 退出"
     echo ""
     local choice
-    read -e -p "请选择 [1-${#PROVIDER_NAMES[@]}]: " choice
+    IFS= read -r -p "请选择 [1-${#PROVIDER_NAMES[@]}]: " choice
     if [ -z "$choice" ] || [ "$choice" = "0" ]; then
         log_error "未选择提供方"; exit 1
     fi
     if ! [[ "$choice" =~ ^[0-9]+$ ]] || [ "$choice" -lt 1 ] || [ "$choice" -gt "${#PROVIDER_NAMES[@]}" ]; then
         log_error "无效选择: $choice"; exit 1
     fi
-    local idx=$((choice-1))
+    local idx=$((10#$choice-1))
     SELECTED_KEY="${PROVIDER_KEYS[$idx]}"
     SELECTED_MODEL="${PROVIDER_MODELS[$idx]}"
-    SELECTED_URL="${PROVIDER_URLS[$idx]}"
-    SELECTED_PROTOCOL="${PROVIDER_PROTOCOLS[$idx]}"
+    SELECTED_URL=$(url_for_provider "$SELECTED_KEY")
 }
 
 # ========================
@@ -138,28 +137,32 @@ CUSTOM_URL="${3:-}"
 PROVIDER="${DSH_PROVIDER:-}"
 API_PROTOCOL="${DSH_API_PROTOCOL:-}"
 MODEL="${1:-}"
-API_KEY="${2:-}"
+API_KEY="${2-${DSH_API_KEY:-}}"
+[ "$#" -lt 2 ] || API_KEY="${API_KEY:-sk-local}"
 
 # 交互模式 (未传模型名且未指定 provider/url): 先选提供方, 再填模型与 key
 if [ -z "$MODEL" ] && [ -z "$CUSTOM_URL" ] && [ -z "$PROVIDER" ]; then
     select_provider_menu
     PROVIDER="$SELECTED_KEY"
-    API_PROTOCOL="${API_PROTOCOL:-$SELECTED_PROTOCOL}"
     if [ "$PROVIDER" = "custom" ]; then
-        read -e -p "请输入 API BASE_URL (如 http://192.168.1.100:8000/v1): " PROVIDER_URL
+        IFS= read -r -p "请输入 API BASE_URL (如 http://192.168.1.100:8000/v1): " PROVIDER_URL
         [ -z "$PROVIDER_URL" ] && { log_error "API 地址不能为空"; exit 1; }
     else
         PROVIDER_URL="$SELECTED_URL"
     fi
-    read -e -p "请输入模型名称 (默认 ${SELECTED_MODEL}): " MODEL
+    IFS= read -r -p "请输入模型名称 (默认 ${SELECTED_MODEL}): " MODEL
     MODEL="${MODEL:-$SELECTED_MODEL}"
-    read -e -p "请输入 API_KEY (默认 sk-local): " API_KEY
-    API_KEY="${API_KEY:-sk-local}"
+    if [ -z "$API_KEY" ]; then
+        IFS= read -r -s -p "请输入 API_KEY (默认 sk-local): " API_KEY
+        [ ! -t 0 ] || echo
+        API_KEY="${API_KEY:-sk-local}"
+    fi
 else
     # 非交互: 位置参数 + 环境变量
-    [ -z "$MODEL" ] && { read -e -p "请输入模型名称 (默认 deepseek-v4-pro): " MODEL; MODEL="${MODEL:-deepseek-v4-pro}"; }
+    [ -z "$MODEL" ] && { IFS= read -r -p "请输入模型名称 (默认 deepseek-v4-pro): " MODEL; MODEL="${MODEL:-deepseek-v4-pro}"; }
     if [ -z "$API_KEY" ]; then
-        read -e -p "请输入 API_KEY (默认 sk-local): " API_KEY
+        IFS= read -r -s -p "请输入 API_KEY (默认 sk-local): " API_KEY
+        [ ! -t 0 ] || echo
         API_KEY="${API_KEY:-sk-local}"
     fi
     if [ -n "$CUSTOM_URL" ]; then
@@ -181,14 +184,16 @@ else
         echo "已知前缀: claude-*, deepseek-*, glm-*, doubao-*, qwen*, minimax-*, abab*, kimi-*, moonshot-*, step-*"
         echo "已知 provider: anthropic zhipu deepseek bailian volcano minimax moonshot stepfun"
         echo ""
-        read -e -p "请输入 API BASE_URL (如 http://192.168.1.100:8000/v1): " PROVIDER_URL
+        IFS= read -r -p "请输入 API BASE_URL (如 http://192.168.1.100:8000/v1): " PROVIDER_URL
         [ -z "$PROVIDER_URL" ] && { log_error "API 地址不能为空"; exit 1; }
     fi
 fi
 
+[ -n "$MODEL" ] || { log_error "模型名称不能为空"; exit 1; }
+
 if [ -z "$API_PROTOCOL" ]; then
     case "$PROVIDER_URL" in
-        *anthropic*|https://api.anthropic.com*) API_PROTOCOL="anthropic-messages" ;;
+        *anthropic*|https://ark.cn-beijing.volces.com/api/coding*|https://api.stepfun.com/step_plan*) API_PROTOCOL="anthropic-messages" ;;
         *) API_PROTOCOL="openai-completions" ;;
     esac
 fi
@@ -203,7 +208,7 @@ echo "  模型:    ${MODEL}"
 [ -n "$PROVIDER" ] && echo "  平台:    ${PROVIDER}"
 echo "  API URL: ${PROVIDER_URL}"
 echo "  协议:     ${API_PROTOCOL}"
-echo "  API_KEY: $(printf '%*s' "${#API_KEY}" '' | tr ' ' '*')"
+echo "  API_KEY: 已设置"
 echo "========================================"
 echo ""
 
@@ -211,7 +216,7 @@ echo ""
 #    Node.js 安装
 # ========================
 check_nodejs() {
-    if command -v node &>/dev/null; then
+    if command -v node &>/dev/null && command -v npm &>/dev/null; then
         current_version=$(node -v | sed 's/v//')
         major_version=$(echo "$current_version" | cut -d. -f1)
         minor_version=$(echo "$current_version" | cut -d. -f2)
@@ -224,12 +229,17 @@ check_nodejs() {
 
     log_info "Installing Node.js..."
 
-    local machine_arch node_arch node_full_ver node_tar node_archive checksums_file
+    local node_os machine_arch node_arch node_full_ver node_tar node_archive checksums_file
     local dist_base index_data expected_checksum actual_checksum install_prefix version_dir
+    case "$(uname -s)" in
+        Linux) node_os=linux ;;
+        Darwin) node_os=darwin ;;
+        *) log_error "不支持的操作系统: $(uname -s)"; return 1 ;;
+    esac
     machine_arch=$(uname -m)
     case "$machine_arch" in
-        aarch64|arm64) node_arch="linux-arm64" ;;
-        x86_64|amd64) node_arch="linux-x64" ;;
+        aarch64|arm64) node_arch="$node_os-arm64" ;;
+        x86_64|amd64) node_arch="$node_os-x64" ;;
         *) log_error "Unsupported architecture: $machine_arch"; return 1 ;;
     esac
 
@@ -241,7 +251,7 @@ check_nodejs() {
         index_data=""
         for dist_base in "https://nodejs.org/dist" "https://npmmirror.com/mirrors/node"; do
             log_info "Resolving latest Node.js ${NODE_INSTALL_VERSION}.x from ${dist_base}..."
-            if index_data=$(curl --fail --show-error --silent --location --retry 3 --connect-timeout 15 "${dist_base}/index.tab"); then
+            if index_data=$(curl --fail --show-error --silent --location --retry 1 --connect-timeout 10 --max-time 30 "${dist_base}/index.tab"); then
                 # 使用 here-string，避免 awk 提前退出时上游 printf 收到 SIGPIPE；
                 # 在 set -euo pipefail 下，该 SIGPIPE 会让脚本以 141 静默退出。
                 node_full_ver=$(awk -v prefix="v${NODE_INSTALL_VERSION}." 'NR > 1 && index($1, prefix) == 1 { print $1; exit }' <<< "$index_data")
@@ -263,8 +273,10 @@ check_nodejs() {
     local candidate_base
     for candidate_base in "https://nodejs.org/dist" "https://npmmirror.com/mirrors/node"; do
         log_info "Downloading Node.js ${node_full_ver} (${node_arch}) from ${candidate_base}..."
-        if curl --fail --show-error --location --retry 3 --connect-timeout 15 \
-            "${candidate_base}/${node_full_ver}/${node_tar}" -o "$node_archive"; then
+        if curl --fail --show-error --location --retry 1 --connect-timeout 10 --max-time 180 \
+            "${candidate_base}/${node_full_ver}/${node_tar}" -o "$node_archive" &&
+            curl --fail --show-error --silent --location --retry 1 --connect-timeout 10 --max-time 30 \
+                "${candidate_base}/${node_full_ver}/SHASUMS256.txt" -o "$checksums_file"; then
             dist_base="$candidate_base"
             break
         fi
@@ -277,12 +289,6 @@ check_nodejs() {
     fi
 
     log_info "Verifying Node.js archive checksum..."
-    if ! curl --fail --show-error --silent --location --retry 3 --connect-timeout 15 \
-        "${dist_base}/${node_full_ver}/SHASUMS256.txt" -o "$checksums_file"; then
-        rm -f "$node_archive" "$checksums_file"
-        log_error "Failed to download SHASUMS256.txt from ${dist_base}."
-        return 1
-    fi
     expected_checksum=$(awk -v filename="$node_tar" '$2 == filename { print $1; exit }' "$checksums_file")
     if command -v sha256sum >/dev/null 2>&1; then
         actual_checksum=$(sha256sum "$node_archive" | awk '{ print $1 }')
@@ -320,8 +326,6 @@ check_nodejs() {
             fi
         done
         export PATH="${install_prefix}/bin:$PATH"
-        export NPM_CONFIG_PREFIX="$install_prefix"
-        npm config set prefix "$install_prefix"
         touch "$HOME/.bashrc"
         grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || \
             echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
@@ -330,6 +334,8 @@ check_nodejs() {
 
     command -v node >/dev/null 2>&1 || { log_error "Node.js installation completed but node is not on PATH."; return 1; }
     command -v npm >/dev/null 2>&1 || { log_error "Node.js installation completed but npm is not on PATH."; return 1; }
+    node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 24 || major === 24 && minor >= 9 ? 0 : 1)' ||
+        { log_error "DSH 需要 Node.js 24.9 或更新版本"; return 1; }
     log_success "Node.js installed: $(node -v)"
     log_success "npm version: $(npm -v)"
 }
@@ -337,20 +343,34 @@ check_nodejs() {
 # ========================
 #    DSH 安装
 # ========================
-install_dsh() {
-    if command -v dsh &>/dev/null; then
-        log_info "DSH is already installed: $(dsh --version 2>/dev/null || echo 'unknown version')"
-        log_info "Updating DSH to the latest version..."
-    else
-        log_info "Installing DSH..."
+npm_install() {
+    if ! npm install --no-audit --no-fund --fetch-retries=1 --fetch-timeout=60000 "$@"; then
+        log_info "默认 npm 源安装失败，改用 npmmirror..."
+        npm install --no-audit --no-fund --fetch-retries=1 --fetch-timeout=60000 \
+            --registry=https://registry.npmmirror.com "$@"
     fi
+}
 
-    if ! npm install -g "${DSH_PACKAGE}@latest"; then
-        log_error "npm installation from the default registry failed; retrying with npmmirror."
-        npm install -g "${DSH_PACKAGE}@latest" --registry=https://registry.npmmirror.com
+add_bin_to_path() {
+    local bin_dir=$1 rc path_line
+    export PATH="$bin_dir:$PATH"
+    path_line="export PATH=$(printf '%q' "$bin_dir"):\$PATH"
+    for rc in "$HOME/.bashrc" "$HOME/.zshrc"; do
+        if ! grep -Fxq "$path_line" "$rc" 2>/dev/null; then
+            printf '\n%s\n' "$path_line" >> "$rc"
+        fi
+    done
+}
+
+install_dsh() {
+    if [ "$(id -u)" -eq 0 ]; then
+        DSH_NPM_PREFIX=/usr/local
+    else
+        DSH_NPM_PREFIX="$HOME/.local"
     fi
-    command -v pnpm >/dev/null 2>&1 || npm install -g pnpm@latest
-    log_success "DSH is ready: $(dsh --version 2>/dev/null || echo 'latest version installed')"
+    npm_install --global --prefix "$DSH_NPM_PREFIX" "${DSH_PACKAGE}@latest" yaml@2 pnpm@10
+    add_bin_to_path "$DSH_NPM_PREFIX/bin"
+    "$DSH_NPM_PREFIX/bin/dsh" --version
 }
 
 # ========================
@@ -358,74 +378,64 @@ install_dsh() {
 # ========================
 configure_dsh() {
     log_info "Configuring DSH..."
-    local dsh_home route_id node_path
+    local dsh_home route_id
     dsh_home="${DSH_HOME:-$HOME/.dsh}"
-    route_id="$(printf '%s' "${PROVIDER:-slai-custom}" | tr '[:upper:]_' '[:lower:]-' | sed 's/[^a-z0-9-]/-/g')"
-    [ -n "$route_id" ] || route_id="slai-custom"
+    route_id="slai-$(printf '%s' "${PROVIDER:-custom}" | tr '[:upper:]_' '[:lower:]-' | sed 's/[^a-z0-9-]/-/g')"
     mkdir -p "$dsh_home"
 
-    node_path="$(npm root -g)"
-    if ! NODE_PATH="$node_path" node -e 'require("yaml")' >/dev/null 2>&1; then
-        npm install -g yaml@2
-        node_path="$(npm root -g)"
-    fi
     INSTALL_DSH_HOME="$dsh_home" INSTALL_ROUTE_ID="$route_id" INSTALL_MODEL="$MODEL" \
-    INSTALL_BASE_URL="$PROVIDER_URL" INSTALL_PROTOCOL="$API_PROTOCOL" \
-    NODE_PATH="$node_path" node <<'NODE'
-const fs = require("fs");
-const path = require("path");
+    INSTALL_BASE_URL="$PROVIDER_URL" INSTALL_PROTOCOL="$API_PROTOCOL" INSTALL_API_KEY="$API_KEY" \
+    NODE_PATH="$DSH_NPM_PREFIX/lib/node_modules" node <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const { parseEnv } = require("node:util");
 const YAML = require("yaml");
-const filePath = path.join(process.env.INSTALL_DSH_HOME, "cordis.patch.yml");
-let rows = [];
-if (fs.existsSync(filePath)) {
-  const parsed = YAML.parse(fs.readFileSync(filePath, "utf8"));
-  if (Array.isArray(parsed)) rows = parsed;
-}
-function upsert(id, name, config) {
-  const index = rows.findIndex((row) => row && row.id === id);
-  const previous = index >= 0 && rows[index].config ? rows[index].config : {};
-  const next = { id, ...(name ? { name } : {}), config: { ...previous, ...config } };
-  if (index >= 0) rows[index] = next;
-  else rows.push(next);
-}
+const home = process.env.INSTALL_DSH_HOME;
 const route = process.env.INSTALL_ROUTE_ID;
-const existingProviderRow = rows.find((row) => row && row.id === "llm-pi-ai");
-const providers = existingProviderRow?.config?.providers || {};
+const model = process.env.INSTALL_MODEL;
+const ref = "SLAI_DSH_" + route.toUpperCase().replace(/-/g, "_") + "_API_KEY";
+const patchFile = path.join(home, "cordis.patch.yml");
+const envFile = path.join(home, ".env");
+const rows = fs.existsSync(patchFile) ? YAML.parse(fs.readFileSync(patchFile, "utf8")) ?? [] : [];
+if (!Array.isArray(rows)) throw Error("DSH cordis.patch.yml 必须是 YAML 列表");
+
+function upsert(id, name, update) {
+  let row = rows.find((item) => item?.id === id);
+  if (!row) rows.push(row = { id, name });
+  row.config = { ...row.config, ...update };
+}
+
+const providers = rows.find((row) => row?.id === "llm-pi-ai")?.config?.providers ?? {};
 upsert("llm-pi-ai", "@deepseek-ai/dsh-llm-pi-ai", {
-  providers: {
-    ...providers,
-    [route]: {
-      ...(providers[route] || {}),
-      displayName: route,
-      apiKeyEnv: "SLAI_DSH_API_KEY",
-      api: process.env.INSTALL_PROTOCOL,
-      baseURL: process.env.INSTALL_BASE_URL,
-      models: [{ id: process.env.INSTALL_MODEL }],
-    },
-  },
+  providers: { ...providers, [route]: {
+    ...providers[route],
+    displayName: route,
+    apiKeyEnv: ref,
+    api: process.env.INSTALL_PROTOCOL,
+    baseURL: process.env.INSTALL_BASE_URL,
+    models: [{ id: model }],
+  }},
 });
-upsert("agent-default-model", "@deepseek-ai/dsh-agent-default-model", {
-  provider: route,
-  model: process.env.INSTALL_MODEL,
-});
-fs.writeFileSync(filePath, YAML.stringify(rows), { mode: 0o600 });
-fs.chmodSync(filePath, 0o600);
+upsert("agent-default-model", "@deepseek-ai/dsh-agent-default-model", { provider: route, model });
+
+const key = process.env.INSTALL_API_KEY;
+const assignment = ['"', "'", "`"].map((quote) => ref + "=" + quote + key + quote)
+  .find((line) => !/[\r\n]/.test(key) && parseEnv(line)[ref] === key);
+if (!assignment) throw Error("API Key 含无法写入 DSH .env 的字符");
+const existing = fs.existsSync(envFile) ? fs.readFileSync(envFile, "utf8") : "";
+const lines = existing.split(/\r?\n/).filter((line) => !new RegExp("^\\s*(?:export\\s+)?" + ref + "\\s*=").test(line));
+const envConfig = lines.join("\n").replace(/\n*$/, "") + "\n" + assignment + "\n";
+for (const [file, value] of [[envFile, envConfig], [patchFile, YAML.stringify(rows)]]) {
+  const tmp = file + "." + require("node:crypto").randomUUID();
+  try {
+    fs.writeFileSync(tmp, value, { mode: 0o600, flag: "wx" });
+    fs.renameSync(tmp, file);
+  } finally {
+    fs.rmSync(tmp, { force: true });
+  }
+}
 NODE
 
-    INSTALL_API_KEY="$API_KEY" node <<'NODE'
-const fs = require("fs");
-const os = require("os");
-const path = require("path");
-const quoted = "'" + process.env.INSTALL_API_KEY.replace(/'/g, "'\\''") + "'";
-for (const name of [".bashrc", ".zshrc"]) {
-  const file = path.join(os.homedir(), name);
-  const old = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
-  const lines = old.split(/\r?\n/).filter((line) => !line.startsWith("export SLAI_DSH_API_KEY="));
-  lines.push("export SLAI_DSH_API_KEY=" + quoted);
-  fs.writeFileSync(file, lines.filter(Boolean).join("\n") + "\n", { mode: 0o600 });
-}
-NODE
-    export SLAI_DSH_API_KEY="$API_KEY"
     log_success "DSH configured: provider=$route_id model=$MODEL protocol=$API_PROTOCOL"
 }
 
@@ -441,7 +451,7 @@ main() {
     log_success "Installation completed successfully!"
     echo ""
     echo "🚀 使用方式: dsh web"
-    echo "              dsh --profile headless \"检查当前项目\""
+    echo "              dsh headless \"检查当前项目\""
 }
 
 main "$@"

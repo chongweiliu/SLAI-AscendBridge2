@@ -300,6 +300,28 @@ export HF_ENDPOINT=https://hf-mirror.com
 export TASK_QUEUE_ENABLE=1
 ```
 
+### 安装终端智能体
+
+在仓库根目录执行。Linux、容器和 macOS 使用 `.sh`，Windows 可运行同名的 `.cmd` 或 `.ps1`。
+
+```bash
+bash scripts/install_zcode.sh
+bash scripts/install_dsh.sh
+bash scripts/install_codex.sh
+```
+
+ZCode 和 DSH 与 Claude Code 使用相同的提供方菜单、模型前缀匹配和 `模型 API_KEY BASE_URL` 参数顺序。内置提供方默认使用与 Claude Code 相同的 Anthropic 兼容地址。自定义地址可用 `ZCODE_API_PROTOCOL` 或 `DSH_API_PROTOCOL` 指定 `anthropic-messages`、`openai-completions` 或 `openai-responses`。
+
+```bash
+ZCODE_API_KEY=sk-xxx bash scripts/install_zcode.sh glm-4.6
+bash scripts/install_dsh.sh Qwen3-30B-A3B "" http://localhost:8000/v1
+bash scripts/install_codex.sh my-model "" http://localhost:8000/v1
+```
+
+重新打开终端后使用 `zcode`、`dsh headless "检查当前项目"` 或 `dsh web`。Codex 支持 ChatGPT 登录，或用 `codex --profile slai-ascendbridge` 启动已配置的模型。为 Codex 配置自定义服务时，该地址需要支持 Responses API。
+
+ZCode 构建默认优先从 GitCode 获取源码，GitHub 是备用源。可设 `ZCODE_CLI_REPOSITORY` 指向内网 Git 镜像，或设 `ZCODE_CLI_BINARY` 指向本地、适配当前系统和 CPU 架构的 ZCode CLI，跳过源码下载和构建。构建会用到 Git 和 npm。三个安装脚本都支持 `NPM_CONFIG_REGISTRY` 指定 npm 源，并在 npm 安装失败时回退到 npmmirror。
+
 ### 5. 权重准备建议
 
 建议提前把模型权重准备到本地路径，避免 agent 在适配过程中临时下载导致等待时间过长或受网络影响。  
