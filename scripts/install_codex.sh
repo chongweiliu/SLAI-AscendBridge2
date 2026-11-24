@@ -128,8 +128,7 @@ if [ -n "$MODEL$API_KEY$BASE_URL$PROVIDER" ] || [ -t 0 ]; then
         API_KEY=sk-local
     fi
     if [ -z "$API_KEY" ] && [ -t 0 ]; then
-        IFS= read -r -s -p "请输入 API_KEY: " API_KEY
-        echo
+        IFS= read -r -p "请输入 API_KEY（输入可见）: " API_KEY
     fi
     [ -n "$API_KEY" ] || { log_error "请传入 API_KEY 或设置 CODEX_API_KEY"; exit 1; }
     log_info "提供方: $PROVIDER_NAME | 模型: $MODEL | BASE_URL: $BASE_URL"
