@@ -1,7 +1,7 @@
 #!/bin/bash
 # 安装或更新 Codex CLI（Linux、容器、macOS）。
 # 用法: bash install_codex.sh [模型名称] [API_KEY] [BASE_URL]
-# 无参数默认安装 CLI，可登录 ChatGPT。传模型或服务地址时配置 Responses API。
+# 无参数在终端中选择第三方提供方。配置使用 OpenAI Responses API。
 set -euo pipefail
 
 NODE_MIN_VERSION=22
@@ -14,51 +14,125 @@ log_error()   { echo "❌ $*" >&2; }
 MODEL="${1:-${CODEX_MODEL:-}}"
 API_KEY="${2-${CODEX_API_KEY:-}}"
 BASE_URL="${3:-${CODEX_BASE_URL:-}}"
+PROVIDER="${CODEX_PROVIDER:-}"
+
+PROVIDERS=(
+    "zhipu|智谱 GLM Coding Plan|glm-5.4|https://open.bigmodel.cn/api/v1"
+    "bailian|阿里百炼 Token Plan|auto|https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1"
+    "deepseek|DeepSeek|deepseek-v4-pro|https://api.deepseek.com"
+    "volcano|火山方舟 Coding Plan|ark-code-latest|https://ark.cn-beijing.volces.com/api/coding/v3"
+    "minimax|MiniMax M Plan（中国）|MiniMax-M3.1-Flash|https://api.minimax.cn/v1"
+    "moonshot|Kimi Code（中国）|kimi-for-coding|https://api.kimi.com/coding/v1"
+    "stepfun|阶跃星辰 Step Plan|step-3.7-flash|https://api.stepfun.com/step_plan/v1"
+    "custom|自定义 Responses 网关||"
+)
+
+select_provider_menu() {
+    local row key name model url choice index=1
+    echo "请选择模型提供方:"
+    for row in "${PROVIDERS[@]}"; do
+        IFS='|' read -r key name model url <<< "$row"
+        printf '  [%s] %s\n' "$index" "$name"
+        index=$((index+1))
+    done
+    echo "  [0] 退出"
+    IFS= read -r -p "请选择 [1-${#PROVIDERS[@]}]: " choice
+    [ "$choice" != 0 ] || exit 0
+    if ! [[ "$choice" =~ ^[1-9]$ ]] || [ "$choice" -gt "${#PROVIDERS[@]}" ]; then
+        log_error "无效选择: $choice"
+        exit 1
+    fi
+    local selected="${PROVIDERS[$((choice-1))]}"
+    PROVIDER="${selected%%|*}"
+}
+
+provider_for_model() {
+    local normalized
+    normalized=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+    case "$normalized" in
+        glm-*|chatglm-*) echo zhipu ;;
+        qwen*|qwq*) echo bailian ;;
+        deepseek-*) echo deepseek ;;
+        doubao-*|ark-code-*) echo volcano ;;
+        minimax-*) echo minimax ;;
+        kimi-*|k3|k3-*|k3.*|moonshot-*) echo moonshot ;;
+        step-*) echo stepfun ;;
+        *) echo custom ;;
+    esac
+}
+
+resolve_provider() {
+    local row key name default_model default_url
+    PROVIDER=$(printf '%s' "$PROVIDER" | tr '[:upper:]' '[:lower:]')
+    case "$PROVIDER" in
+        glm) PROVIDER=zhipu ;;
+        qwen|dashscope) PROVIDER=bailian ;;
+        ark|doubao) PROVIDER=volcano ;;
+        kimi) PROVIDER=moonshot ;;
+        step) PROVIDER=stepfun ;;
+    esac
+    for row in "${PROVIDERS[@]}"; do
+        IFS='|' read -r key name default_model default_url <<< "$row"
+        if [ "$key" = "$PROVIDER" ]; then
+            BASE_URL="$default_url"
+            PROVIDER_NAME="$name"
+            if [ -z "$MODEL" ] && [ -n "$default_model" ]; then
+                if [ -t 0 ]; then
+                    IFS= read -r -p "请输入模型名称 (默认 $default_model): " MODEL
+                fi
+                MODEL="${MODEL:-$default_model}"
+            fi
+            return 0
+        fi
+    done
+    log_error "未知 CODEX_PROVIDER: $PROVIDER"
+    return 1
+}
 
 if [ "$#" -gt 3 ]; then
     log_error "用法: bash install_codex.sh [模型名称] [API_KEY] [BASE_URL]"
     exit 1
 fi
 
+PROVIDER_NAME="自定义 Responses 网关"
 CONFIGURE_PROVIDER=false
-if [ -n "$MODEL$API_KEY$BASE_URL" ]; then
+if [ -n "$MODEL$API_KEY$BASE_URL$PROVIDER" ] || [ -t 0 ]; then
     CONFIGURE_PROVIDER=true
-elif [ -t 0 ]; then
-    printf '%s\n' "  [1] 安装 Codex，使用 ChatGPT 登录（默认）" "  [2] 安装并配置 Responses API"
-    IFS= read -r -p "请选择 [1-2]: " choice
-    case "$choice" in
-        ""|1) ;;
-        2) CONFIGURE_PROVIDER=true ;;
-        *) log_error "无效选择: $choice"; exit 1 ;;
-    esac
-fi
-
-if $CONFIGURE_PROVIDER; then
-    if [ -z "$BASE_URL" ] && [ -t 0 ]; then
-        IFS= read -r -p "请输入 Responses API BASE_URL (默认 https://api.openai.com/v1): " BASE_URL
-    fi
-    BASE_URL="${BASE_URL:-https://api.openai.com/v1}"
-    BASE_URL="${BASE_URL%/}"
-    case "$BASE_URL" in
-        http://?*|https://?*) ;;
-        *) log_error "BASE_URL 必须是 HTTP(S) 地址"; exit 1 ;;
-    esac
-    if [ -z "$MODEL" ]; then
-        if [ "$BASE_URL" = "https://api.openai.com/v1" ]; then
-            MODEL=gpt-5.4
-        elif [ -t 0 ]; then
-            IFS= read -r -p "请输入模型名称: " MODEL
+    if [ -z "$BASE_URL" ]; then
+        if [ -z "$PROVIDER" ]; then
+            if [ -z "$MODEL" ] && [ -t 0 ]; then
+                select_provider_menu
+            else
+                PROVIDER=$(provider_for_model "$MODEL")
+            fi
+        fi
+        resolve_provider
+        if [ -z "$BASE_URL" ] && [ -t 0 ]; then
+            IFS= read -r -p "请输入第三方 OpenAI Responses BASE_URL: " BASE_URL
         fi
     fi
+
+    BASE_URL="${BASE_URL%/}"
+    case "$BASE_URL" in
+        */chat/completions|*/messages)
+            log_error "请填写支持 OpenAI Responses API 的 BASE_URL"
+            exit 1 ;;
+        http://?*|https://?*) BASE_URL="${BASE_URL%/responses}" ;;
+        *) log_error "请通过第三个参数或 CODEX_BASE_URL 指定第三方 HTTP(S) 地址"; exit 1 ;;
+    esac
+    if [ -z "$MODEL" ] && [ -t 0 ]; then
+        IFS= read -r -p "请输入模型名称: " MODEL
+    fi
     [ -n "$MODEL" ] || { log_error "请指定模型名称"; exit 1; }
-    if [ "$#" -ge 2 ] && [ "$BASE_URL" != "https://api.openai.com/v1" ]; then
-        API_KEY="${API_KEY:-sk-local}"
+    if [ "$#" -ge 2 ] && [ -z "$API_KEY" ]; then
+        API_KEY=sk-local
     fi
     if [ -z "$API_KEY" ] && [ -t 0 ]; then
         IFS= read -r -s -p "请输入 API_KEY: " API_KEY
         echo
     fi
     [ -n "$API_KEY" ] || { log_error "请传入 API_KEY 或设置 CODEX_API_KEY"; exit 1; }
+    log_info "提供方: $PROVIDER_NAME | 模型: $MODEL | BASE_URL: $BASE_URL"
 fi
 
 check_nodejs() {
@@ -215,7 +289,8 @@ npm_install --global --prefix "$npm_prefix" --include=optional @openai/codex@lat
 add_bin_to_path "$npm_prefix/bin"
 
 if $CONFIGURE_PROVIDER; then
-    INSTALL_MODEL="$MODEL" INSTALL_BASE_URL="$BASE_URL" INSTALL_API_KEY="$API_KEY" node <<'NODE'
+    INSTALL_MODEL="$MODEL" INSTALL_BASE_URL="$BASE_URL" INSTALL_API_KEY="$API_KEY" \
+    INSTALL_PROVIDER_NAME="$PROVIDER_NAME" node <<'NODE'
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
@@ -227,9 +302,10 @@ const lines = [
   marker,
   "model = " + tomlString(process.env.INSTALL_MODEL),
   'model_provider = "slai-ascendbridge"',
+  'forced_login_method = "api"',
   "",
   "[model_providers.slai-ascendbridge]",
-  'name = "SLAI Responses API"',
+  "name = " + tomlString(process.env.INSTALL_PROVIDER_NAME),
   "base_url = " + tomlString(process.env.INSTALL_BASE_URL),
   'wire_api = "responses"',
   "experimental_bearer_token = " + tomlString(process.env.INSTALL_API_KEY),
