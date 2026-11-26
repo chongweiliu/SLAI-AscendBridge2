@@ -248,8 +248,7 @@ try {
         if (-not $Model) { throw "请指定模型名称" }
         if (-not $ApiKey -and $PSBoundParameters.ContainsKey("ApiKey")) { $ApiKey = "sk-local" }
         if (-not $ApiKey -and $interactive) {
-            $secret = Read-Host "请输入 API_KEY" -AsSecureString
-            $ApiKey = [Net.NetworkCredential]::new("", $secret).Password
+            $ApiKey = Read-Host "请输入 API_KEY（输入可见）"
         }
         if (-not $ApiKey) { throw "请传入 API_KEY 或设置 CODEX_API_KEY" }
         Write-Info "提供方: $providerName | 模型: $Model | BASE_URL: $BaseUrl"
