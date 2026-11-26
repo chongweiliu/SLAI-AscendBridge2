@@ -191,15 +191,36 @@ echo ""
 # ========================
 #    Node.js 安装
 # ========================
+npm_is_healthy() {
+    command -v npm >/dev/null 2>&1 || return 1
+
+    # 加载 npm 的依赖树，同时隔离已有全局包的 ELSPROBLEMS；此检查不访问 registry。
+    local probe_dir status=0
+    probe_dir=$(mktemp -d) || return 1
+    if mkdir -p "$probe_dir/lib/node_modules"; then
+        npm ls --global --depth=0 --prefix "$probe_dir" >/dev/null || status=$?
+    else
+        status=1
+    fi
+    rm -rf "$probe_dir"
+    return "$status"
+}
+
 check_nodejs() {
+    local current_version major_version repair_npm=0
     if command -v node &>/dev/null; then
         current_version=$(node -v | sed 's/v//')
         major_version=$(echo "$current_version" | cut -d. -f1)
         if [ "$major_version" -ge "$NODE_MIN_VERSION" ]; then
-            log_success "Node.js is already installed: v$current_version"
-            return 0
+            if npm_is_healthy; then
+                log_success "Node.js is already installed: v$current_version"
+                return 0
+            fi
+            log_info "npm is missing or failed its health check; installing a clean Node.js and npm in the current user's directory."
+            repair_npm=1
+        else
+            log_info "Node.js v$current_version < $NODE_MIN_VERSION, upgrading..."
         fi
-        log_info "Node.js v$current_version < $NODE_MIN_VERSION, upgrading..."
     fi
 
     log_info "Installing Node.js..."
@@ -280,8 +301,8 @@ check_nodejs() {
     fi
     rm -f "$checksums_file"
 
-    # root 或 /usr/local 可写时使用系统目录，否则完整安装到当前用户目录。
-    if [ "$(id -u)" -eq 0 ] || [ -w /usr/local ]; then
+    # 修复 npm 时隔离旧依赖；常规安装仍优先使用可写的系统目录。
+    if [ "$repair_npm" -eq 0 ] && { [ "$(id -u)" -eq 0 ] || [ -w /usr/local ]; }; then
         install_prefix="/usr/local"
         mkdir -p "$install_prefix"
         log_info "Installing Node.js into ${install_prefix}..."
@@ -289,19 +310,28 @@ check_nodejs() {
         export PATH="/usr/local/bin:$PATH"
     else
         install_prefix="$HOME/.local"
-        version_dir="${install_prefix}/lib/nodejs/node-${node_full_ver}-${node_arch}"
-        log_info "/usr/local is not writable; installing Node.js into ${version_dir}..."
-        mkdir -p "$version_dir" "${install_prefix}/bin"
-        tar -xzf "$node_archive" -C "$version_dir" --strip-components=1
+        mkdir -p "${install_prefix}/lib/nodejs" "${install_prefix}/bin"
+        version_dir=$(mktemp -d "${install_prefix}/lib/nodejs/node-${node_full_ver}-${node_arch}.XXXXXX")
+        log_info "Installing Node.js into ${version_dir}..."
+        if ! tar -xzf "$node_archive" -C "$version_dir" --strip-components=1 ||
+           [ ! -x "${version_dir}/bin/node" ] || [ ! -x "${version_dir}/bin/npm" ] ||
+           ! PATH="${version_dir}/bin:$PATH" npm_is_healthy; then
+            rm -rf "$version_dir"
+            rm -f "$node_archive"
+            log_error "The newly installed Node.js/npm failed to initialize."
+            return 1
+        fi
         local executable
         for executable in node npm npx corepack; do
             if [ -e "${version_dir}/bin/${executable}" ]; then
                 ln -sfn "${version_dir}/bin/${executable}" "${install_prefix}/bin/${executable}"
             fi
         done
-        export PATH="${install_prefix}/bin:$PATH"
+        export PATH="${version_dir}/bin:${install_prefix}/bin:$PATH"
         export NPM_CONFIG_PREFIX="$install_prefix"
-        npm config set prefix "$install_prefix"
+        if [ "$repair_npm" -eq 0 ]; then
+            npm config set prefix "$install_prefix"
+        fi
         touch "$HOME/.bashrc"
         grep -Fq 'export PATH="$HOME/.local/bin:$PATH"' "$HOME/.bashrc" || \
             echo 'export PATH="$HOME/.local/bin:$PATH"' >> "$HOME/.bashrc"
@@ -309,7 +339,7 @@ check_nodejs() {
     rm -f "$node_archive"
 
     command -v node >/dev/null 2>&1 || { log_error "Node.js installation completed but node is not on PATH."; return 1; }
-    command -v npm >/dev/null 2>&1 || { log_error "Node.js installation completed but npm is not on PATH."; return 1; }
+    npm_is_healthy || { log_error "Node.js installation completed but npm failed its health check."; return 1; }
     log_success "Node.js installed: $(node -v)"
     log_success "npm version: $(npm -v)"
 }
