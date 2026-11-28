@@ -206,6 +206,19 @@ npm_is_healthy() {
     return "$status"
 }
 
+probe_node_download() {
+    local url="$1" metrics status=0
+    # 测试实际安装包的前 256 KiB，最多等待 4 秒。超时前收到的数据仍可用于测速。
+    metrics=$(LC_ALL=C curl --silent --location --range 0-262143 --max-filesize 262144 \
+        --connect-timeout 3 --max-time 4 --output /dev/null \
+        --write-out '%{http_code} %{size_download} %{speed_download}' "$url") || status=$?
+    if [ "$status" -ne 0 ] && [ "$status" -ne 28 ]; then
+        echo 0
+        return
+    fi
+    LC_ALL=C awk '{ printf "%.0f\n", ($1 == 206 && $2 > 0 ? $3 : 0) }' <<< "$metrics"
+}
+
 check_nodejs() {
     local current_version major_version repair_npm=0
     if command -v node &>/dev/null; then
@@ -227,6 +240,8 @@ check_nodejs() {
 
     local machine_arch node_arch node_full_ver node_tar node_archive checksums_file
     local dist_base index_data expected_checksum actual_checksum install_prefix version_dir
+    local official_dist="https://nodejs.org/dist" mirror_dist="https://npmmirror.com/mirrors/node"
+    local download_sources=("$official_dist" "$mirror_dist")
     machine_arch=$(uname -m)
     case "$machine_arch" in
         aarch64|arm64) node_arch="linux-arm64" ;;
@@ -240,7 +255,7 @@ check_nodejs() {
         [[ "$node_full_ver" == v* ]] || node_full_ver="v${node_full_ver}"
     else
         index_data=""
-        for dist_base in "https://nodejs.org/dist" "https://npmmirror.com/mirrors/node"; do
+        for dist_base in "${download_sources[@]}"; do
             log_info "Resolving latest Node.js ${NODE_INSTALL_VERSION}.x from ${dist_base}..."
             if index_data=$(curl --fail --show-error --silent --location --retry 3 --connect-timeout 15 "${dist_base}/index.tab"); then
                 # 使用 here-string，避免 awk 提前退出时上游 printf 收到 SIGPIPE；
@@ -257,12 +272,32 @@ check_nodejs() {
 
     # 使用 gzip 包，避免 minimal 容器缺少 xz 时静默退出。
     node_tar="node-${node_full_ver}-${node_arch}.tar.gz"
+
+    local probe_dir official_pid mirror_pid official_speed mirror_speed
+    probe_dir=$(mktemp -d) || return 1
+    log_info "Testing Node.js download speed from both sources..."
+    probe_node_download "$official_dist/$node_full_ver/$node_tar" > "$probe_dir/official" &
+    official_pid=$!
+    probe_node_download "$mirror_dist/$node_full_ver/$node_tar" > "$probe_dir/mirror" &
+    mirror_pid=$!
+    wait "$official_pid" || true
+    wait "$mirror_pid" || true
+    official_speed=$(cat "$probe_dir/official")
+    mirror_speed=$(cat "$probe_dir/mirror")
+    rm -rf "$probe_dir"
+    official_speed=${official_speed:-0}
+    mirror_speed=${mirror_speed:-0}
+    log_info "Node.js probe speeds: nodejs.org ${official_speed} B/s, npmmirror.com ${mirror_speed} B/s (0 = no valid sample)."
+    if [ "$mirror_speed" -gt "$official_speed" ]; then
+        download_sources=("$mirror_dist" "$official_dist")
+    fi
+
     node_archive=$(mktemp "/tmp/${node_tar}.XXXXXX")
     checksums_file=$(mktemp "/tmp/node-shasums.XXXXXX")
 
     dist_base=""
     local candidate_base
-    for candidate_base in "https://nodejs.org/dist" "https://npmmirror.com/mirrors/node"; do
+    for candidate_base in "${download_sources[@]}"; do
         log_info "Downloading Node.js ${node_full_ver} (${node_arch}) from ${candidate_base}..."
         if curl --fail --show-error --location --retry 3 --connect-timeout 15 \
             "${candidate_base}/${node_full_ver}/${node_tar}" -o "$node_archive"; then
